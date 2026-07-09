@@ -20,6 +20,5 @@
       "Lark-ready integration"
     ],
     "defaultPrompt": "Set up TeamFlow for this project."
-  },
-  "mcpServers": "./.mcp.json"
+  }
 }
