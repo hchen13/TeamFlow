@@ -1,0 +1,25 @@
+{
+  "name": "teamflow",
+  "version": "0.1.0",
+  "description": "Coordinate multi-agent project roles through shared team workflows.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "TeamFlow 同舟",
+    "shortDescription": "Coordinate PM, TL, QA, and developer agents through shared workflows.",
+    "longDescription": "TeamFlow 同舟 helps Codex sessions form a multi-agent project team, assign PM, TL, QA, and developer roles, connect shared project boards, and keep work moving through explicit team workflows.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Multi-agent teamwork",
+      "Role assignment",
+      "Project workflow coordination",
+      "Board-backed task state",
+      "Lark-ready integration"
+    ],
+    "defaultPrompt": "Set up TeamFlow for this project."
+  },
+  "mcpServers": "./.mcp.json"
+}
