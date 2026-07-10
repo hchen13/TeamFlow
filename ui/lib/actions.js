@@ -1,7 +1,7 @@
 "use server";
 
 import { redirect } from "next/navigation";
-import { fetchLarkAppInfo, run, startLarkBaseAuth, workspaceArgs } from "./teamflow";
+import { run, startLarkUserAuthFlow, workspaceArgs } from "./teamflow";
 
 const messages = {
   zh: {
@@ -14,52 +14,46 @@ const messages = {
     identityRemoved: "身份已删除",
     identityRefreshed: "应用名称已刷新",
     identitySaved: "飞书身份已保存",
-    larkSaved: "飞书配置已保存",
     workflowUpdated: "Workflow 已更新"
   },
   en: {
     agentRegistered: "Agent registered",
     agentRemoved: "Agent removed",
     authGenerated: "Authorization link generated. Open it to confirm.",
-    boardCreated: "Base created",
-    boardSaved: "Base saved",
+    boardCreated: "Bitable created",
+    boardSaved: "Bitable saved",
     identityDefaulted: "Default identity updated",
     identityRemoved: "Identity removed",
     identityRefreshed: "App name refreshed",
     identitySaved: "Lark identity saved",
-    larkSaved: "Lark configuration saved",
     workflowUpdated: "Workflow updated"
   }
 };
 
-export async function configureLark(formData) {
-  const args = ["configure-lark", ...workspaceArgs()];
+export async function configureLarkIdentity(formData) {
+  const args = ["configure-lark-identity", ...workspaceArgs()];
   const env = {};
   const lang = language(formData);
-  const scope = field(formData, "scope");
-  const step = field(formData, "step") || (scope === "board" ? "board" : "identity");
-  const authMode = field(formData, "auth_mode") || "bot";
   const appId = field(formData, "app_id");
   const appSecret = field(formData, "app_secret");
-  const label = scope === "board" ? "board" : authMode === "bot" && appId ? `bot:${appId}` : authMode;
-  add(args, "--label", label);
-  add(args, "--base-url", field(formData, "base_url"));
-  add(args, "--auth-mode", authMode);
-  if (authMode === "bot") {
-    add(args, "--app-id", appId);
-    const appInfo = await safeAppInfo(appId, appSecret, field(formData, "lark_domain"));
-    add(args, "--app-name", appInfo.name);
-    add(args, "--app-avatar-url", appInfo.avatarUrl);
-    addSecret(args, env, "--app-secret-env", "TEAMFLOW_UI_APP_SECRET", appSecret);
-  }
-  await finish(args, env, "lark", scope === "board" ? "boardSaved" : scope === "identity" ? "identitySaved" : "larkSaved", lang, step);
+  add(args, "--app-id", appId);
+  add(args, "--domain", field(formData, "lark_domain") || "feishu");
+  addSecret(args, env, "--app-secret-env", "TEAMFLOW_UI_APP_SECRET", appSecret);
+  await finish(args, env, "lark", "identitySaved", lang, "identity");
+}
+
+export async function configureLarkBoard(formData) {
+  const args = ["configure-lark-board", ...workspaceArgs()];
+  const lang = language(formData);
+  add(args, "--url", field(formData, "board_url"));
+  await finish(args, {}, "lark", "boardSaved", lang, "board");
 }
 
 export async function startLarkUserAuth(formData) {
   let target;
   const lang = language(formData);
   try {
-    const auth = await startLarkBaseAuth();
+    const auth = await startLarkUserAuthFlow();
     const params = new URLSearchParams({
       tab: "lark",
       lang,
@@ -77,16 +71,16 @@ export async function startLarkUserAuth(formData) {
 
 export async function refreshLarkIdentity(formData) {
   const lang = language(formData);
-  const args = ["refresh-lark-app-name", ...workspaceArgs()];
-  add(args, "--connection-id", field(formData, "connection_id"));
+  const args = ["refresh-lark-identity", ...workspaceArgs()];
+  add(args, "--identity-id", field(formData, "identity_id"));
   add(args, "--domain", field(formData, "lark_domain") || "feishu");
   await finish(args, {}, "lark", "identityRefreshed", lang, "identity");
 }
 
 export async function removeLarkIdentity(formData) {
   const lang = language(formData);
-  const args = ["remove-lark-connection", ...workspaceArgs()];
-  add(args, "--connection-id", field(formData, "connection_id"));
+  const args = ["remove-lark-identity", ...workspaceArgs()];
+  add(args, "--identity-id", field(formData, "identity_id"));
   await finish(args, {}, "lark", "identityRemoved", lang, "identity");
 }
 
@@ -100,8 +94,8 @@ export async function createLarkBoard(formData) {
 
 export async function setDefaultLarkIdentity(formData) {
   const lang = language(formData);
-  const args = ["set-default-lark-connection", ...workspaceArgs()];
-  add(args, "--connection-id", field(formData, "connection_id"));
+  const args = ["set-default-lark-identity", ...workspaceArgs()];
+  add(args, "--identity-id", field(formData, "identity_id"));
   await finish(args, {}, "lark", "identityDefaulted", lang, "identity");
 }
 
@@ -143,14 +137,6 @@ async function finish(args, env, tab, okMessage, lang, step = "") {
     target = redirectTarget(tab, lang, error.message, true, step);
   }
   redirect(target);
-}
-
-async function safeAppInfo(appId, appSecret, domain) {
-  try {
-    return await fetchLarkAppInfo(appId, appSecret, domain);
-  } catch {
-    return {};
-  }
 }
 
 function field(formData, name) {

@@ -1,6 +1,7 @@
 import TeamFlowClient from "./teamflow-client";
 import {
-  configureLark,
+  configureLarkBoard,
+  configureLarkIdentity,
   createLarkBoard,
   refreshLarkIdentity,
   registerAgent,
@@ -23,7 +24,8 @@ export default async function Page({ searchParams }) {
   return (
     <TeamFlowClient
       actions={{
-        configureLark,
+        configureLarkBoard,
+        configureLarkIdentity,
         createLarkBoard,
         refreshLarkIdentity,
         registerAgent,

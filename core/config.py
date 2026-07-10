@@ -22,11 +22,11 @@ def resolve_workspace_paths(workspace: str | None) -> WorkspacePaths:
     return WorkspacePaths(root=root, state_dir=state_dir, db_path=state_dir / DB_NAME)
 
 
-def parse_lark_base_url(base_url: str | None) -> dict[str, str | None]:
-    if not base_url:
+def parse_lark_bitable_url(board_url: str | None) -> dict[str, str | None]:
+    if not board_url:
         return {"base_token": None, "table_id": None, "view_id": None}
 
-    parsed = urlparse(base_url)
+    parsed = urlparse(board_url)
     parts = [part for part in parsed.path.split("/") if part]
     base_token = None
     if len(parts) >= 2 and parts[0] == "base":
@@ -64,4 +64,3 @@ def ensure_workspace_gitignore(paths: WorkspacePaths) -> bool:
 
     gitignore_path.write_text(f"{entry}\n", encoding="utf-8")
     return True
-

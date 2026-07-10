@@ -30,8 +30,8 @@ const text = {
     previousStep: "上一步",
     nextStep: "下一步",
     larkBoard: "多维表格",
-    baseUrl: "多维表格 URL",
-    baseUrlHint: "多维表格会作为 TeamFlow 的协作看板，用来保存任务、状态和操作记录。",
+    boardUrl: "多维表格 URL",
+    boardUrlHint: "多维表格会作为 TeamFlow 的协作看板，用来保存任务、状态和操作记录。",
     boardName: "看板名称",
     createBoardWithIdentity: "用默认身份创建",
     accessMode: "身份",
@@ -106,9 +106,9 @@ const text = {
     stepBoard: "Step 3",
     previousStep: "Previous",
     nextStep: "Next",
-    larkBoard: "Base",
-    baseUrl: "Base URL",
-    baseUrlHint: "The Base is the TeamFlow board for tasks, states, and activity history.",
+    larkBoard: "Bitable",
+    boardUrl: "Bitable URL",
+    boardUrlHint: "Bitable is the TeamFlow board for tasks, states, and activity history.",
     boardName: "Board name",
     createBoardWithIdentity: "Create with default identity",
     accessMode: "Identity",
@@ -139,7 +139,7 @@ const text = {
     authReady: "Authorization link generated",
     authExpires: "Valid for about {seconds} seconds. The page is waiting for approval in the background.",
     saveIdentity: "Save identity",
-    saveBoard: "Save Base",
+    saveBoard: "Save Bitable",
     agentTitle: "Agent",
     agentSubtitle: "Register sessions against predefined roles in the selected workflow.",
     role: "Role",
@@ -173,7 +173,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, currentR
   const [noticeVisible, setNoticeVisible] = useState(Boolean(message));
   const t = text[lang];
   const board = state.lark_board || {};
-  const botConnections = state.lark_identities?.filter((identity) => identity.auth_mode === "bot" && identity.app_id) || [];
+  const botIdentities = state.lark_identities?.filter((identity) => identity.auth_mode === "bot" && identity.app_id) || [];
   const currentWorkflow = state.current_workflow || state.workflows[0] || {};
   const tabMessage = message && ((tab === "agent") === (initialTab === "agent"));
   const roleOptions = useMemo(() => currentRoles, [currentRoles]);
@@ -236,7 +236,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, currentR
             authMode={authMode}
             authUrl={authUrl}
             board={board}
-            botConnections={botConnections}
+            botIdentities={botIdentities}
             currentWorkflow={currentWorkflow}
             initialStep={initialStep}
             lang={lang}
@@ -275,7 +275,7 @@ function TabNav({ tab, setTab, t }) {
   );
 }
 
-function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, botConnections, currentWorkflow, createAppUrl, initialStep, lang, setAuthMode, state, t }) {
+function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, botIdentities, currentWorkflow, createAppUrl, initialStep, lang, setAuthMode, state, t }) {
   const larkDomain = lang === "en" ? "larksuite" : "feishu";
   const hasIdentity = Boolean(state.lark_identities?.length);
   const [activeStep, setActiveStep] = useState(() => initialLarkStep(initialStep, hasIdentity));
@@ -314,7 +314,7 @@ function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, bot
             authExpires={authExpires}
             authMode={authMode}
             authUrl={authUrl}
-            botConnections={botConnections}
+            botIdentities={botIdentities}
             createAppUrl={createAppUrl}
             lang={lang}
             larkDomain={larkDomain}
@@ -322,7 +322,7 @@ function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, bot
             t={t}
           />
         ) : (
-          <BoardStep actions={actions} board={board} boardName={boardName} canCreateBoard={botConnections.length > 0} lang={lang} larkDomain={larkDomain} t={t} />
+          <BoardStep actions={actions} board={board} boardName={boardName} canCreateBoard={botIdentities.length > 0} lang={lang} larkDomain={larkDomain} t={t} />
         )}
         <StepFooter activeStep={activeStep} hasIdentity={hasIdentity} setActiveStep={setActiveStep} t={t} />
       </section>
@@ -394,7 +394,7 @@ function WorkflowStep({ actions, currentWorkflow, lang, state, t }) {
   );
 }
 
-function IdentityStep({ actions, appUrl, authExpires, authMode, authUrl, botConnections, createAppUrl, lang, larkDomain, setAuthMode, t }) {
+function IdentityStep({ actions, appUrl, authExpires, authMode, authUrl, botIdentities, createAppUrl, lang, larkDomain, setAuthMode, t }) {
   return (
     <div className="configStep">
       <div className="sectionHeader">
@@ -405,11 +405,9 @@ function IdentityStep({ actions, appUrl, authExpires, authMode, authUrl, botConn
         </div>
       </div>
 
-      <form action={actions.configureLark} className="stackForm">
-        <input name="scope" type="hidden" value="identity" suppressHydrationWarning />
+      <form action={actions.configureLarkIdentity} className="stackForm">
         <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
         <input name="lark_domain" type="hidden" value={larkDomain} suppressHydrationWarning />
-        <input name="step" type="hidden" value="identity" suppressHydrationWarning />
 
         <fieldset>
           <legend>{t.accessMode}</legend>
@@ -474,9 +472,9 @@ function IdentityStep({ actions, appUrl, authExpires, authMode, authUrl, botConn
       {authMode === "bot" ? (
         <div className="connectionList">
           <h4>{t.botApps}</h4>
-          {botConnections.length ? (
-            botConnections.map((connection) => (
-              <BotConnectionRow actions={actions} connection={connection} key={connection.id} lang={lang} larkDomain={larkDomain} t={t} />
+          {botIdentities.length ? (
+            botIdentities.map((identity) => (
+              <BotIdentityRow actions={actions} identity={identity} key={identity.id} lang={lang} larkDomain={larkDomain} t={t} />
             ))
           ) : (
             <p className="emptyInline">{t.emptyBotApps}</p>
@@ -497,36 +495,36 @@ function PendingSubmitButton({ className, label }) {
   );
 }
 
-function BotConnectionRow({ actions, connection, lang, larkDomain, t }) {
-  const hasName = Boolean(connection.app_name);
-  const hasAvatar = Boolean(connection.app_avatar_url);
+function BotIdentityRow({ actions, identity, lang, larkDomain, t }) {
+  const hasName = Boolean(identity.app_name);
+  const hasAvatar = Boolean(identity.app_avatar_url);
   return (
     <div className="connectionRow">
       <div className="connectionAvatar">
-        {connection.app_avatar_url ? (
-          <img alt="" src={connection.app_avatar_url} />
+        {identity.app_avatar_url ? (
+          <img alt="" src={identity.app_avatar_url} />
         ) : (
           <DefaultBotAvatar />
         )}
       </div>
       <div className="connectionMain">
         <div className="connectionTitle">
-          <strong>{connection.app_name || t.appNameUnknown}</strong>
-          {connection.is_default ? <span className="defaultMark">{t.defaultIdentity}</span> : null}
+          <strong>{identity.app_name || t.appNameUnknown}</strong>
+          {identity.is_default ? <span className="defaultMark">{t.defaultIdentity}</span> : null}
         </div>
-        <span className="connectionMeta">{t.appId}: <code>{connection.app_id}</code></span>
+        <span className="connectionMeta">{t.appId}: <code>{identity.app_id}</code></span>
         {hasName ? (
-          <span>{t.appNameSyncedAt}: {shortDate(connection.app_name_synced_at)}</span>
+          <span>{t.appNameSyncedAt}: {shortDate(identity.app_name_synced_at)}</span>
         ) : (
           <p className="permissionHint">
-            {t.appNameMissing} <a href={permissionUrl(connection.app_id, larkDomain)} rel="noreferrer" target="_blank">{t.openPermission}</a>
+            {t.appNameMissing} <a href={permissionUrl(identity.app_id, larkDomain)} rel="noreferrer" target="_blank">{t.openPermission}</a>
             <small>{t.permissionScopes}</small>
           </p>
         )}
         {hasName && !hasAvatar ? (
           <p className="appInfoWarning">
             <span title={t.appInfoIncomplete}>!</span>
-            {t.appInfoIncomplete} <a href={permissionUrl(connection.app_id, larkDomain)} rel="noreferrer" target="_blank">{t.fixAppInfo}</a>
+            {t.appInfoIncomplete} <a href={permissionUrl(identity.app_id, larkDomain)} rel="noreferrer" target="_blank">{t.fixAppInfo}</a>
           </p>
         ) : null}
       </div>
@@ -534,19 +532,19 @@ function BotConnectionRow({ actions, connection, lang, larkDomain, t }) {
         <form action={actions.refreshLarkIdentity}>
           <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
           <input name="lark_domain" type="hidden" value={larkDomain} suppressHydrationWarning />
-          <input name="connection_id" type="hidden" value={connection.id} suppressHydrationWarning />
+          <input name="identity_id" type="hidden" value={identity.id} suppressHydrationWarning />
           <button className="secondary mini" type="submit">{t.refresh}</button>
         </form>
-        {!connection.is_default ? (
+        {!identity.is_default ? (
           <form action={actions.setDefaultLarkIdentity}>
             <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
-            <input name="connection_id" type="hidden" value={connection.id} suppressHydrationWarning />
+            <input name="identity_id" type="hidden" value={identity.id} suppressHydrationWarning />
             <button className="secondary mini" type="submit">{t.setDefault}</button>
           </form>
         ) : null}
         <form action={actions.removeLarkIdentity}>
           <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
-          <input name="connection_id" type="hidden" value={connection.id} suppressHydrationWarning />
+          <input name="identity_id" type="hidden" value={identity.id} suppressHydrationWarning />
           <button className="ghost mini" type="submit">{t.deleteIdentity}</button>
         </form>
       </div>
@@ -568,18 +566,15 @@ function DefaultBotAvatar() {
 function BoardStep({ actions, board, boardName, canCreateBoard, lang, larkDomain, t }) {
   const configured = Boolean(board.base_token || board.base_url);
   return (
-    <form action={actions.configureLark} className="stackForm">
-      <input name="scope" type="hidden" value="board" suppressHydrationWarning />
+    <form action={actions.configureLarkBoard} className="stackForm">
       <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
       <input name="lark_domain" type="hidden" value={larkDomain} suppressHydrationWarning />
-      <input name="auth_mode" type="hidden" value="user" suppressHydrationWarning />
-      <input name="step" type="hidden" value="board" suppressHydrationWarning />
       <div className="configStep">
         <div className="sectionHeader">
           <div>
             <span className="stepLabel">{t.stepBoard}</span>
             <h3>{t.larkBoard}</h3>
-            <p>{t.baseUrlHint}</p>
+            <p>{t.boardUrlHint}</p>
           </div>
           <span className={configured ? "statusBadge saved" : "statusBadge"}>{configured ? t.saved : t.notConfigured}</span>
         </div>
@@ -593,8 +588,8 @@ function BoardStep({ actions, board, boardName, canCreateBoard, lang, larkDomain
           </div>
         ) : null}
         <label className="field">
-          {t.baseUrl}
-          <input name="base_url" defaultValue={board.base_url || ""} placeholder="https://.../base/..." suppressHydrationWarning />
+          {t.boardUrl}
+          <input name="board_url" defaultValue={board.base_url || ""} placeholder="https://.../base/..." suppressHydrationWarning />
         </label>
         <div className="formFooter">
           <button className="primary" type="submit">{t.saveBoard}</button>

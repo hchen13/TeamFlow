@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -15,15 +16,16 @@ if str(ROOT) not in sys.path:
 
 from core.db import (
     DEFAULT_WORKFLOW_KEY,
-    configure_lark,
+    configure_lark_board,
+    configure_lark_identity,
     create_lark_board,
     init_workspace,
     inspect_workspace,
-    refresh_lark_app_name,
+    refresh_lark_identity,
     register_agent,
-    remove_lark_connection,
+    remove_lark_identity,
     select_workflow,
-    set_default_lark_connection,
+    set_default_lark_identity,
     unregister_agent,
 )
 
@@ -48,43 +50,40 @@ def main() -> int:
     inspect_parser.add_argument("--json", action="store_true", help="Print raw JSON.")
     inspect_parser.set_defaults(func=cmd_inspect)
 
-    lark_parser = subparsers.add_parser("configure-lark", help="Store Lark board and credential settings locally.")
-    add_workspace_args(lark_parser)
-    lark_parser.add_argument("--label", default="default", help="Connection label.")
-    lark_parser.add_argument("--base-url", help="Lark Base URL.")
-    lark_parser.add_argument("--base-token", help="Lark Base app_token/base_token.")
-    lark_parser.add_argument("--table-id", help="Lark Base table ID.")
-    lark_parser.add_argument("--view-id", help="Lark Base view ID.")
-    lark_parser.add_argument("--auth-mode", choices=["bot", "user"], default="bot", help="Lark access identity.")
-    lark_parser.add_argument("--app-id", help="Lark app ID.")
-    lark_parser.add_argument("--app-name", help="Lark app name.")
-    lark_parser.add_argument("--app-avatar-url", help="Lark app avatar URL.")
-    lark_parser.add_argument("--app-secret-env", help="Environment variable containing Lark app secret.")
-    lark_parser.add_argument("--access-token-env", help="Environment variable containing user access token.")
-    lark_parser.add_argument("--refresh-token-env", help="Environment variable containing user refresh token.")
-    lark_parser.add_argument("--write-gitignore", action="store_true", help="Add .teamflow/ to the workspace .gitignore.")
-    lark_parser.set_defaults(func=cmd_configure_lark)
+    identity_parser = subparsers.add_parser("configure-lark-identity", help="Store a Lark bot identity locally.")
+    add_workspace_args(identity_parser)
+    identity_parser.add_argument("--app-id", required=True, help="Lark app ID.")
+    identity_parser.add_argument("--app-secret-env", required=True, help="Environment variable containing the Lark app secret.")
+    identity_parser.add_argument("--domain", choices=["feishu", "larksuite"], default="feishu", help="Open platform domain.")
+    identity_parser.add_argument("--write-gitignore", action="store_true", help="Add .teamflow/ to the workspace .gitignore.")
+    identity_parser.set_defaults(func=cmd_configure_lark_identity)
 
-    refresh_lark_parser = subparsers.add_parser("refresh-lark-app-name", help="Refresh a saved Lark app name.")
+    board_parser = subparsers.add_parser("configure-lark-board", help="Store a Feishu/Lark Bitable URL locally.")
+    add_workspace_args(board_parser)
+    board_parser.add_argument("--url", required=True, help="Full Bitable URL.")
+    board_parser.add_argument("--write-gitignore", action="store_true", help="Add .teamflow/ to the workspace .gitignore.")
+    board_parser.set_defaults(func=cmd_configure_lark_board)
+
+    refresh_lark_parser = subparsers.add_parser("refresh-lark-identity", help="Refresh a saved Lark identity's app information.")
     add_workspace_args(refresh_lark_parser)
-    refresh_lark_parser.add_argument("--connection-id", required=True, help="Lark connection ID.")
+    refresh_lark_parser.add_argument("--identity-id", required=True, help="Lark identity ID.")
     refresh_lark_parser.add_argument("--domain", choices=["feishu", "larksuite"], default="feishu", help="Open platform domain.")
-    refresh_lark_parser.set_defaults(func=cmd_refresh_lark_app_name)
+    refresh_lark_parser.set_defaults(func=cmd_refresh_lark_identity)
 
-    remove_lark_parser = subparsers.add_parser("remove-lark-connection", help="Remove a saved Lark connection.")
+    remove_lark_parser = subparsers.add_parser("remove-lark-identity", help="Remove a saved Lark identity.")
     add_workspace_args(remove_lark_parser)
-    remove_lark_parser.add_argument("--connection-id", required=True, help="Lark connection ID.")
-    remove_lark_parser.set_defaults(func=cmd_remove_lark_connection)
+    remove_lark_parser.add_argument("--identity-id", required=True, help="Lark identity ID.")
+    remove_lark_parser.set_defaults(func=cmd_remove_lark_identity)
 
-    default_lark_parser = subparsers.add_parser("set-default-lark-connection", help="Set the default Lark identity.")
+    default_lark_parser = subparsers.add_parser("set-default-lark-identity", help="Set the default Lark identity.")
     add_workspace_args(default_lark_parser)
-    default_lark_parser.add_argument("--connection-id", required=True, help="Lark connection ID.")
-    default_lark_parser.set_defaults(func=cmd_set_default_lark_connection)
+    default_lark_parser.add_argument("--identity-id", required=True, help="Lark identity ID.")
+    default_lark_parser.set_defaults(func=cmd_set_default_lark_identity)
 
-    create_board_parser = subparsers.add_parser("create-lark-board", help="Create a Lark Base with the default bot identity.")
+    create_board_parser = subparsers.add_parser("create-lark-board", help="Create a Feishu/Lark Bitable with the default bot identity.")
     add_workspace_args(create_board_parser)
     create_board_parser.add_argument("--domain", choices=["feishu", "larksuite"], default="feishu", help="Open platform domain.")
-    create_board_parser.add_argument("--name", default="", help="Base name.")
+    create_board_parser.add_argument("--name", default="", help="Bitable file name.")
     create_board_parser.set_defaults(func=cmd_create_lark_board)
 
     register_parser = subparsers.add_parser("register-agent", help="Register a role-bound agent session locally.")
@@ -160,42 +159,36 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_configure_lark(args: argparse.Namespace) -> int:
-    result = configure_lark(
+def cmd_configure_lark_identity(args: argparse.Namespace) -> int:
+    result = configure_lark_identity(
         args.workspace,
-        label=args.label,
-        base_url=args.base_url,
-        base_token=args.base_token,
-        table_id=args.table_id,
-        view_id=args.view_id,
-        auth_mode=args.auth_mode,
         app_id=args.app_id,
-        app_name=args.app_name,
-        app_avatar_url=args.app_avatar_url,
         app_secret=env_value(args.app_secret_env),
-        access_token=env_value(args.access_token_env),
-        refresh_token=env_value(args.refresh_token_env),
+        domain=args.domain,
         write_gitignore=args.write_gitignore,
     )
     print_json(result)
-    if result["missing"]:
-        print(f"teamflow: Lark config is stored but incomplete: {', '.join(result['missing'])}", file=sys.stderr)
     return 0
 
 
-def cmd_refresh_lark_app_name(args: argparse.Namespace) -> int:
-    result = refresh_lark_app_name(args.workspace, connection_id=args.connection_id, domain=args.domain)
+def cmd_configure_lark_board(args: argparse.Namespace) -> int:
+    print_json(configure_lark_board(args.workspace, board_url=args.url, write_gitignore=args.write_gitignore))
+    return 0
+
+
+def cmd_refresh_lark_identity(args: argparse.Namespace) -> int:
+    result = refresh_lark_identity(args.workspace, identity_id=args.identity_id, domain=args.domain)
     print_json(result)
     return 0 if result["ok"] else 1
 
 
-def cmd_remove_lark_connection(args: argparse.Namespace) -> int:
-    print_json(remove_lark_connection(args.workspace, connection_id=args.connection_id))
+def cmd_remove_lark_identity(args: argparse.Namespace) -> int:
+    print_json(remove_lark_identity(args.workspace, identity_id=args.identity_id))
     return 0
 
 
-def cmd_set_default_lark_connection(args: argparse.Namespace) -> int:
-    print_json(set_default_lark_connection(args.workspace, connection_id=args.connection_id))
+def cmd_set_default_lark_identity(args: argparse.Namespace) -> int:
+    print_json(set_default_lark_identity(args.workspace, identity_id=args.identity_id))
     return 0
 
 
@@ -258,35 +251,16 @@ def cmd_self_check(args: argparse.Namespace) -> int:
     checks_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="workspace-", dir=checks_dir) as workspace:
         init_workspace(workspace, display_name="TeamFlow check")
-        configure_lark(
+        with patch("core.db.fetch_lark_app_info", return_value=("Check app", "https://example.com/avatar.png", None)):
+            configure_lark_identity(
+                workspace,
+                app_id="cli_check",
+                app_secret="dummy",
+                domain="feishu",
+            )
+        configure_lark_board(
             workspace,
-            label="bot:cli_check",
-            base_url=None,
-            base_token=None,
-            table_id=None,
-            view_id=None,
-            auth_mode="bot",
-            app_id="cli_check",
-            app_name="Check app",
-            app_avatar_url="https://example.com/avatar.png",
-            app_secret="dummy",
-            access_token=None,
-            refresh_token=None,
-        )
-        configure_lark(
-            workspace,
-            label="board",
-            base_url="https://example.feishu.cn/base/bascnCheck?table=tblCheck&view=vewCheck",
-            base_token=None,
-            table_id=None,
-            view_id=None,
-            auth_mode="user",
-            app_id=None,
-            app_name=None,
-            app_avatar_url=None,
-            app_secret=None,
-            access_token=None,
-            refresh_token=None,
+            board_url="https://example.feishu.cn/base/bascnCheck?table=tblCheck&view=vewCheck",
         )
         register_agent(workspace, role="pm", harness_type="codex", session_id="thread_pm")
         try:

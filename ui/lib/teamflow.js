@@ -27,7 +27,7 @@ export async function run(args, env = {}) {
   }
 }
 
-export async function startLarkBaseAuth() {
+export async function startLarkUserAuthFlow() {
   let payload;
   try {
     const result = await execFileAsync(larkCliPath, ["auth", "login", "--domain", "base", "--no-wait", "--json"], {
@@ -51,34 +51,6 @@ export async function startLarkBaseAuth() {
   child.unref();
 
   return payload;
-}
-
-export async function fetchLarkAppInfo(appId, appSecret, domain) {
-  if (!appId || !appSecret) {
-    return {};
-  }
-  const origin = domain === "larksuite" ? "https://open.larksuite.com" : "https://open.feishu.cn";
-  const tokenResponse = await fetch(`${origin}/open-apis/auth/v3/tenant_access_token/internal`, {
-    method: "POST",
-    headers: { "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ app_id: appId, app_secret: appSecret })
-  });
-  const tokenPayload = await tokenResponse.json();
-  const token = tokenPayload?.tenant_access_token;
-  if (!token) {
-    return {};
-  }
-
-  const lang = domain === "larksuite" ? "en_us" : "zh_cn";
-  const appResponse = await fetch(`${origin}/open-apis/application/v6/applications/${encodeURIComponent(appId)}?lang=${lang}`, {
-    headers: { authorization: `Bearer ${token}` }
-  });
-  const appPayload = await appResponse.json();
-  const app = appPayload?.data?.app || {};
-  return {
-    name: app.app_name || appPayload?.data?.app_name || app.name || appPayload?.data?.name || "",
-    avatarUrl: app.avatar_url || appPayload?.data?.avatar_url || ""
-  };
 }
 
 export function workspaceArgs() {

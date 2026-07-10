@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import ensure_workspace_gitignore, parse_lark_base_url, resolve_workspace_paths
+from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
 from .migrations import MIGRATIONS
 
 
@@ -99,65 +99,84 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
         }
 
 
-def configure_lark(
+def configure_lark_identity(
     workspace: str | None,
     *,
-    base_url: str | None,
-    base_token: str | None,
-    table_id: str | None,
-    view_id: str | None,
-    auth_mode: str,
-    app_id: str | None,
-    app_name: str | None,
-    app_avatar_url: str | None,
-    app_secret: str | None,
-    access_token: str | None,
-    refresh_token: str | None,
-    label: str = "default",
+    app_id: str,
+    app_secret: str,
+    domain: str,
     write_gitignore: bool = False,
 ) -> dict[str, Any]:
     init_result = init_workspace(workspace, write_gitignore=write_gitignore)
     paths = resolve_workspace_paths(workspace)
-    parsed = parse_lark_base_url(base_url)
-    final_base_token = base_token or parsed["base_token"]
-    final_table_id = table_id or parsed["table_id"]
-    final_view_id = view_id or parsed["view_id"]
-    auth_mode = normalize_auth_mode(auth_mode)
+    app_id = app_id.strip()
+    if not app_id or not app_secret:
+        raise ValueError("app_id and app_secret are required")
+    app_name, app_avatar_url, error = fetch_lark_app_info(app_id, app_secret, domain)
 
     with connect(paths.db_path) as conn:
         workspace_id = workspace_id_for_root(conn, paths.root)
         timestamp = now()
-        if label == "board":
-            connection_id = upsert_lark_board(
-                conn,
-                workspace_id=workspace_id,
-                identity_id=default_lark_identity_id(conn, workspace_id),
-                base_url=base_url,
-                base_token=final_base_token,
-                table_id=final_table_id,
-                view_id=final_view_id,
-            )
-        else:
-            connection_id = upsert_lark_identity(
-                conn,
-                workspace_id=workspace_id,
-                auth_mode=auth_mode,
-                app_id=app_id,
-                app_name=app_name,
-                app_avatar_url=app_avatar_url,
-                app_name_synced_at=timestamp if app_name else None,
-                is_default=None,
-                app_secret=app_secret,
-                access_token=access_token,
-                refresh_token=refresh_token,
+        identity_id = upsert_lark_identity(
+            conn,
+            workspace_id=workspace_id,
+            auth_mode="bot",
+            app_id=app_id,
+            app_name=app_name,
+            app_avatar_url=app_avatar_url,
+            app_name_synced_at=timestamp if app_name else None,
+            is_default=None,
+            app_secret=app_secret,
+            access_token=None,
+            refresh_token=None,
+        )
+        if error:
+            conn.execute(
+                "UPDATE lark_identities SET last_error = ?, updated_at = ? WHERE id = ?",
+                (error, timestamp, identity_id),
             )
 
     return {
         "ok": True,
         **init_result,
-        "lark_board_id" if label == "board" else "lark_identity_id": connection_id,
+        "lark_identity_id": identity_id,
+        "app_name": app_name,
+        "app_avatar_url": app_avatar_url,
+        "metadata_error": error,
         "access_status": "unverified",
-        "missing": lark_missing_items(auth_mode, final_base_token, final_table_id, app_id, app_secret, access_token, include_board=label == "board"),
+    }
+
+
+def configure_lark_board(
+    workspace: str | None,
+    *,
+    board_url: str,
+    write_gitignore: bool = False,
+) -> dict[str, Any]:
+    init_result = init_workspace(workspace, write_gitignore=write_gitignore)
+    paths = resolve_workspace_paths(workspace)
+    board_url = board_url.strip()
+    parsed = parse_lark_bitable_url(board_url)
+    if not parsed["base_token"]:
+        raise ValueError("a valid Feishu/Lark Bitable URL is required")
+
+    with connect(paths.db_path) as conn:
+        workspace_id = workspace_id_for_root(conn, paths.root)
+        board_id = upsert_lark_board(
+            conn,
+            workspace_id=workspace_id,
+            identity_id=default_lark_identity_id(conn, workspace_id),
+            base_url=board_url,
+            base_token=parsed["base_token"],
+            table_id=parsed["table_id"],
+            view_id=parsed["view_id"],
+        )
+
+    return {
+        "ok": True,
+        **init_result,
+        "lark_board_id": board_id,
+        "access_status": "unverified",
     }
 
 
@@ -177,40 +196,40 @@ def select_workflow(workspace: str | None, *, workflow: str) -> dict[str, Any]:
     return {"ok": True, **init_result, "workflow_key": workflow_key}
 
 
-def remove_lark_connection(workspace: str | None, *, connection_id: str) -> dict[str, Any]:
+def remove_lark_identity(workspace: str | None, *, identity_id: str) -> dict[str, Any]:
     paths = resolve_workspace_paths(workspace)
     with connect(paths.db_path) as conn:
         workspace_id = workspace_id_for_root(conn, paths.root)
         cursor = conn.execute(
             "DELETE FROM lark_identities WHERE workspace_id = ? AND id = ?",
-            (workspace_id, connection_id),
+            (workspace_id, identity_id),
         )
         ensure_default_lark_identity(conn, workspace_id)
     return {"ok": True, "deleted": cursor.rowcount}
 
 
-def set_default_lark_connection(workspace: str | None, *, connection_id: str) -> dict[str, Any]:
+def set_default_lark_identity(workspace: str | None, *, identity_id: str) -> dict[str, Any]:
     paths = resolve_workspace_paths(workspace)
     with connect(paths.db_path) as conn:
         workspace_id = workspace_id_for_root(conn, paths.root)
         row = conn.execute(
             "SELECT id FROM lark_identities WHERE workspace_id = ? AND id = ?",
-            (workspace_id, connection_id),
+            (workspace_id, identity_id),
         ).fetchone()
         if row is None:
             raise ValueError("lark identity not found")
         conn.execute("UPDATE lark_identities SET is_default = 0 WHERE workspace_id = ?", (workspace_id,))
-        conn.execute("UPDATE lark_identities SET is_default = 1, updated_at = ? WHERE id = ?", (now(), connection_id))
-    return {"ok": True, "connection_id": connection_id}
+        conn.execute("UPDATE lark_identities SET is_default = 1, updated_at = ? WHERE id = ?", (now(), identity_id))
+    return {"ok": True, "identity_id": identity_id}
 
 
-def refresh_lark_app_name(workspace: str | None, *, connection_id: str, domain: str) -> dict[str, Any]:
+def refresh_lark_identity(workspace: str | None, *, identity_id: str, domain: str) -> dict[str, Any]:
     paths = resolve_workspace_paths(workspace)
     with connect(paths.db_path) as conn:
         workspace_id = workspace_id_for_root(conn, paths.root)
         row = conn.execute(
             "SELECT * FROM lark_identities WHERE workspace_id = ? AND id = ?",
-            (workspace_id, connection_id),
+            (workspace_id, identity_id),
         ).fetchone()
         if row is None:
             raise ValueError("lark identity not found")
@@ -221,14 +240,14 @@ def refresh_lark_app_name(workspace: str | None, *, connection_id: str, domain: 
         if app_name:
             conn.execute(
                 "UPDATE lark_identities SET app_name = ?, app_avatar_url = ?, app_name_synced_at = ?, last_error = NULL, updated_at = ? WHERE id = ?",
-                (app_name, app_avatar_url, timestamp, timestamp, connection_id),
+                (app_name, app_avatar_url, timestamp, timestamp, identity_id),
             )
-            return {"ok": True, "connection_id": connection_id, "app_name": app_name, "app_avatar_url": app_avatar_url}
+            return {"ok": True, "identity_id": identity_id, "app_name": app_name, "app_avatar_url": app_avatar_url}
         conn.execute(
             "UPDATE lark_identities SET last_error = ?, updated_at = ? WHERE id = ?",
-            (error or "failed to read app name", timestamp, connection_id),
+            (error or "failed to read app name", timestamp, identity_id),
         )
-    return {"ok": False, "connection_id": connection_id, "last_error": error or "failed to read app name"}
+    return {"ok": False, "identity_id": identity_id, "last_error": error or "failed to read app name"}
 
 
 def create_lark_board(workspace: str | None, *, domain: str, name: str) -> dict[str, Any]:
@@ -237,7 +256,7 @@ def create_lark_board(workspace: str | None, *, domain: str, name: str) -> dict[
     with connect(paths.db_path) as conn:
         workspace_id = workspace_id_for_root(conn, paths.root)
         workspace_row = conn.execute("SELECT display_name FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
-        base_name = name.strip() or f"{(workspace_row['display_name'] if workspace_row and workspace_row['display_name'] else paths.root.name)} 项目看板"
+        board_name = name.strip() or f"{(workspace_row['display_name'] if workspace_row and workspace_row['display_name'] else paths.root.name)} 项目看板"
         identity = conn.execute(
             """
             SELECT * FROM lark_identities
@@ -248,7 +267,7 @@ def create_lark_board(workspace: str | None, *, domain: str, name: str) -> dict[
             (workspace_id,),
         ).fetchone()
         if identity is None:
-            raise ValueError("save a bot identity before creating a Base")
+            raise ValueError("save a bot identity before creating a Bitable")
         origin = "https://open.larksuite.com" if domain == "larksuite" else "https://open.feishu.cn"
         token_payload, error = post_json(
             f"{origin}/open-apis/auth/v3/tenant_access_token/internal",
@@ -260,7 +279,7 @@ def create_lark_board(workspace: str | None, *, domain: str, name: str) -> dict[
             raise ValueError(error or token_payload.get("msg") or "failed to get tenant access token")
         base_payload, error = post_json(
             f"{origin}/open-apis/base/v3/bases",
-            {"name": base_name},
+            {"name": board_name},
             {"Authorization": f"Bearer {token}"},
         )
         if error:
@@ -278,7 +297,7 @@ def create_lark_board(workspace: str | None, *, domain: str, name: str) -> dict[
             table_id=None,
             view_id=None,
         )
-    return {"ok": True, "lark_board_id": board_id, "base_url": base_url, "base_token": base_token}
+    return {"ok": True, "lark_board_id": board_id, "board_url": base_url}
 
 
 def register_agent(
@@ -438,7 +457,7 @@ def upsert_lark_identity(
         ensure_default_lark_identity(conn, workspace_id)
         return existing["id"]
 
-    connection_id = f"lark_{uuid.uuid4().hex}"
+    identity_id = f"lark_{uuid.uuid4().hex}"
     default_value = is_default if is_default is not None else int(auth_mode == "bot" and app_id and not has_default_lark_identity(conn, workspace_id))
     conn.execute(
         """
@@ -446,11 +465,11 @@ def upsert_lark_identity(
           (id, workspace_id, auth_mode, app_id, app_name, app_avatar_url, app_name_synced_at, is_default, app_secret, access_token, refresh_token, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (connection_id, workspace_id, auth_mode, app_id, app_name, app_avatar_url, app_name_synced_at, default_value, app_secret, access_token, refresh_token, timestamp, timestamp),
+        (identity_id, workspace_id, auth_mode, app_id, app_name, app_avatar_url, app_name_synced_at, default_value, app_secret, access_token, refresh_token, timestamp, timestamp),
     )
     if default_value:
-        conn.execute("UPDATE lark_identities SET is_default = 0 WHERE workspace_id = ? AND id != ?", (workspace_id, connection_id))
-    return connection_id
+        conn.execute("UPDATE lark_identities SET is_default = 0 WHERE workspace_id = ? AND id != ?", (workspace_id, identity_id))
+    return identity_id
 
 
 def upsert_lark_board(
@@ -639,31 +658,11 @@ def current_schema_version(conn: sqlite3.Connection) -> str:
     return row["id"] if row else ""
 
 
-def normalize_auth_mode(value: str) -> str:
-    if value not in {"bot", "user"}:
-        raise ValueError("auth_mode must be bot or user")
-    return value
-
-
 def normalize_key(value: str, name: str) -> str:
     normalized = value.strip().lower()
     if not normalized:
         raise ValueError(f"{name} is required")
     return normalized
-
-
-def lark_missing_items(auth_mode: str, base_token: str | None, table_id: str | None, app_id: str | None, app_secret: str | None, access_token: str | None, *, include_board: bool) -> list[str]:
-    missing = []
-    if include_board and not base_token:
-        missing.append("base_token")
-    if include_board and not table_id:
-        missing.append("table_id")
-    if auth_mode == "bot":
-        if not app_id:
-            missing.append("app_id")
-        if not app_secret:
-            missing.append("app_secret")
-    return missing
 
 
 def fetch_lark_app_info(app_id: str, app_secret: str, domain: str) -> tuple[str | None, str | None, str | None]:
