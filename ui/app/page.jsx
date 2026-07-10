@@ -9,7 +9,8 @@ import {
   selectWorkflow,
   setDefaultLarkIdentity,
   startLarkUserAuth,
-  unregisterAgent
+  unregisterAgent,
+  verifyLarkUserIdentity
 } from "../lib/actions";
 import { getState } from "../lib/teamflow";
 
@@ -33,9 +34,12 @@ export default async function Page({ searchParams }) {
         selectWorkflow,
         setDefaultLarkIdentity,
         startLarkUserAuth,
-        unregisterAgent
+        unregisterAgent,
+        verifyLarkUserIdentity
       }}
       authExpires={textParam(params?.auth_expires)}
+      boardUrlDraft={textParam(params?.board_url)}
+      initialAuthMode={textParam(params?.auth_mode)}
       authUrl={textParam(params?.auth_url)}
       currentRoles={currentRoles}
       initialLang={textParam(params?.lang)}

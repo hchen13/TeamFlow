@@ -9,11 +9,15 @@ const messages = {
     agentRemoved: "Agent 已移除",
     authGenerated: "授权链接已生成，打开后完成确认",
     boardCreated: "多维表格已创建",
-    boardSaved: "多维表格已保存",
+    boardSaved: "多维表格链接已验证",
     identityDefaulted: "默认身份已更新",
     identityRemoved: "身份已删除",
     identityRefreshed: "应用名称已刷新",
     identitySaved: "飞书身份已保存",
+    invalidBoardUrl: "请输入有效的飞书多维表格链接。",
+    userAuthExpired: "用户授权已过期，请重新授权后再检查。",
+    userIdentityRefreshed: "用户身份已刷新",
+    userIdentityVerified: "用户身份已连接",
     workflowUpdated: "Workflow 已更新"
   },
   en: {
@@ -21,11 +25,15 @@ const messages = {
     agentRemoved: "Agent removed",
     authGenerated: "Authorization link generated. Open it to confirm.",
     boardCreated: "Bitable created",
-    boardSaved: "Bitable saved",
+    boardSaved: "Bitable link verified",
     identityDefaulted: "Default identity updated",
     identityRemoved: "Identity removed",
     identityRefreshed: "App name refreshed",
     identitySaved: "Lark identity saved",
+    invalidBoardUrl: "Enter a valid Lark Bitable link.",
+    userAuthExpired: "User authorization has expired. Authorize again, then check the status.",
+    userIdentityRefreshed: "User identity refreshed",
+    userIdentityVerified: "User identity connected",
     workflowUpdated: "Workflow updated"
   }
 };
@@ -45,8 +53,16 @@ export async function configureLarkIdentity(formData) {
 export async function configureLarkBoard(formData) {
   const args = ["configure-lark-board", ...workspaceArgs()];
   const lang = language(formData);
-  add(args, "--url", field(formData, "board_url"));
-  await finish(args, {}, "lark", "boardSaved", lang, "board");
+  const boardUrl = field(formData, "board_url");
+  add(args, "--url", boardUrl);
+  let target;
+  try {
+    await run(args);
+    target = redirectTarget("lark", lang, messages[lang].boardSaved, false, "board");
+  } catch (error) {
+    target = redirectTarget("lark", lang, localizedError(error, lang), true, "board", "", { board_url: boardUrl });
+  }
+  redirect(target);
 }
 
 export async function startLarkUserAuth(formData) {
@@ -59,14 +75,22 @@ export async function startLarkUserAuth(formData) {
       lang,
       auth_url: auth.verification_url,
       auth_expires: String(auth.expires_in || 600),
+      auth_mode: "user",
       message: messages[lang].authGenerated,
       step: "identity"
     });
     target = `/?${params.toString()}`;
   } catch (error) {
-    target = redirectTarget("lark", lang, error.message, true, "identity");
+    target = redirectTarget("lark", lang, localizedError(error, lang), true, "identity", "user");
   }
   redirect(target);
+}
+
+export async function verifyLarkUserIdentity(formData) {
+  const lang = language(formData);
+  const args = ["verify-lark-user-identity", ...workspaceArgs()];
+  const message = field(formData, "intent") === "refresh" ? "userIdentityRefreshed" : "userIdentityVerified";
+  await finish(args, {}, "lark", message, lang, "identity", "user");
 }
 
 export async function refreshLarkIdentity(formData) {
@@ -128,13 +152,13 @@ export async function selectWorkflow(formData) {
   await finish(args, {}, tab, "workflowUpdated", lang, field(formData, "step"));
 }
 
-async function finish(args, env, tab, okMessage, lang, step = "") {
+async function finish(args, env, tab, okMessage, lang, step = "", authMode = "") {
   let target;
   try {
     await run(args, env);
-    target = redirectTarget(tab, lang, messages[lang][okMessage], false, step);
+    target = redirectTarget(tab, lang, messages[lang][okMessage], false, step, authMode);
   } catch (error) {
-    target = redirectTarget(tab, lang, error.message, true, step);
+    target = redirectTarget(tab, lang, localizedError(error, lang), true, step, authMode);
   }
   redirect(target);
 }
@@ -147,13 +171,24 @@ function language(formData) {
   return field(formData, "lang") === "en" ? "en" : "zh";
 }
 
-function redirectTarget(tab, lang, message, error = false, step = "") {
-  const params = new URLSearchParams({ tab, lang, message });
+function localizedError(error, lang) {
+  const message = error.message || String(error);
+  if (/valid Feishu\/Lark Bitable URL/i.test(message)) {
+    return messages[lang].invalidBoardUrl;
+  }
+  return /user token has expired|authorization expired/i.test(message) ? messages[lang].userAuthExpired : message;
+}
+
+function redirectTarget(tab, lang, message, error = false, step = "", authMode = "", extra = {}) {
+  const params = new URLSearchParams({ tab, lang, message, ...extra });
   if (error) {
     params.set("error", "1");
   }
   if (step) {
     params.set("step", step);
+  }
+  if (authMode) {
+    params.set("auth_mode", authMode);
   }
   return `/?${params.toString()}`;
 }

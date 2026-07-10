@@ -24,9 +24,11 @@ from core.db import (
     refresh_lark_identity,
     register_agent,
     remove_lark_identity,
+    run_lark_cli_json,
     select_workflow,
     set_default_lark_identity,
     unregister_agent,
+    verify_lark_user_identity,
 )
 
 
@@ -58,6 +60,10 @@ def main() -> int:
     identity_parser.add_argument("--write-gitignore", action="store_true", help="Add .teamflow/ to the workspace .gitignore.")
     identity_parser.set_defaults(func=cmd_configure_lark_identity)
 
+    user_identity_parser = subparsers.add_parser("verify-lark-user-identity", help="Verify and save the current Lark user identity.")
+    add_workspace_args(user_identity_parser)
+    user_identity_parser.set_defaults(func=cmd_verify_lark_user_identity)
+
     board_parser = subparsers.add_parser("configure-lark-board", help="Store a Feishu/Lark Bitable URL locally.")
     add_workspace_args(board_parser)
     board_parser.add_argument("--url", required=True, help="Full Bitable URL.")
@@ -80,7 +86,7 @@ def main() -> int:
     default_lark_parser.add_argument("--identity-id", required=True, help="Lark identity ID.")
     default_lark_parser.set_defaults(func=cmd_set_default_lark_identity)
 
-    create_board_parser = subparsers.add_parser("create-lark-board", help="Create a Feishu/Lark Bitable with the default bot identity.")
+    create_board_parser = subparsers.add_parser("create-lark-board", help="Create a Feishu/Lark Bitable with the default identity.")
     add_workspace_args(create_board_parser)
     create_board_parser.add_argument("--domain", choices=["feishu", "larksuite"], default="feishu", help="Open platform domain.")
     create_board_parser.add_argument("--name", default="", help="Bitable file name.")
@@ -171,6 +177,18 @@ def cmd_configure_lark_identity(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify_lark_user_identity(args: argparse.Namespace) -> int:
+    status = run_lark_cli_json(["auth", "status", "--verify"])
+    profile = None
+    if status.get("tokenStatus") == "valid":
+        try:
+            profile = run_lark_cli_json(["contact", "+get-user", "--as", "user"])
+        except ValueError:
+            pass
+    print_json(verify_lark_user_identity(args.workspace, status=status, profile=profile))
+    return 0
+
+
 def cmd_configure_lark_board(args: argparse.Namespace) -> int:
     print_json(configure_lark_board(args.workspace, board_url=args.url, write_gitignore=args.write_gitignore))
     return 0
@@ -258,10 +276,75 @@ def cmd_self_check(args: argparse.Namespace) -> int:
                 app_secret="dummy",
                 domain="feishu",
             )
+        user_status = {
+            "appId": "cli_check",
+            "identity": "user",
+            "tokenStatus": "valid",
+            "userName": "Check user",
+            "userOpenId": "ou_check",
+        }
+        user_profile = {
+            "data": {
+                "user": {
+                    "avatar_middle": "https://example.com/user-avatar.png",
+                    "name": "Profile user",
+                    "open_id": "ou_check",
+                }
+            }
+        }
+        verify_lark_user_identity(workspace, status=user_status, profile=user_profile)
+        try:
+            verify_lark_user_identity(workspace, status={"tokenStatus": "expired", "note": "authorization expired"})
+        except ValueError as error:
+            assert str(error) == "authorization expired"
+        else:
+            raise AssertionError("expired user authorization should fail")
+        expired_state = inspect_workspace(workspace)
+        assert [identity["access_status"] for identity in expired_state["lark_identities"] if identity["auth_mode"] == "user"] == ["expired"]
+        assert [identity["auth_mode"] for identity in expired_state["lark_identities"] if identity["is_default"]] == ["bot"]
+        expired_user = next(identity for identity in expired_state["lark_identities"] if identity["auth_mode"] == "user")
+        try:
+            set_default_lark_identity(workspace, identity_id=expired_user["id"])
+        except ValueError as error:
+            assert str(error) == "lark identity is unavailable"
+        else:
+            raise AssertionError("an expired user identity cannot become the default")
+        verify_lark_user_identity(workspace, status=user_status, profile=user_profile)
+        with patch("core.db.run_lark_cli_json", return_value={"tokenStatus": "expired", "note": "authorization expired"}):
+            try:
+                create_lark_board(workspace, domain="feishu", name="Expired user board")
+            except ValueError as error:
+                assert str(error) == "authorization expired"
+            else:
+                raise AssertionError("Bitable creation should fail when user authorization expires")
+        create_expired_state = inspect_workspace(workspace)
+        assert [identity["auth_mode"] for identity in create_expired_state["lark_identities"] if identity["is_default"]] == ["bot"]
+        verify_lark_user_identity(workspace, status=user_status, profile=user_profile)
         configure_lark_board(
             workspace,
             board_url="https://example.feishu.cn/base/bascnCheck?table=tblCheck&view=vewCheck",
         )
+        configured_state = inspect_workspace(workspace)
+        configured_board = configured_state["lark_board"]
+        configured_user = next(identity for identity in configured_state["lark_identities"] if identity["auth_mode"] == "user")
+        assert configured_board["base_token"] == "bascnCheck"
+        assert configured_board["table_id"] == "tblCheck"
+        assert configured_board["view_id"] == "vewCheck"
+        assert configured_board["identity_id"] == configured_user["id"]
+        with patch(
+            "core.db.run_lark_cli_json",
+            side_effect=[user_status, {"base": {"base_token": "bascnUser", "url": "https://example.feishu.cn/base/bascnUser"}}],
+        ) as lark_cli:
+            create_lark_board(workspace, domain="feishu", name="")
+        assert lark_cli.call_count == 2
+        assert lark_cli.call_args_list[1].args[0] == [
+            "base",
+            "+base-create",
+            "--as",
+            "user",
+            "--name",
+            f"{Path(workspace).name}项目看板",
+        ]
         register_agent(workspace, role="pm", harness_type="codex", session_id="thread_pm")
         try:
             register_agent(workspace, role="pm", harness_type="codex", session_id="thread_pm_2")
@@ -278,20 +361,29 @@ def cmd_self_check(args: argparse.Namespace) -> int:
         result = inspect_workspace(workspace)
 
     agents = result["agents"]
-    identity = result["lark_identities"][0]
+    bot_identity = next(identity for identity in result["lark_identities"] if identity["auth_mode"] == "bot")
+    user_identity = next(identity for identity in result["lark_identities"] if identity["auth_mode"] == "user")
     board = result["lark_board"]
     assert result["initialized"] is True
-    assert result["schema_version"] == "009_lark_app_avatar_url"
+    assert result["schema_version"] == "011_lark_user_avatar_url"
     assert {workflow["key"] for workflow in result["workflows"]} == {DEFAULT_WORKFLOW_KEY, "general-task"}
     assert all(workflow["short_description"] for workflow in result["workflows"])
     assert result["current_workflow"]["key"] == DEFAULT_WORKFLOW_KEY
     assert {role["role_key"] for role in result["roles"]} == {"pm", "qa", "tl", "design", "owner", "executor", "reviewer"}
     assert [role["display_name"] for role in result["roles"] if role["role_key"] == "tl"] == ["Technical Lead"]
     assert all(role["description"] for role in result["roles"])
-    assert identity["app_secret"] == "<stored>"
-    assert identity["app_name"] == "Check app"
-    assert identity["app_avatar_url"] == "https://example.com/avatar.png"
-    assert board["base_token"] == "bascnCheck"
+    assert bot_identity["app_secret"] == "<stored>"
+    assert bot_identity["app_name"] == "Check app"
+    assert bot_identity["app_avatar_url"] == "https://example.com/avatar.png"
+    assert user_identity["user_open_id"] == "ou_check"
+    assert user_identity["user_name"] == "Profile user"
+    assert user_identity["user_avatar_url"] == "https://example.com/user-avatar.png"
+    assert user_identity["access_token"] is None
+    assert user_identity["refresh_token"] is None
+    assert user_identity["access_status"] == "verified"
+    assert user_identity["is_default"] == 1
+    assert board["base_token"] == "bascnUser"
+    assert board["identity_id"] == user_identity["id"]
     assert len([agent for agent in agents if agent["role_key"] == "qa"]) == 1
     assert len([agent for agent in agents if agent["role_key"] == "pm"]) == 1
     assert len([agent for agent in agents if agent["role_key"] == "tl"]) == 1

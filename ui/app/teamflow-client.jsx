@@ -16,8 +16,6 @@ const text = {
     agentTab: "Agent",
     workspace: "Workspace",
     workflow: "Workflow",
-    saved: "已保存",
-    notConfigured: "未配置",
     larkTitle: "飞书",
     larkSubtitle: "先选择协作模式，再配置操作身份和协作看板。",
     workflowTitle: "协作模式",
@@ -31,14 +29,29 @@ const text = {
     nextStep: "下一步",
     larkBoard: "多维表格",
     boardUrl: "多维表格 URL",
-    boardUrlHint: "多维表格会作为 TeamFlow 的协作看板，用来保存任务、状态和操作记录。",
+    boardUrlHint: "请先在飞书中创建一个多维表格，再将链接粘贴到这里。TeamFlow 会将它作为协作看板。",
     boardName: "看板名称",
+    boardCreateHint: "TeamFlow 将使用当前默认身份创建一个新的多维表格。",
+    boardCreatePrompt: "不想手动创建？",
     createBoardWithIdentity: "用默认身份创建",
+    createBoard: "创建多维表格",
+    verifyBoardUrl: "验证并使用",
+    boardUrlVerified: "链接已验证",
+    openBoard: "打开多维表格",
     accessMode: "身份",
     bot: "应用身份",
     user: "用户身份",
     botSummary: "创建一个飞书智能体应用；后续 TeamFlow 会以这个机器人身份在飞书中操作。",
     userSummary: "使用当前飞书账号授权；后续 TeamFlow 会以你的用户身份在飞书中操作。",
+    userAccounts: "已授权用户身份",
+    emptyUserAccounts: "还没有完成用户授权。",
+    userIdentityLabel: "飞书用户",
+    checkAuth: "检查授权状态",
+    reauthorize: "重新授权",
+    connected: "已连接",
+    expired: "已过期",
+    disconnected: "未连接",
+    lastVerified: "验证时间",
     appId: "App ID",
     appNameSyncedAt: "名称更新时间",
     appSecret: "App Secret",
@@ -62,7 +75,6 @@ const text = {
     authReady: "授权链接已生成",
     authExpires: "有效期约 {seconds} 秒；页面后台正在等待授权完成。",
     saveIdentity: "保存身份",
-    saveBoard: "保存多维表格",
     agentTitle: "Agent",
     agentSubtitle: "按当前 workflow 的预定义角色注册 session。",
     role: "角色",
@@ -93,8 +105,6 @@ const text = {
     agentTab: "Agent",
     workspace: "Workspace",
     workflow: "Workflow",
-    saved: "Saved",
-    notConfigured: "Not configured",
     larkTitle: "Lark",
     larkSubtitle: "Choose the collaboration mode, then configure identity and board.",
     workflowTitle: "Collaboration mode",
@@ -108,14 +118,29 @@ const text = {
     nextStep: "Next",
     larkBoard: "Bitable",
     boardUrl: "Bitable URL",
-    boardUrlHint: "Bitable is the TeamFlow board for tasks, states, and activity history.",
+    boardUrlHint: "Create a Bitable in Lark, then paste its link here. TeamFlow will use it as the collaboration board.",
     boardName: "Board name",
+    boardCreateHint: "TeamFlow will create a new Bitable with the current default identity.",
+    boardCreatePrompt: "Prefer not to create one manually?",
     createBoardWithIdentity: "Create with default identity",
+    createBoard: "Create Bitable",
+    verifyBoardUrl: "Verify and use",
+    boardUrlVerified: "Link verified",
+    openBoard: "Open Bitable",
     accessMode: "Identity",
     bot: "Bot",
     user: "User",
     botSummary: "Create a Lark bot app. TeamFlow will operate in Lark as that bot.",
     userSummary: "Authorize your current Lark account. TeamFlow will operate in Lark as your user identity.",
+    userAccounts: "Authorized user identities",
+    emptyUserAccounts: "No user authorization has been completed.",
+    userIdentityLabel: "Lark user",
+    checkAuth: "Check authorization",
+    reauthorize: "Authorize again",
+    connected: "Connected",
+    expired: "Expired",
+    disconnected: "Not connected",
+    lastVerified: "Verified",
     appId: "App ID",
     appNameSyncedAt: "Name synced",
     appSecret: "App Secret",
@@ -139,7 +164,6 @@ const text = {
     authReady: "Authorization link generated",
     authExpires: "Valid for about {seconds} seconds. The page is waiting for approval in the background.",
     saveIdentity: "Save identity",
-    saveBoard: "Save Bitable",
     agentTitle: "Agent",
     agentSubtitle: "Register sessions against predefined roles in the selected workflow.",
     role: "Role",
@@ -165,15 +189,16 @@ const text = {
   }
 };
 
-export default function TeamFlowClient({ actions, authExpires, authUrl, currentRoles, error, initialLang, initialStep, initialTab, message, state }) {
+export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrlDraft, currentRoles, error, initialAuthMode, initialLang, initialStep, initialTab, message, state }) {
   const [lang, setLang] = useState(initialLang === "en" ? "en" : "zh");
   const [tab, setTab] = useState(initialTab === "agent" ? "agent" : "lark");
-  const [authMode, setAuthMode] = useState(authUrl ? "user" : state.lark_identities?.[0]?.auth_mode || "bot");
+  const [authMode, setAuthMode] = useState(initialAuthMode === "user" || authUrl ? "user" : state.lark_identities?.[0]?.auth_mode || "bot");
   const [agentFormOpen, setAgentFormOpen] = useState(false);
   const [noticeVisible, setNoticeVisible] = useState(Boolean(message));
   const t = text[lang];
   const board = state.lark_board || {};
   const botIdentities = state.lark_identities?.filter((identity) => identity.auth_mode === "bot" && identity.app_id) || [];
+  const userIdentities = state.lark_identities?.filter((identity) => identity.auth_mode === "user") || [];
   const currentWorkflow = state.current_workflow || state.workflows[0] || {};
   const tabMessage = message && ((tab === "agent") === (initialTab === "agent"));
   const roleOptions = useMemo(() => currentRoles, [currentRoles]);
@@ -236,7 +261,9 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, currentR
             authMode={authMode}
             authUrl={authUrl}
             board={board}
+            boardUrlDraft={boardUrlDraft}
             botIdentities={botIdentities}
+            userIdentities={userIdentities}
             currentWorkflow={currentWorkflow}
             initialStep={initialStep}
             lang={lang}
@@ -275,9 +302,9 @@ function TabNav({ tab, setTab, t }) {
   );
 }
 
-function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, botIdentities, currentWorkflow, createAppUrl, initialStep, lang, setAuthMode, state, t }) {
+function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, boardUrlDraft, botIdentities, currentWorkflow, createAppUrl, initialStep, lang, setAuthMode, state, t, userIdentities }) {
   const larkDomain = lang === "en" ? "larksuite" : "feishu";
-  const hasIdentity = Boolean(state.lark_identities?.length);
+  const hasIdentity = botIdentities.length > 0 || userIdentities.some((identity) => identity.access_status === "verified");
   const [activeStep, setActiveStep] = useState(() => initialLarkStep(initialStep, hasIdentity));
   const boardName = defaultBoardName(state, lang);
 
@@ -320,9 +347,10 @@ function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, bot
             larkDomain={larkDomain}
             setAuthMode={setAuthMode}
             t={t}
+            userIdentities={userIdentities}
           />
         ) : (
-          <BoardStep actions={actions} board={board} boardName={boardName} canCreateBoard={botIdentities.length > 0} lang={lang} larkDomain={larkDomain} t={t} />
+          <BoardStep actions={actions} board={board} boardName={boardName} boardUrlDraft={boardUrlDraft} canCreateBoard={hasIdentity} lang={lang} larkDomain={larkDomain} t={t} />
         )}
         <StepFooter activeStep={activeStep} hasIdentity={hasIdentity} setActiveStep={setActiveStep} t={t} />
       </section>
@@ -394,7 +422,7 @@ function WorkflowStep({ actions, currentWorkflow, lang, state, t }) {
   );
 }
 
-function IdentityStep({ actions, appUrl, authExpires, authMode, authUrl, botIdentities, createAppUrl, lang, larkDomain, setAuthMode, t }) {
+function IdentityStep({ actions, appUrl, authExpires, authMode, authUrl, botIdentities, createAppUrl, lang, larkDomain, setAuthMode, t, userIdentities }) {
   return (
     <div className="configStep">
       <div className="sectionHeader">
@@ -453,9 +481,10 @@ function IdentityStep({ actions, appUrl, authExpires, authMode, authUrl, botIden
           </>
         ) : (
           <div className="authBlock">
-            <button className="secondary" formAction={actions.startLarkUserAuth} type="submit">
-              {t.startAuth}
-            </button>
+            <div className="authActions">
+              <PendingActionButton action={actions.startLarkUserAuth} className="secondary" label={userIdentities.length ? t.reauthorize : t.startAuth} />
+              <PendingActionButton action={actions.verifyLarkUserIdentity} className="primary" label={t.checkAuth} />
+            </div>
             {authUrl ? (
               <div className="authResult">
                 <div>
@@ -480,7 +509,18 @@ function IdentityStep({ actions, appUrl, authExpires, authMode, authUrl, botIden
             <p className="emptyInline">{t.emptyBotApps}</p>
           )}
         </div>
-      ) : null}
+      ) : (
+        <div className="connectionList">
+          <h4>{t.userAccounts}</h4>
+          {userIdentities.length ? (
+            userIdentities.map((identity) => (
+              <UserIdentityRow actions={actions} identity={identity} key={identity.id} lang={lang} t={t} />
+            ))
+          ) : (
+            <p className="emptyInline">{t.emptyUserAccounts}</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -490,6 +530,17 @@ function PendingSubmitButton({ className, label }) {
   return (
     <button className={pending ? `${className} pending` : className} disabled={pending} type="submit">
       {pending ? <span className="buttonSpinner" aria-hidden="true" /> : null}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function PendingActionButton({ action, className, label }) {
+  const { action: pendingAction, pending } = useFormStatus();
+  const active = pending && pendingAction === action;
+  return (
+    <button className={active ? `${className} pending` : className} disabled={pending} formAction={action} type="submit">
+      {active ? <span className="buttonSpinner" aria-hidden="true" /> : null}
       <span>{label}</span>
     </button>
   );
@@ -552,6 +603,46 @@ function BotIdentityRow({ actions, identity, lang, larkDomain, t }) {
   );
 }
 
+function UserIdentityRow({ actions, identity, lang, t }) {
+  const verified = identity.access_status === "verified";
+  const status = verified ? t.connected : identity.access_status === "expired" ? t.expired : t.disconnected;
+  const initial = Array.from(identity.user_name || "U")[0];
+  return (
+    <div className="connectionRow userConnectionRow">
+      <div className="connectionAvatar userIdentityAvatar" aria-hidden="true">
+        {identity.user_avatar_url ? <img alt="" src={identity.user_avatar_url} /> : <span>{initial}</span>}
+      </div>
+      <div className="connectionMain userConnectionMain">
+        <div className="connectionTitle userConnectionTitle">
+          <strong>{identity.user_name || t.userIdentityLabel}</strong>
+          {identity.is_default ? <span className="defaultMark">{t.defaultIdentity}</span> : null}
+          <span className={verified ? "statusBadge compact saved" : "statusBadge compact"}>{status}</span>
+        </div>
+        <span className="userIdentityMeta">{t.lastVerified}: {shortDate(identity.last_verified_at)}</span>
+      </div>
+      <div className="connectionActions">
+        <form action={actions.verifyLarkUserIdentity}>
+          <input name="intent" type="hidden" value="refresh" suppressHydrationWarning />
+          <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+          <PendingSubmitButton className="secondary mini" label={t.refresh} />
+        </form>
+        {verified && !identity.is_default ? (
+          <form action={actions.setDefaultLarkIdentity}>
+            <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+            <input name="identity_id" type="hidden" value={identity.id} suppressHydrationWarning />
+            <button className="secondary mini" type="submit">{t.setDefault}</button>
+          </form>
+        ) : null}
+        <form action={actions.removeLarkIdentity}>
+          <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+          <input name="identity_id" type="hidden" value={identity.id} suppressHydrationWarning />
+          <button className="ghost mini" type="submit">{t.deleteIdentity}</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function DefaultBotAvatar() {
   return (
     <svg aria-hidden="true" className="defaultBotAvatar" viewBox="0 0 1024 1024">
@@ -563,8 +654,17 @@ function DefaultBotAvatar() {
   );
 }
 
-function BoardStep({ actions, board, boardName, canCreateBoard, lang, larkDomain, t }) {
+function BoardStep({ actions, board, boardName, boardUrlDraft, canCreateBoard, lang, larkDomain, t }) {
   const configured = Boolean(board.base_token || board.base_url);
+  const [boardUrl, setBoardUrl] = useState(boardUrlDraft || board.base_url || "");
+  const urlVerified = configured && boardUrl.trim() === board.base_url;
+
+  useEffect(() => {
+    if (!boardUrlDraft && board.base_url) {
+      setBoardUrl(board.base_url);
+    }
+  }, [board.base_url, boardUrlDraft]);
+
   return (
     <form action={actions.configureLarkBoard} className="stackForm">
       <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
@@ -576,24 +676,46 @@ function BoardStep({ actions, board, boardName, canCreateBoard, lang, larkDomain
             <h3>{t.larkBoard}</h3>
             <p>{t.boardUrlHint}</p>
           </div>
-          <span className={configured ? "statusBadge saved" : "statusBadge"}>{configured ? t.saved : t.notConfigured}</span>
         </div>
-        {canCreateBoard ? (
-          <div className="boardCreate">
-            <label className="field">
-              {t.boardName}
-              <input name="board_name" defaultValue={boardName} suppressHydrationWarning />
-            </label>
-            <button className="secondary" formAction={actions.createLarkBoard} type="submit">{t.createBoardWithIdentity}</button>
+        <div className="boardUrlRow">
+          <label className="field boardUrlField">
+            {t.boardUrl}
+            <span className="boardUrlInput">
+              <input
+                name="board_url"
+                onChange={(event) => setBoardUrl(event.target.value)}
+                placeholder="https://.../base/..."
+                value={boardUrl}
+                suppressHydrationWarning
+              />
+              {urlVerified ? (
+                <span aria-label={t.boardUrlVerified} className="boardUrlCheck" tabIndex={0}>
+                  ✓
+                  <span className="boardUrlTooltip" role="tooltip">{t.boardUrlVerified}</span>
+                </span>
+              ) : null}
+            </span>
+          </label>
+          <PendingSubmitButton className="primary compact boardUrlSubmit" label={t.verifyBoardUrl} />
+        </div>
+        {urlVerified ? (
+          <div className="boardUrlActions">
+            <a href={board.base_url} rel="noreferrer" target="_blank">{t.openBoard} ↗</a>
           </div>
         ) : null}
-        <label className="field">
-          {t.boardUrl}
-          <input name="board_url" defaultValue={board.base_url || ""} placeholder="https://.../base/..." suppressHydrationWarning />
-        </label>
-        <div className="formFooter">
-          <button className="primary" type="submit">{t.saveBoard}</button>
-        </div>
+        {canCreateBoard ? (
+          <details className="boardCreateDisclosure">
+            <summary><span>{t.boardCreatePrompt}</span> <strong>{t.createBoardWithIdentity}</strong></summary>
+            <p>{t.boardCreateHint}</p>
+            <div className="boardCreate">
+              <label className="field">
+                {t.boardName}
+                <input name="board_name" defaultValue={boardName} suppressHydrationWarning />
+              </label>
+              <PendingActionButton action={actions.createLarkBoard} className="secondary" label={t.createBoard} />
+            </div>
+          </details>
+        ) : null}
       </div>
     </form>
   );
@@ -727,8 +849,10 @@ function roleSort(a, b) {
 
 function defaultBoardName(state, lang) {
   const rootName = state.workspace_root?.split(/[\\/]/).filter(Boolean).at(-1) || "Project";
-  const projectName = state.workspace?.display_name || rootName;
-  return lang === "zh" ? `${projectName} 项目看板` : `${projectName} Project Board`;
+  if (lang === "zh") {
+    return rootName.endsWith("项目") ? `${rootName}看板` : `${rootName}项目看板`;
+  }
+  return /project$/i.test(rootName) ? `${rootName} Board` : `${rootName} Project Board`;
 }
 
 function permissionUrl(appId, larkDomain) {
