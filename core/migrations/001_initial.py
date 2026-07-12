@@ -86,7 +86,6 @@ def apply(conn: sqlite3.Connection) -> None:
           harness_type TEXT NOT NULL,
           session_id TEXT NOT NULL,
           display_name TEXT,
-          status TEXT NOT NULL DEFAULT 'registered',
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           UNIQUE(workspace_id, role_id, harness_type, session_id)

@@ -1,0 +1,9 @@
+#!/bin/sh
+ROOT=$(CDPATH= cd "$(dirname "$0")" && pwd)
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "teamflow: uv is required (https://docs.astral.sh/uv/)" >&2
+  exit 1
+fi
+
+exec uv run --project "$ROOT" --locked python "$ROOT/scripts/teamflow.py" "$@"

@@ -10,6 +10,15 @@ export async function getState() {
   return runJson(["inspect", "--workspace", workspace, "--json"]);
 }
 
+export async function getCodexState() {
+  return runJson(["verify-agent", "--workspace", workspace]);
+}
+
+export function attachAgentHealth(agents, results) {
+  const healthByAgent = new Map(results.map((health) => [health.agent_id, health]));
+  return agents.map((agent) => ({ ...agent, health: healthByAgent.get(agent.id) || null }));
+}
+
 export async function runJson(args, env = {}) {
   const stdout = await run(args, env);
   return JSON.parse(stdout);

@@ -1,10 +1,14 @@
 {
   "name": "teamflow-ui",
   "private": true,
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "node --test lib/codex-ipc.test.cjs"
   },
   "dependencies": {
     "next": "^16.2.10",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 
 const FEISHU_APP_URL = "https://open.feishu.cn/app";
@@ -76,19 +76,26 @@ const text = {
     authExpires: "有效期约 {seconds} 秒；页面后台正在等待授权完成。",
     saveIdentity: "保存身份",
     agentTitle: "Agent",
-    agentSubtitle: "按当前 workflow 的预定义角色注册 session。",
+    agentSubtitle: "连接当前协作模式需要的 Agent session，并检查它们是否可用。",
     role: "角色",
     harness: "Harness",
-    sessionId: "Session ID",
-    displayName: "显示名",
-    replaceRole: "替换该角色已有 agent",
+    sessionId: "Session",
+    chooseSession: "选择当前项目的 Codex Session",
+    manualSession: "手动输入 Session ID",
+    chooseFromSessions: "从 Session 列表选择",
+    noWorkspaceSessions: "当前项目没有可选 Session，请手动输入 ID。",
+    sessionListUnavailable: "暂时无法读取 Codex Session，请手动输入 ID。",
+    unnamedSession: "未命名 Session",
+    displayName: "显示名（可选）",
     addAgent: "添加 Agent",
     cancel: "取消",
     register: "注册",
+    save: "保存",
+    switchSession: "切换",
     remove: "移除",
     deleteIdentity: "删除",
     emptyTitle: "暂无 Agent",
-    emptyAgents: "添加一个 session 后，它会按角色出现在这里。",
+    emptyAgents: "添加一个 session，并把它分配给当前协作模式中的角色。",
     status: "状态",
     name: "名称",
     currentWorkflow: "当前 Workflow",
@@ -96,7 +103,36 @@ const text = {
     roles: "角色",
     newAgent: "新增 Agent",
     session: "Session",
-    configuredAgents: "已注册 Agent"
+    configuredAgents: "已注册 Agent",
+    healthHealthy: "正常",
+    healthActive: "正在运行",
+    healthActiveHint: "此 Codex Session 正在处理任务。",
+    healthIdle: "空闲",
+    healthIdleHint: "此 Codex Session 已加载，当前空闲。",
+    healthNotLoaded: "未加载",
+    healthNotLoadedHint: "此 Codex Session 当前未被 Codex 客户端加载，但仍可使用。",
+    healthArchived: "已归档",
+    healthArchivedHint: "此 Codex Session 已归档；取消归档后会自动恢复。",
+    healthDeleted: "已删除",
+    healthDeletedHint: "Codex 中已找不到此 Session，建议移除此 Agent。",
+    healthUnverified: "未检查",
+    healthUnavailable: "连接失败",
+    healthUnavailableHint: "TeamFlow 暂时无法连接 Codex app-server。",
+    healthSystemError: "系统错误",
+    healthSystemErrorHint: "Codex Session 遇到系统错误，请切换 Session 或移除此 Agent。",
+    healthUnhealthy: "异常",
+    healthCheckedAt: "检查时间",
+    modelLabel: "模型",
+    thinkingLabel: "Thinking",
+    speedLabel: "速度",
+    fast: "Fast",
+    defaultValue: "默认",
+    sessionSettingsUnavailable: "设置未加载",
+    agentBusyActionHint: "Agent 正在工作，完成后才能切换或移除。",
+    changeWorkflow: "在飞书设置中更改",
+    registeredCount: "已注册 {count} 个",
+    singleAgentRole: "此角色仅允许一个 Agent；注册后可在列表中切换 Session。",
+    multiAgentRole: "此角色允许注册多个 Agent。"
   },
   en: {
     brand: "TeamFlow",
@@ -165,19 +201,26 @@ const text = {
     authExpires: "Valid for about {seconds} seconds. The page is waiting for approval in the background.",
     saveIdentity: "Save identity",
     agentTitle: "Agent",
-    agentSubtitle: "Register sessions against predefined roles in the selected workflow.",
+    agentSubtitle: "Connect the agent sessions required by the current collaboration mode and verify their availability.",
     role: "Role",
     harness: "Harness",
-    sessionId: "Session ID",
-    displayName: "Display name",
-    replaceRole: "Replace existing agents for this role",
+    sessionId: "Session",
+    chooseSession: "Choose a Codex session in this project",
+    manualSession: "Enter a session ID manually",
+    chooseFromSessions: "Choose from session list",
+    noWorkspaceSessions: "No sessions were found for this project. Enter an ID manually.",
+    sessionListUnavailable: "Codex sessions are temporarily unavailable. Enter an ID manually.",
+    unnamedSession: "Unnamed session",
+    displayName: "Display name (optional)",
     addAgent: "Add Agent",
     cancel: "Cancel",
     register: "Register",
+    save: "Save",
+    switchSession: "Switch",
     remove: "Remove",
     deleteIdentity: "Delete",
     emptyTitle: "No agents",
-    emptyAgents: "Add a session and it will appear here under its role.",
+    emptyAgents: "Add a session and assign it to a role in the current collaboration mode.",
     status: "Status",
     name: "Name",
     currentWorkflow: "Current Workflow",
@@ -185,25 +228,123 @@ const text = {
     roles: "Roles",
     newAgent: "New Agent",
     session: "Session",
-    configuredAgents: "Registered agents"
+    configuredAgents: "Registered agents",
+    healthHealthy: "Ready",
+    healthActive: "Active",
+    healthActiveHint: "This Codex session is currently working.",
+    healthIdle: "Idle",
+    healthIdleHint: "This Codex session is loaded and idle.",
+    healthNotLoaded: "Not loaded",
+    healthNotLoadedHint: "This Codex session is not loaded by a client, but remains available.",
+    healthArchived: "Archived",
+    healthArchivedHint: "This Codex session is archived. It will recover automatically after unarchiving.",
+    healthDeleted: "Deleted",
+    healthDeletedHint: "Codex can no longer find this session. Remove this agent assignment.",
+    healthUnverified: "Not checked",
+    healthUnavailable: "Connection failed",
+    healthUnavailableHint: "TeamFlow cannot currently connect to Codex app-server.",
+    healthSystemError: "System error",
+    healthSystemErrorHint: "This Codex session hit a system error. Switch sessions or remove this agent.",
+    healthUnhealthy: "Unhealthy",
+    healthCheckedAt: "Checked",
+    modelLabel: "Model",
+    thinkingLabel: "Thinking",
+    speedLabel: "Speed",
+    fast: "Fast",
+    defaultValue: "Default",
+    sessionSettingsUnavailable: "Settings not loaded",
+    agentBusyActionHint: "This agent is working. Wait until it finishes before switching or removing it.",
+    changeWorkflow: "Change in Lark setup",
+    registeredCount: "{count} registered",
+    singleAgentRole: "This role allows one agent. Switch its session from the registered-agent list.",
+    multiAgentRole: "This role allows multiple agents."
   }
 };
 
-export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrlDraft, currentRoles, error, initialAuthMode, initialLang, initialStep, initialTab, message, state }) {
+export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrlDraft, codexSessionError, codexSessions, currentRoles, error, initialAuthMode, initialLang, initialStep, initialTab, message, state }) {
   const [lang, setLang] = useState(initialLang === "en" ? "en" : "zh");
   const [tab, setTab] = useState(initialTab === "agent" ? "agent" : "lark");
   const [authMode, setAuthMode] = useState(initialAuthMode === "user" || authUrl ? "user" : state.lark_identities?.[0]?.auth_mode || "bot");
   const [agentFormOpen, setAgentFormOpen] = useState(false);
   const [noticeVisible, setNoticeVisible] = useState(Boolean(message));
+  const [liveAgents, setLiveAgents] = useState(state.agents || []);
+  const [liveCodexSessions, setLiveCodexSessions] = useState(codexSessions);
+  const [liveCodexSessionError, setLiveCodexSessionError] = useState(codexSessionError);
+  const [runtimeBySession, setRuntimeBySession] = useState({});
+  const [lifecycleBySession, setLifecycleBySession] = useState({});
+  const refreshInFlight = useRef(null);
   const t = text[lang];
   const board = state.lark_board || {};
   const botIdentities = state.lark_identities?.filter((identity) => identity.auth_mode === "bot" && identity.app_id) || [];
   const userIdentities = state.lark_identities?.filter((identity) => identity.auth_mode === "user") || [];
   const currentWorkflow = state.current_workflow || state.workflows[0] || {};
+  const currentAgents = liveAgents.filter((agent) => agent.workflow_key === currentWorkflow.key);
   const tabMessage = message && ((tab === "agent") === (initialTab === "agent"));
-  const roleOptions = useMemo(() => currentRoles, [currentRoles]);
   const appUrl = lang === "zh" ? FEISHU_APP_URL : LARK_APP_URL;
   const createAppUrl = lang === "zh" ? FEISHU_CREATE_APP_URL : LARK_CREATE_APP_URL;
+
+  const refreshCodexState = useCallback(() => {
+    if (refreshInFlight.current) {
+      return refreshInFlight.current;
+    }
+    const request = fetch("/api/codex", { method: "POST" })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Codex refresh failed: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((payload) => {
+        const agents = payload.agents || [];
+        setLiveAgents(agents);
+        setLiveCodexSessions(payload.sessions || []);
+        setLiveCodexSessionError(Boolean(payload.sessionError));
+        setRuntimeBySession(sessionMap(payload.runtime?.sessions || []));
+        setLifecycleBySession((current) => settledLifecycle(current, agents));
+      })
+      .catch(() => setLiveCodexSessionError(true))
+      .finally(() => {
+        refreshInFlight.current = null;
+      });
+    refreshInFlight.current = request;
+    return request;
+  }, []);
+
+  useEffect(() => setLiveAgents(state.agents || []), [state.agents]);
+  useEffect(() => setLiveCodexSessions(codexSessions), [codexSessions]);
+  useEffect(() => setLiveCodexSessionError(codexSessionError), [codexSessionError]);
+
+  useEffect(() => {
+    if (tab !== "agent") {
+      return undefined;
+    }
+    refreshCodexState();
+    const source = new EventSource("/api/codex");
+    source.onmessage = ({ data }) => {
+      let event;
+      try {
+        event = JSON.parse(data);
+      } catch {
+        return;
+      }
+      if (event.type === "snapshot") {
+        setRuntimeBySession(sessionMap(event.sessions || []));
+      } else if (event.type === "runtime") {
+        setRuntimeBySession((current) => updateRuntime(current, event));
+        if (event.status === "systemError") {
+          refreshCodexState();
+        }
+      } else if (event.type === "lifecycle") {
+        setLifecycleBySession((current) => ({ ...current, [event.threadId]: event.status }));
+        refreshCodexState();
+      } else if (event.type === "catalog") {
+        refreshCodexState();
+      } else if (event.type === "bridge" && !event.connected) {
+        setRuntimeBySession({});
+      }
+    };
+    return () => source.close();
+  }, [refreshCodexState, tab]);
 
   useEffect(() => {
     setNoticeVisible(Boolean(message));
@@ -275,12 +416,16 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
           <AgentPanel
             actions={actions}
             agentFormOpen={agentFormOpen}
+            agents={currentAgents}
+            codexSessionError={liveCodexSessionError}
+            codexSessions={liveCodexSessions}
             currentRoles={currentRoles}
             currentWorkflow={currentWorkflow}
+            lifecycleBySession={lifecycleBySession}
             lang={lang}
-            roleOptions={roleOptions}
+            refreshCodexState={refreshCodexState}
+            runtimeBySession={runtimeBySession}
             setAgentFormOpen={setAgentFormOpen}
-            state={state}
             t={t}
           />
         )}
@@ -525,10 +670,10 @@ function IdentityStep({ actions, appUrl, authExpires, authMode, authUrl, botIden
   );
 }
 
-function PendingSubmitButton({ className, label }) {
+function PendingSubmitButton({ className, disabled = false, label, title }) {
   const { pending } = useFormStatus();
   return (
-    <button className={pending ? `${className} pending` : className} disabled={pending} type="submit">
+    <button className={pending ? `${className} pending` : className} disabled={pending || disabled} title={title} type="submit">
       {pending ? <span className="buttonSpinner" aria-hidden="true" /> : null}
       <span>{label}</span>
     </button>
@@ -721,32 +866,42 @@ function BoardStep({ actions, board, boardName, boardUrlDraft, canCreateBoard, l
   );
 }
 
-function AgentPanel({ actions, agentFormOpen, currentRoles, currentWorkflow, lang, roleOptions, setAgentFormOpen, state, t }) {
+function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSessions, currentRoles, currentWorkflow, lifecycleBySession, lang, refreshCodexState, runtimeBySession, setAgentFormOpen, t }) {
+  const [selectedRoleKey, setSelectedRoleKey] = useState("");
+  const [editingAgentId, setEditingAgentId] = useState("");
+  const selectableSessions = codexSessions.filter((session) => session.status !== "systemError");
+  const availableRoles = currentRoles.filter((role) => role.allow_multiple || !agents.some((agent) => agent.role_key === role.role_key));
+  const effectiveRoleKey = availableRoles.some((role) => role.role_key === selectedRoleKey)
+    ? selectedRoleKey
+    : availableRoles[0]?.role_key || "";
+  const selectedRole = availableRoles.find((role) => role.role_key === effectiveRoleKey);
+
   return (
-    <div className="contentGrid agentGrid">
-      <section className="panel mainPanel">
-        <div className="sectionHeader splitHeader">
+    <div className="agentPage">
+      <section className="agentContext">
+        <div className="agentContextMode">
+          <span>{t.workflowTitle}</span>
+          <strong>{currentWorkflow.display_name || currentWorkflow.key}</strong>
+        </div>
+        <div className="agentRoleScope">
+          <span>{t.roles}</span>
+          <strong>{currentRoles.map((role) => role.display_name).join(" · ") || "-"}</strong>
+        </div>
+        <a className="agentContextLink" href={`/?tab=lark&lang=${lang}&step=workflow`}>{t.changeWorkflow}</a>
+      </section>
+
+      <section className="agentRoster">
+        <div className="agentRosterHeader">
           <div>
             <h3>{t.configuredAgents}</h3>
-            <p>{t.agentSubtitle}</p>
+            <span>{t.registeredCount.replace("{count}", String(agents.length))}</span>
           </div>
-          <button className="primary compact" type="button" onClick={() => setAgentFormOpen(true)}>
-            + {t.addAgent}
-          </button>
+          {!agentFormOpen && availableRoles.length ? (
+            <button className="primary compact" type="button" onClick={() => { setEditingAgentId(""); setAgentFormOpen(true); }}>
+              + {t.addAgent}
+            </button>
+          ) : null}
         </div>
-
-        <form action={actions.selectWorkflow} className="workflowStrip">
-          <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
-          <label className="field">
-            {t.currentWorkflow}
-            <select name="workflow" defaultValue={currentWorkflow.key} onChange={(event) => event.currentTarget.form?.requestSubmit()} suppressHydrationWarning>
-              {state.workflows.map((workflow) => (
-                <option key={workflow.id} value={workflow.key}>{workflow.display_name}</option>
-              ))}
-            </select>
-          </label>
-          <p>{currentWorkflow.short_description || currentWorkflow.description}</p>
-        </form>
 
         {agentFormOpen ? (
           <form action={actions.registerAgent} className="agentEditor">
@@ -754,82 +909,395 @@ function AgentPanel({ actions, agentFormOpen, currentRoles, currentWorkflow, lan
             <input name="workflow" type="hidden" value={currentWorkflow.key} suppressHydrationWarning />
             <div className="editorHeader">
               <h3>{t.newAgent}</h3>
-              <button className="ghost" type="button" onClick={() => setAgentFormOpen(false)}>{t.cancel}</button>
+              <button aria-label={t.cancel} className="iconButton" title={t.cancel} type="button" onClick={() => setAgentFormOpen(false)}>×</button>
             </div>
-            <div className="twoCols">
+            <div className="agentFormGrid">
+              <div className="field">
+                <span className="fieldLabel">{t.role}</span>
+                <Dropdown
+                  label={t.role}
+                  name="role"
+                  onChange={setSelectedRoleKey}
+                  options={availableRoles.map((role) => ({ label: role.display_name, value: role.role_key }))}
+                  required
+                  value={effectiveRoleKey}
+                />
+                <small className="fieldHint">{selectedRole?.allow_multiple ? t.multiAgentRole : t.singleAgentRole}</small>
+              </div>
+              <div className="field">
+                <span className="fieldLabel">{t.harness}</span>
+                <Dropdown
+                  label={t.harness}
+                  name="harness_type"
+                  onChange={() => {}}
+                  options={[{ label: "Codex", value: "codex" }]}
+                  required
+                  value="codex"
+                />
+              </div>
+              <SessionField error={codexSessionError} onRefresh={refreshCodexState} sessions={selectableSessions} t={t} />
               <label className="field">
-                {t.role}
-                <select name="role" suppressHydrationWarning>
-                  {roleOptions.map((role) => (
-                    <option key={role.id} value={role.role_key}>{role.display_name}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                {t.harness}
-                <input name="harness_type" placeholder="codex" suppressHydrationWarning />
+                <span className="fieldLabel">{t.displayName}</span>
+                <input name="display_name" suppressHydrationWarning />
               </label>
             </div>
-            <label className="field">
-              {t.sessionId}
-              <input name="session_id" suppressHydrationWarning />
-            </label>
-            <label className="field">
-              {t.displayName}
-              <input name="display_name" suppressHydrationWarning />
-            </label>
-            <label className="checkLine">
-              <input name="replace_role" type="checkbox" suppressHydrationWarning />
-              {t.replaceRole}
-            </label>
-            <button className="primary" type="submit">{t.register}</button>
+            <div className="agentEditorFooter singleAction">
+              <PendingSubmitButton className="primary" label={t.register} />
+            </div>
           </form>
         ) : null}
 
         <div className="agentTable">
-          {state.agents.length ? (
-            state.agents.map((agent) => (
-              <div className="agentRow" key={agent.id}>
-                <div>
-                  <strong>{roleName(currentRoles, agent.role_key)}</strong>
-                  <span>{agent.harness_type}</span>
+          {agents.length ? (
+            agents.map((agent) => {
+              const runtime = runtimeBySession[agent.session_id];
+              const runtimeStatus = runtime?.status || agent.health?.runtime_status;
+              const active = runtimeStatus === "active";
+              const health = agentHealth(agent, t, runtime, lifecycleBySession[agent.session_id]);
+              const assignedRole = roleName(currentRoles, agent.role_key);
+              const sessionName = runtime?.title || agent.health?.session_name || t.unnamedSession;
+              if (editingAgentId === agent.id) {
+                return (
+                  <form action={actions.updateAgent} className="agentRow agentRowEditing" key={agent.id}>
+                    <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+                    <input name="agent_id" type="hidden" value={agent.id} suppressHydrationWarning />
+                    <input name="current_session_id" type="hidden" value={agent.session_id} suppressHydrationWarning />
+                    <input name="runtime_status" type="hidden" value={runtimeStatus || ""} suppressHydrationWarning />
+                    <div className="agentIdentity">
+                      <strong>{agent.display_name || assignedRole}</strong>
+                      <span>{agent.display_name ? `${assignedRole} · ${harnessName(agent.harness_type)}` : harnessName(agent.harness_type)}</span>
+                    </div>
+                    <div className="agentSessionEditor">
+                      <SessionField
+                        error={codexSessionError}
+                        initialValue={agent.session_id}
+                        onRefresh={refreshCodexState}
+                        sessions={selectableSessions}
+                        t={t}
+                      />
+                    </div>
+                    <div className="agentHealth">
+                      <span className={`statusBadge compact ${health.className}`} title={health.title}>{health.label}</span>
+                    </div>
+                    <div className="agentActions" title={active ? t.agentBusyActionHint : undefined}>
+                      <button className="secondary mini" type="button" onClick={() => setEditingAgentId("")}>{t.cancel}</button>
+                      <PendingSubmitButton className="primary mini" disabled={active} label={t.save} title={active ? t.agentBusyActionHint : undefined} />
+                    </div>
+                  </form>
+                );
+              }
+              return (
+                <div className="agentRow" key={agent.id} tabIndex={0}>
+                  <div className="agentIdentity">
+                    <strong>{agent.display_name || assignedRole}</strong>
+                    <span>{agent.display_name ? `${assignedRole} · ${harnessName(agent.harness_type)}` : harnessName(agent.harness_type)}</span>
+                  </div>
+                  <div className="agentSession">
+                    <strong title={sessionName}>{sessionName}</strong>
+                    <code title={agent.session_id}>{agent.session_id}</code>
+                    <SessionMetadata runtime={runtime} t={t} />
+                  </div>
+                  <div className="agentHealth">
+                    <span className={`statusBadge compact ${health.className}`} title={health.title}>{health.label}</span>
+                  </div>
+                  <div className="agentActions" title={active ? t.agentBusyActionHint : undefined}>
+                    <button className="secondary mini" disabled={active} type="button" onClick={() => { setAgentFormOpen(false); setEditingAgentId(agent.id); }}>
+                      {t.switchSession}
+                    </button>
+                    <form action={actions.unregisterAgent}>
+                      <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+                      <input name="agent_id" type="hidden" value={agent.id} suppressHydrationWarning />
+                      <input name="current_session_id" type="hidden" value={agent.session_id} suppressHydrationWarning />
+                      <input name="runtime_status" type="hidden" value={runtimeStatus || ""} suppressHydrationWarning />
+                      <button className="ghost mini" disabled={active} type="submit">{t.remove}</button>
+                    </form>
+                  </div>
                 </div>
-                <code>{agent.session_id}</code>
-                <span>{agent.display_name || "-"}</span>
-                <span className="statusBadge saved">{agent.status}</span>
-                <form action={actions.unregisterAgent}>
-                  <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
-                  <input name="agent_id" type="hidden" value={agent.id} suppressHydrationWarning />
-                  <button className="ghost" type="submit">{t.remove}</button>
-                </form>
-              </div>
-            ))
-          ) : (
+              );
+            })
+          ) : !agentFormOpen ? (
             <div className="emptyState">
               <strong>{t.emptyTitle}</strong>
               <span>{t.emptyAgents}</span>
             </div>
-          )}
+          ) : null}
         </div>
       </section>
+    </div>
+  );
+}
 
-      <aside className="sidePanel">
-        <h3>{t.roles}</h3>
-        <div className="roleList">
-          {currentRoles.map((role) => (
-            <div className="roleItem" key={role.id}>
-              <strong>{role.display_name}</strong>
-              <span>{role.allow_multiple ? "multi-agent" : "single-agent"}</span>
-            </div>
+function SessionField({ error, initialValue = "", onRefresh, sessions, t }) {
+  const [manual, setManual] = useState(sessions.length === 0);
+  const [sessionId, setSessionId] = useState(initialValue);
+  const hint = error ? t.sessionListUnavailable : sessions.length === 0 ? t.noWorkspaceSessions : "";
+
+  useEffect(() => {
+    if (sessionId && !sessions.some((session) => session.session_id === sessionId)) {
+      setSessionId("");
+    }
+    if (!sessions.length) {
+      setManual(true);
+    }
+  }, [sessionId, sessions]);
+
+  return (
+    <div className="field">
+      <span className="fieldLabel">{t.sessionId}</span>
+      {manual ? (
+        <input id="session-id" name="session_id" required value={sessionId} onChange={(event) => setSessionId(event.target.value)} suppressHydrationWarning />
+      ) : (
+        <Dropdown
+          label={t.sessionId}
+          name="session_id"
+          onChange={setSessionId}
+          onOpen={onRefresh}
+          options={sessions.map((session) => ({
+            description: session.session_id,
+            label: session.name || t.unnamedSession,
+            value: session.session_id
+          }))}
+          placeholder={t.chooseSession}
+          required
+          value={sessionId}
+        />
+      )}
+      <div className="fieldMeta">
+        {hint ? <small className="fieldHint">{hint}</small> : <span />}
+        {sessions.length ? (
+          <button className="fieldSwitch" type="button" onClick={() => { setManual(!manual); setSessionId(""); }}>
+            {manual ? t.chooseFromSessions : t.manualSession}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function Dropdown({ label, name, onChange, onOpen, options, placeholder = "", required = false, value }) {
+  const [invalid, setInvalid] = useState(false);
+  const [open, setOpen] = useState(false);
+  const menuId = useId();
+  const rootRef = useRef(null);
+  const triggerRef = useRef(null);
+  const selected = options.find((option) => option.value === value);
+
+  useEffect(() => {
+    function closeOutside(event) {
+      if (!rootRef.current?.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+
+    function closeWithEscape(event) {
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    }
+
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeWithEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeWithEscape);
+    };
+  }, []);
+
+  function select(option) {
+    onChange(option.value);
+    setInvalid(false);
+    setOpen(false);
+    triggerRef.current?.focus();
+  }
+
+  return (
+    <div className={`dropdown${open ? " open" : ""}${invalid ? " invalid" : ""}`} ref={rootRef}>
+      <select
+        aria-hidden="true"
+        aria-label={label}
+        className="dropdownNative"
+        name={name}
+        onChange={() => {}}
+        onInvalid={(event) => {
+          event.preventDefault();
+          setInvalid(true);
+          setOpen(true);
+          triggerRef.current?.focus();
+        }}
+        required={required}
+        tabIndex={-1}
+        value={value}
+      >
+        <option value="" />
+        {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+      </select>
+      <button
+        aria-controls={menuId}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={label}
+        className="dropdownTrigger"
+        onClick={() => {
+          const nextOpen = !open;
+          setOpen(nextOpen);
+          if (nextOpen) {
+            onOpen?.();
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setOpen(true);
+            onOpen?.();
+          }
+        }}
+        ref={triggerRef}
+        type="button"
+      >
+        <span className={selected ? "dropdownValue" : "dropdownPlaceholder"}>{selected?.label || placeholder}</span>
+        <span aria-hidden="true" className="dropdownChevron" />
+      </button>
+      {open ? (
+        <div aria-label={label} className="dropdownMenu" id={menuId} role="listbox">
+          {options.map((option) => (
+            <button
+              aria-selected={option.value === value}
+              className="dropdownOption"
+              key={option.value}
+              onClick={() => select(option)}
+              role="option"
+              type="button"
+            >
+              <span className="dropdownOptionText">
+                <strong>{option.label}</strong>
+                {option.description ? <small>{option.description}</small> : null}
+              </span>
+            </button>
           ))}
         </div>
-      </aside>
+      ) : null}
     </div>
   );
 }
 
 function roleName(roles, key) {
   return roles.find((role) => role.role_key === key)?.display_name || key.toUpperCase();
+}
+
+function harnessName(harnessType) {
+  return { codex: "Codex" }[harnessType] || harnessType;
+}
+
+function SessionMetadata({ runtime, t }) {
+  const items = [];
+  if (runtime?.model) {
+    items.push({ label: readableModel(runtime.model), title: `${t.modelLabel}: ${runtime.model}` });
+  }
+  if (runtime && Object.hasOwn(runtime, "effort")) {
+    const effort = runtime.effort ? readableEffort(runtime.effort) : t.defaultValue;
+    items.push({ label: effort, title: `${t.thinkingLabel}: ${effort}`, ultra: runtime.effort === "ultra" });
+  }
+  if (runtime && Object.hasOwn(runtime, "serviceTier")) {
+    const fast = runtime.serviceTier === "priority";
+    if (fast) {
+      items.push({ title: `${t.speedLabel}: ${t.fast}`, fast: true });
+    }
+  }
+  if (!items.length) {
+    return <span className="sessionMetadata unavailable">{t.sessionSettingsUnavailable}</span>;
+  }
+  return (
+    <div className="sessionMetadata">
+      {items.map((item) => (
+        <span
+          aria-label={item.fast ? t.fast : undefined}
+          className={item.fast ? "fastIcon" : item.ultra ? "ultra" : ""}
+          key={item.title}
+          role={item.fast ? "img" : undefined}
+          title={item.title}
+        >
+          {item.fast ? (
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M13.4 2.2 4.8 13.1a.9.9 0 0 0 .7 1.5h5.1l-.8 6.2a.9.9 0 0 0 1.6.7l7.8-10.7a.9.9 0 0 0-.7-1.4h-4.9l1.3-6.5a.9.9 0 0 0-1.5-.7Z" fill="currentColor" />
+            </svg>
+          ) : item.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function readableModel(model) {
+  return model.replace(/^gpt-/i, "GPT-").replace(/-([a-z][a-z0-9]*)$/i, (_, suffix) => ` ${suffix[0].toUpperCase()}${suffix.slice(1)}`);
+}
+
+function readableEffort(effort) {
+  return { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max", ultra: "Ultra" }[effort] || effort;
+}
+
+function agentHealth(agent, t, runtime, lifecycle) {
+  const checkedHealth = agent.health;
+  const healthStatus = checkedHealth?.status;
+  const runtimeStatus = runtime?.status || checkedHealth?.runtime_status;
+  const statuses = {
+    healthy: { className: "saved", label: t.healthHealthy },
+    archived: { className: "archived", label: t.healthArchived },
+    deleted: { className: "error", label: t.healthDeleted },
+    unavailable: { className: "warning", label: t.healthUnavailable },
+    system_error: { className: "error", label: t.healthSystemError },
+    unhealthy: { className: "error", label: t.healthUnhealthy },
+    unverified: { className: "", label: t.healthUnverified }
+  };
+  const runtimeStatuses = {
+    active: { className: "active", label: t.healthActive, title: t.healthActiveHint },
+    idle: { className: "saved", label: t.healthIdle, title: t.healthIdleHint },
+    notLoaded: { className: "", label: t.healthNotLoaded, title: t.healthNotLoadedHint },
+    systemError: { className: "error", label: t.healthSystemError, title: runtime?.error || checkedHealth?.error || t.healthSystemErrorHint }
+  };
+  if (lifecycle === "archived" || (healthStatus === "archived" && lifecycle !== "unarchived")) {
+    return { ...statuses.archived, title: t.healthArchivedHint };
+  }
+  if (healthStatus === "deleted") {
+    return { ...statuses.deleted, title: t.healthDeletedHint };
+  }
+  if (["unavailable", "unhealthy"].includes(healthStatus)) {
+    const health = statuses[healthStatus];
+    return { ...health, title: checkedHealth.error || (healthStatus === "unavailable" ? t.healthUnavailableHint : health.label) };
+  }
+  if (runtimeStatuses[runtimeStatus]) {
+    return runtimeStatuses[runtimeStatus];
+  }
+  if (lifecycle === "unarchived") {
+    return runtimeStatuses.notLoaded;
+  }
+  const health = statuses[healthStatus] || statuses.unverified;
+  const title = checkedHealth?.error || (checkedHealth?.checked_at ? `${t.healthCheckedAt}: ${shortDate(checkedHealth.checked_at)}` : health.label);
+  return { ...health, title };
+}
+
+function sessionMap(sessions) {
+  return Object.fromEntries(sessions.filter((session) => session.threadId).map((session) => [session.threadId, session]));
+}
+
+function updateRuntime(current, event) {
+  if (event.removed) {
+    const next = { ...current };
+    delete next[event.threadId];
+    return next;
+  }
+  return { ...current, [event.threadId]: { ...current[event.threadId], ...event } };
+}
+
+function settledLifecycle(current, agents) {
+  const next = { ...current };
+  for (const [threadId, status] of Object.entries(current)) {
+    const agent = agents.find((item) => item.session_id === threadId);
+    if (!agent || (status === "archived" && agent.health?.status === "archived") || (status === "unarchived" && agent.health?.status !== "archived")) {
+      delete next[threadId];
+    }
+  }
+  return next;
 }
 
 function initialLarkStep(step, hasIdentity) {

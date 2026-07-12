@@ -16,11 +16,13 @@ if str(ROOT) not in sys.path:
 
 from core.db import (
     DEFAULT_WORKFLOW_KEY,
+    SUPPORTED_HARNESS_TYPES,
     configure_lark_board,
     configure_lark_identity,
     create_lark_board,
     init_workspace,
     inspect_workspace,
+    list_codex_sessions,
     refresh_lark_identity,
     register_agent,
     remove_lark_identity,
@@ -28,6 +30,8 @@ from core.db import (
     select_workflow,
     set_default_lark_identity,
     unregister_agent,
+    update_agent,
+    verify_agents,
     verify_lark_user_identity,
 )
 
@@ -96,7 +100,7 @@ def main() -> int:
     add_workspace_args(register_parser)
     register_parser.add_argument("--workflow", help="Workflow key. Defaults to the workspace workflow.")
     register_parser.add_argument("--role", required=True, help="Role key in the workflow, such as pm, qa, tl, or design.")
-    register_parser.add_argument("--harness-type", required=True, help="Harness type, such as codex, claude-code, opencode.")
+    register_parser.add_argument("--harness-type", choices=SUPPORTED_HARNESS_TYPES, required=True, help="Agent harness type.")
     register_parser.add_argument("--session-id", required=True, help="Harness session/thread ID.")
     register_parser.add_argument("--display-name", help="Human-readable agent name.")
     register_parser.add_argument("--replace-role", action="store_true", help="Replace all existing agents for this role.")
@@ -110,6 +114,21 @@ def main() -> int:
     unregister_parser.add_argument("--harness-type", help="Harness type used when agent-id is omitted.")
     unregister_parser.add_argument("--session-id", help="Session ID used when agent-id is omitted.")
     unregister_parser.set_defaults(func=cmd_unregister_agent)
+
+    update_agent_parser = subparsers.add_parser("update-agent", help="Assign a different session to a registered agent.")
+    add_workspace_args(update_agent_parser)
+    update_agent_parser.add_argument("--agent-id", required=True, help="Registered agent ID.")
+    update_agent_parser.add_argument("--session-id", required=True, help="Replacement harness session/thread ID.")
+    update_agent_parser.set_defaults(func=cmd_update_agent)
+
+    verify_agent_parser = subparsers.add_parser("verify-agent", help="Verify registered Codex agent sessions.")
+    add_workspace_args(verify_agent_parser)
+    verify_agent_parser.add_argument("--agent-id", help="Agent ID. Omit to verify every registered Codex agent.")
+    verify_agent_parser.set_defaults(func=cmd_verify_agent)
+
+    sessions_parser = subparsers.add_parser("list-codex-sessions", help="List Codex sessions for the current workspace.")
+    add_workspace_args(sessions_parser)
+    sessions_parser.set_defaults(func=cmd_list_codex_sessions)
 
     workflow_parser = subparsers.add_parser("select-workflow", help="Select the workspace workflow.")
     add_workspace_args(workflow_parser)
@@ -242,6 +261,21 @@ def cmd_unregister_agent(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update_agent(args: argparse.Namespace) -> int:
+    print_json(update_agent(args.workspace, agent_id=args.agent_id, session_id=args.session_id))
+    return 0
+
+
+def cmd_verify_agent(args: argparse.Namespace) -> int:
+    print_json(verify_agents(args.workspace, agent_id=args.agent_id))
+    return 0
+
+
+def cmd_list_codex_sessions(args: argparse.Namespace) -> int:
+    print_json(list_codex_sessions(args.workspace))
+    return 0
+
+
 def cmd_select_workflow(args: argparse.Namespace) -> int:
     result = select_workflow(args.workspace, workflow=args.workflow)
     print_json(result)
@@ -253,13 +287,15 @@ def cmd_serve_ui(args: argparse.Namespace) -> int:
     config = load_ui_config()
     host = args.host or config["host"]
     port = args.port or config["port"]
+    ui_dir = ROOT / "ui"
+    ensure_ui_dependencies(ui_dir)
     env = os.environ.copy()
     env["TEAMFLOW_CLI"] = str(ROOT / "scripts" / "teamflow.py")
     env["TEAMFLOW_WORKSPACE"] = str(Path(args.workspace).expanduser().resolve())
     print(f"TeamFlow UI: http://{host}:{port}/")
     return subprocess.call(
         ["npm", "run", "dev", "--", "--hostname", host, "--port", str(port)],
-        cwd=ROOT / "ui",
+        cwd=ui_dir,
         env=env,
     )
 
@@ -345,19 +381,92 @@ def cmd_self_check(args: argparse.Namespace) -> int:
             "--name",
             f"{Path(workspace).name}项目看板",
         ]
-        register_agent(workspace, role="pm", harness_type="codex", session_id="thread_pm")
         try:
-            register_agent(workspace, role="pm", harness_type="codex", session_id="thread_pm_2")
+            register_agent(workspace, role="qa", harness_type="claude-code", session_id="session_qa_unsupported")
         except ValueError as error:
-            assert "allows only one agent" in str(error)
+            assert "unsupported harness type" in str(error)
         else:
-            raise AssertionError("second pm registration should fail")
-        register_agent(workspace, role="pm", harness_type="codex", session_id="thread_pm_2", replace_role=True)
-        removed = register_agent(workspace, role="qa", harness_type="claude-code", session_id="session_qa_1")
-        register_agent(workspace, role="qa", harness_type="claude-code", session_id="session_qa_2")
-        register_agent(workspace, role="tl", harness_type="opencode", session_id="session_tl_1")
-        register_agent(workspace, role="design", harness_type="codex", session_id="thread_design_1")
-        unregister_agent(workspace, agent_id=removed["agent_id"])
+            raise AssertionError("unsupported harness registration should fail")
+
+        archived_thread_ids: set[str] = set()
+        error_thread_ids: set[str] = set()
+
+        def read_check_thread(thread_id: str, *, include_turns: bool = False) -> dict[str, object]:
+            if thread_id == "thread_design_1":
+                raise ValueError(f"thread not loaded: {thread_id}")
+            thread: dict[str, object] = {
+                "id": thread_id,
+                "name": f"Session {thread_id}",
+                "status": {"type": "systemError" if thread_id in error_thread_ids else "notLoaded"},
+                "cwd": workspace,
+            }
+            if include_turns and thread_id in error_thread_ids:
+                thread["turns"] = [{"error": {"message": "context window exceeded"}}]
+            return thread
+
+        def list_check_threads(cwd: str, *, archived: bool = False) -> list[dict[str, object]]:
+            assert cwd == workspace
+            thread_ids = ["thread_pm", "thread_pm_2", "session_qa_1", "session_qa_2", "session_qa_3", "session_tl_1"]
+            selected = [thread_id for thread_id in thread_ids if (thread_id in archived_thread_ids) is archived]
+            return [read_check_thread(thread_id) for thread_id in selected]
+
+        with patch("core.db.read_codex_thread", side_effect=read_check_thread), patch("core.db.list_codex_threads", side_effect=list_check_threads):
+            register_agent(workspace, role="pm", harness_type="codex", session_id="thread_pm")
+            try:
+                register_agent(workspace, role="pm", harness_type="codex", session_id="thread_pm_2")
+            except ValueError as error:
+                assert "allows only one agent" in str(error)
+            else:
+                raise AssertionError("second pm registration should fail")
+            pm_agent = register_agent(workspace, role="pm", harness_type="codex", session_id="thread_pm_2", replace_role=True)
+            removed = register_agent(workspace, role="qa", harness_type="codex", session_id="session_qa_1")
+            qa_agent = register_agent(workspace, role="qa", harness_type="codex", session_id="session_qa_2")
+            register_agent(workspace, role="tl", harness_type="codex", session_id="session_tl_1")
+            register_agent(workspace, role="design", harness_type="codex", session_id="thread_design_1")
+            unregister_agent(workspace, agent_id=removed["agent_id"])
+            updated = update_agent(workspace, agent_id=qa_agent["agent_id"], session_id="session_qa_3")
+            assert updated["health"]["status"] == "healthy"
+            assert updated["health"]["session_name"] == "Session session_qa_3"
+            assignment_updates = {agent["id"]: agent["updated_at"] for agent in inspect_workspace(workspace)["agents"]}
+            health = verify_agents(workspace)
+            assert pm_agent["health"]["ok"] is True
+            assert health["checked"] == 4
+            assert health["ok"] is False
+            assert {item["status"] for item in health["results"]} == {"healthy", "deleted"}
+            assert next(item for item in health["results"] if item["agent_id"] == pm_agent["agent_id"])["runtime_status"] == "notLoaded"
+            assert next(item for item in health["results"] if item["agent_id"] == pm_agent["agent_id"])["thread_cwd"] == workspace
+            archived_thread_ids.add("thread_pm_2")
+            archived_health = verify_agents(workspace, agent_id=pm_agent["agent_id"])
+            assert archived_health["results"][0]["status"] == "archived"
+            assert archived_health["results"][0]["thread_archived"] is True
+            archived_thread_ids.clear()
+            restored_health = verify_agents(workspace, agent_id=pm_agent["agent_id"])
+            assert restored_health["results"][0]["status"] == "healthy"
+            assert restored_health["results"][0]["thread_archived"] is False
+            error_thread_ids.add("thread_pm_2")
+            error_health = verify_agents(workspace, agent_id=pm_agent["agent_id"])
+            assert error_health["results"][0]["status"] == "system_error"
+            assert error_health["results"][0]["error"] == "context window exceeded"
+            error_thread_ids.clear()
+            verify_agents(workspace, agent_id=pm_agent["agent_id"])
+        with patch("core.db.list_codex_threads", side_effect=ValueError("failed to start Codex app-server")):
+            unavailable_health = verify_agents(workspace, agent_id=pm_agent["agent_id"])
+        assert unavailable_health["results"][0]["status"] == "unavailable"
+        with patch("core.db.read_codex_thread", side_effect=read_check_thread), patch("core.db.list_codex_threads", side_effect=list_check_threads):
+            verify_agents(workspace, agent_id=pm_agent["agent_id"])
+        with patch("core.db.list_codex_threads", return_value=[{
+            "id": "thread_pm_2",
+            "name": "PM session",
+            "status": {"type": "notLoaded"},
+            "updatedAt": 123,
+        }]):
+            sessions = list_codex_sessions(workspace)
+        assert sessions["sessions"] == [{
+            "session_id": "thread_pm_2",
+            "name": "PM session",
+            "status": "notLoaded",
+            "updated_at": 123,
+        }]
         result = inspect_workspace(workspace)
 
     agents = result["agents"]
@@ -365,7 +474,7 @@ def cmd_self_check(args: argparse.Namespace) -> int:
     user_identity = next(identity for identity in result["lark_identities"] if identity["auth_mode"] == "user")
     board = result["lark_board"]
     assert result["initialized"] is True
-    assert result["schema_version"] == "011_lark_user_avatar_url"
+    assert result["schema_version"] == "012_agent_runtime_ephemeral"
     assert {workflow["key"] for workflow in result["workflows"]} == {DEFAULT_WORKFLOW_KEY, "general-task"}
     assert all(workflow["short_description"] for workflow in result["workflows"])
     assert result["current_workflow"]["key"] == DEFAULT_WORKFLOW_KEY
@@ -388,10 +497,31 @@ def cmd_self_check(args: argparse.Namespace) -> int:
     assert len([agent for agent in agents if agent["role_key"] == "pm"]) == 1
     assert len([agent for agent in agents if agent["role_key"] == "tl"]) == 1
     assert len([agent for agent in agents if agent["role_key"] == "design"]) == 1
+    assert all({"status", "session_name", "last_verified_at", "last_error"}.isdisjoint(agent) for agent in agents)
+    assert {agent["id"]: agent["updated_at"] for agent in agents} == assignment_updates
+    assert next(agent for agent in agents if agent["role_key"] == "qa")["session_id"] == "session_qa_3"
     assert isinstance(load_ui_config()["port"], int)
     assert load_ui_config()["port"] > 0
+    with tempfile.TemporaryDirectory(prefix="ui-", dir=checks_dir) as ui_workspace:
+        ui_dir = Path(ui_workspace)
+        with patch("subprocess.run") as npm_run:
+            ensure_ui_dependencies(ui_dir)
+        npm_run.assert_called_once_with(["npm", "ci"], cwd=ui_dir, check=True)
+        (ui_dir / "node_modules" / "next").mkdir(parents=True)
+        with patch("subprocess.run") as npm_run:
+            ensure_ui_dependencies(ui_dir)
+        npm_run.assert_not_called()
     print("OK: TeamFlow local config self-check passed")
     return 0
+
+
+def ensure_ui_dependencies(ui_dir: Path) -> None:
+    if (ui_dir / "node_modules" / "next").exists():
+        return
+    try:
+        subprocess.run(["npm", "ci"], cwd=ui_dir, check=True)
+    except FileNotFoundError as error:
+        raise ValueError("npm is required to start the TeamFlow UI") from error
 
 
 def load_ui_config() -> dict[str, int | str]:

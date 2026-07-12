@@ -11,12 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .codex import codex_thread_error, codex_thread_name, list_codex_threads, read_codex_thread
 from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
 from .migrations import MIGRATIONS
 
 
 SCHEMA_VERSION = MIGRATIONS[-1].ID
 DEFAULT_WORKFLOW_KEY = "software-development"
+SUPPORTED_HARNESS_TYPES = ("codex",)
 
 
 def now() -> str:
@@ -393,6 +395,8 @@ def register_agent(
     paths = resolve_workspace_paths(workspace)
     role_key = normalize_key(role, "role")
     harness = normalize_key(harness_type, "harness_type")
+    if harness not in SUPPORTED_HARNESS_TYPES:
+        raise ValueError(f"unsupported harness type: {harness}. Supported harness types: {', '.join(SUPPORTED_HARNESS_TYPES)}")
     session = session_id.strip()
     if not session:
         raise ValueError("session_id is required")
@@ -414,6 +418,8 @@ def register_agent(
             display_name=display_name,
         )
 
+    health = verify_agent(workspace, agent_id=agent_id)
+
     return {
         "ok": True,
         **init_result,
@@ -423,6 +429,202 @@ def register_agent(
         "harness_type": harness,
         "session_id": session,
         "replaced_role": replace_role,
+        "health": health,
+    }
+
+
+def list_codex_sessions(workspace: str | None) -> dict[str, Any]:
+    paths = resolve_workspace_paths(workspace)
+    return {
+        "ok": True,
+        "workspace_root": str(paths.root),
+        "sessions": codex_session_rows(list_codex_threads(str(paths.root))),
+    }
+
+
+def verify_agents(workspace: str | None, *, agent_id: str | None = None) -> dict[str, Any]:
+    paths = resolve_workspace_paths(workspace)
+    if not paths.db_path.exists():
+        raise ValueError("TeamFlow workspace is not initialized")
+
+    with connect(paths.db_path) as conn:
+        run_migrations(conn)
+        workspace_id = workspace_id_for_root(conn, paths.root)
+        query = "SELECT * FROM agents WHERE workspace_id = ? AND harness_type = 'codex'"
+        params: tuple[Any, ...] = (workspace_id,)
+        if agent_id:
+            query += " AND id = ?"
+            params += (agent_id,)
+        query += " ORDER BY updated_at DESC"
+        agents = conn.execute(query, params).fetchall()
+        if agent_id and not agents:
+            raise ValueError("agent not found")
+
+    checked_at = now()
+    try:
+        active_threads = list_codex_threads(str(paths.root))
+        archived_threads = list_codex_threads(str(paths.root), archived=True)
+    except ValueError as error:
+        results = [
+            agent_health_result(agent, status="unavailable", checked_at=checked_at, error=str(error))
+            for agent in agents
+        ]
+        return {
+            "ok": False,
+            "checked": len(results),
+            "results": results,
+            "sessions": [],
+            "session_error": str(error),
+        }
+
+    active_by_id = {thread.get("id"): thread for thread in active_threads}
+    archived_by_id = {thread.get("id"): thread for thread in archived_threads}
+    results = []
+    for agent in agents:
+        thread = active_by_id.get(agent["session_id"])
+        thread_archived = False
+        if thread is None:
+            thread = archived_by_id.get(agent["session_id"])
+            thread_archived = thread is not None
+
+        if thread is None:
+            try:
+                thread = read_codex_thread(agent["session_id"])
+            except ValueError:
+                results.append(agent_health_result(
+                    agent,
+                    status="deleted",
+                    checked_at=checked_at,
+                    error="Codex thread no longer exists",
+                ))
+                continue
+
+        runtime_status = (thread.get("status") or {}).get("type")
+        if runtime_status == "systemError" and not thread_archived:
+            try:
+                thread = read_codex_thread(agent["session_id"], include_turns=True)
+            except ValueError:
+                pass
+            runtime_status = (thread.get("status") or {}).get("type")
+        thread_cwd = str(thread.get("cwd") or "").strip()
+        thread_path = Path(thread_cwd).expanduser().resolve() if thread_cwd else None
+        if thread_path is None or (thread_path != paths.root and paths.root not in thread_path.parents):
+            status = "unhealthy"
+            error = f"Codex thread belongs to a different workspace: {thread_cwd or 'unknown'}"
+        elif thread_archived:
+            status = "archived"
+            error = "Codex thread is archived"
+        elif runtime_status == "systemError":
+            status = "system_error"
+            error = codex_thread_error(thread) or "Codex session entered a system error state"
+        else:
+            status = "healthy"
+            error = None
+        results.append(agent_health_result(
+            agent,
+            status=status,
+            checked_at=checked_at,
+            session_name=codex_thread_name(thread),
+            error=error,
+            runtime_status=runtime_status,
+            thread_cwd=thread_cwd,
+            thread_archived=thread_archived,
+        ))
+
+    return {
+        "ok": all(result["ok"] for result in results),
+        "checked": len(results),
+        "results": results,
+        "sessions": codex_session_rows(active_threads),
+        "session_error": None,
+    }
+
+
+def verify_agent(workspace: str | None, *, agent_id: str) -> dict[str, Any]:
+    return verify_agents(workspace, agent_id=agent_id)["results"][0]
+
+
+def update_agent(workspace: str | None, *, agent_id: str, session_id: str) -> dict[str, Any]:
+    paths = resolve_workspace_paths(workspace)
+    if not paths.db_path.exists():
+        raise ValueError("TeamFlow workspace is not initialized")
+    session = session_id.strip()
+    if not session:
+        raise ValueError("session_id is required")
+
+    with connect(paths.db_path) as conn:
+        run_migrations(conn)
+        workspace_id = workspace_id_for_root(conn, paths.root)
+        agent = conn.execute(
+            "SELECT * FROM agents WHERE workspace_id = ? AND id = ?",
+            (workspace_id, agent_id),
+        ).fetchone()
+        if agent is None:
+            raise ValueError("agent not found")
+        duplicate = conn.execute(
+            """
+            SELECT id FROM agents
+            WHERE workspace_id = ? AND role_id = ? AND harness_type = ? AND session_id = ? AND id != ?
+            """,
+            (workspace_id, agent["role_id"], agent["harness_type"], session, agent_id),
+        ).fetchone()
+        if duplicate:
+            raise ValueError("this session is already registered for the role")
+        timestamp = now()
+        conn.execute(
+            """
+            UPDATE agents
+            SET session_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (session, timestamp, agent_id),
+        )
+
+    return {
+        "ok": True,
+        "agent_id": agent_id,
+        "session_id": session,
+        "health": verify_agent(workspace, agent_id=agent_id),
+    }
+
+
+def codex_session_rows(threads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sessions = []
+    for thread in threads:
+        thread_id = str(thread.get("id") or "").strip()
+        if thread_id:
+            sessions.append({
+                "session_id": thread_id,
+                "name": codex_thread_name(thread),
+                "status": (thread.get("status") or {}).get("type"),
+                "updated_at": thread.get("updatedAt"),
+            })
+    return sessions
+
+
+def agent_health_result(
+    agent: sqlite3.Row,
+    *,
+    status: str,
+    checked_at: str,
+    session_name: str | None = None,
+    error: str | None = None,
+    runtime_status: str | None = None,
+    thread_cwd: str | None = None,
+    thread_archived: bool | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": status == "healthy",
+        "agent_id": agent["id"],
+        "harness_type": agent["harness_type"],
+        "session_id": agent["session_id"],
+        "session_name": session_name,
+        "status": status,
+        "runtime_status": runtime_status,
+        "thread_cwd": thread_cwd,
+        "thread_archived": thread_archived,
+        "checked_at": checked_at,
+        "error": error,
     }
 
 
@@ -701,7 +903,11 @@ def upsert_agent(
     timestamp = now()
     if existing:
         conn.execute(
-            "UPDATE agents SET display_name = COALESCE(?, display_name), status = 'registered', updated_at = ? WHERE id = ?",
+            """
+            UPDATE agents
+            SET display_name = COALESCE(?, display_name), updated_at = ?
+            WHERE id = ?
+            """,
             (display_name, timestamp, existing["id"]),
         )
         return existing["id"]

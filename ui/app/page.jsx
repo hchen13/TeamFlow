@@ -10,15 +10,31 @@ import {
   setDefaultLarkIdentity,
   startLarkUserAuth,
   unregisterAgent,
+  updateAgent,
   verifyLarkUserIdentity
 } from "../lib/actions";
-import { getState } from "../lib/teamflow";
+import { attachAgentHealth, getCodexState, getState } from "../lib/teamflow";
 
 export const dynamic = "force-dynamic";
 
 export default async function Page({ searchParams }) {
   const params = await searchParams;
+  const initialTab = textParam(params?.tab) || "lark";
+  let codexSessions = [];
+  let codexSessionError = false;
+  let agentHealth = [];
+  if (initialTab === "agent") {
+    try {
+      const codexState = await getCodexState();
+      codexSessions = codexState.sessions || [];
+      codexSessionError = Boolean(codexState.session_error);
+      agentHealth = codexState.results || [];
+    } catch {
+      codexSessionError = true;
+    }
+  }
   const state = await getState();
+  state.agents = attachAgentHealth(state.agents || [], agentHealth);
   const currentWorkflow = state.current_workflow || state.workflows[0];
   const currentRoles = state.roles.filter((role) => role.workflow_key === currentWorkflow?.key).sort(roleSort);
 
@@ -35,16 +51,19 @@ export default async function Page({ searchParams }) {
         setDefaultLarkIdentity,
         startLarkUserAuth,
         unregisterAgent,
+        updateAgent,
         verifyLarkUserIdentity
       }}
       authExpires={textParam(params?.auth_expires)}
       boardUrlDraft={textParam(params?.board_url)}
+      codexSessionError={codexSessionError}
+      codexSessions={codexSessions}
       initialAuthMode={textParam(params?.auth_mode)}
       authUrl={textParam(params?.auth_url)}
       currentRoles={currentRoles}
       initialLang={textParam(params?.lang)}
       initialStep={textParam(params?.step)}
-      initialTab={textParam(params?.tab) || "lark"}
+      initialTab={initialTab}
       message={textParam(params?.message)}
       error={textParam(params?.error)}
       state={state}
