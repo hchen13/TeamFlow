@@ -24,13 +24,16 @@ def resolve_workspace_paths(workspace: str | None) -> WorkspacePaths:
 
 def parse_lark_bitable_url(board_url: str | None) -> dict[str, str | None]:
     if not board_url:
-        return {"base_token": None, "table_id": None, "view_id": None}
+        return {"base_token": None, "wiki_token": None, "table_id": None, "view_id": None}
 
     parsed = urlparse(board_url)
     parts = [part for part in parsed.path.split("/") if part]
     base_token = None
+    wiki_token = None
     if len(parts) >= 2 and parts[0] == "base":
         base_token = parts[1]
+    elif len(parts) >= 2 and parts[0] == "wiki":
+        wiki_token = parts[1]
 
     query = parse_qs(parsed.query)
     table_id = first_query_value(query, "table")
@@ -38,6 +41,7 @@ def parse_lark_bitable_url(board_url: str | None) -> dict[str, str | None]:
 
     return {
         "base_token": base_token,
+        "wiki_token": wiki_token,
         "table_id": table_id,
         "view_id": view_id,
     }

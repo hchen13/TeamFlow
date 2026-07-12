@@ -13,6 +13,7 @@ MIGRATION_MODULES = (
     "010_lark_user_identity",
     "011_lark_user_avatar_url",
     "012_agent_runtime_ephemeral",
+    "013_lark_board_identity_access",
 )
 
 MIGRATIONS = [import_module(f"{__name__}.{name}") for name in MIGRATION_MODULES]

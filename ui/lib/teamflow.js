@@ -5,6 +5,7 @@ const execFileAsync = promisify(execFile);
 const cliPath = process.env.TEAMFLOW_CLI || "../scripts/teamflow.py";
 const larkCliPath = process.env.LARK_CLI || "lark-cli";
 const workspace = process.env.TEAMFLOW_WORKSPACE || "..";
+const larkUserScopes = "bitable:app docs:permission.member:auth docs:permission.member:create offline_access";
 
 export async function getState() {
   return runJson(["inspect", "--workspace", workspace, "--json"]);
@@ -39,7 +40,7 @@ export async function run(args, env = {}) {
 export async function startLarkUserAuthFlow() {
   let payload;
   try {
-    const result = await execFileAsync(larkCliPath, ["auth", "login", "--domain", "base", "--no-wait", "--json"], {
+    const result = await execFileAsync(larkCliPath, ["auth", "login", "--scope", larkUserScopes, "--no-wait", "--json"], {
       env: process.env,
       maxBuffer: 1024 * 1024
     });
@@ -60,6 +61,13 @@ export async function startLarkUserAuthFlow() {
   child.unref();
 
   return payload;
+}
+
+export function spawnTeamflow(args) {
+  return spawn(cliPath, args, {
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
 }
 
 export function workspaceArgs() {

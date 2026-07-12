@@ -34,6 +34,14 @@ from core.db import (
     verify_agents,
     verify_lark_user_identity,
 )
+from core.lark_board import (
+    get_lark_task,
+    grant_lark_board_access,
+    initialize_lark_board,
+    list_lark_tasks,
+    upsert_lark_task,
+    verify_lark_board,
+)
 
 
 CONFIG_PATH = ROOT / "teamflow.config.json"
@@ -73,6 +81,38 @@ def main() -> int:
     board_parser.add_argument("--url", required=True, help="Full Bitable URL.")
     board_parser.add_argument("--write-gitignore", action="store_true", help="Add .teamflow/ to the workspace .gitignore.")
     board_parser.set_defaults(func=cmd_configure_lark_board)
+
+    verify_board_parser = subparsers.add_parser("verify-lark-board", help="Verify access to the configured Lark Bitable.")
+    add_workspace_args(verify_board_parser)
+    verify_board_parser.add_argument("--identity-id", help="Verify only one saved Lark identity.")
+    verify_board_parser.add_argument("--stream", action="store_true", help="Print progress as NDJSON.")
+    verify_board_parser.set_defaults(func=cmd_verify_lark_board)
+
+    grant_board_parser = subparsers.add_parser("grant-lark-board-access", help="Add a saved identity as a Bitable collaborator.")
+    add_workspace_args(grant_board_parser)
+    grant_board_parser.add_argument("--identity-id", required=True, help="Identity to add as a collaborator.")
+    grant_board_parser.set_defaults(func=cmd_grant_lark_board_access)
+
+    initialize_board_parser = subparsers.add_parser("initialize-lark-board", help="Initialize the TeamFlow task table and board view.")
+    add_workspace_args(initialize_board_parser)
+    initialize_board_parser.set_defaults(func=cmd_initialize_lark_board)
+
+    list_tasks_parser = subparsers.add_parser("list-lark-tasks", help="List normalized TeamFlow tasks from the configured Bitable.")
+    add_workspace_args(list_tasks_parser)
+    list_tasks_parser.add_argument("--limit", type=int, default=100, help="Number of tasks to return, from 1 to 200.")
+    list_tasks_parser.add_argument("--offset", type=int, default=0, help="Task offset for pagination.")
+    list_tasks_parser.set_defaults(func=cmd_list_lark_tasks)
+
+    get_task_parser = subparsers.add_parser("get-lark-task", help="Get a TeamFlow task by Lark record ID.")
+    add_workspace_args(get_task_parser)
+    get_task_parser.add_argument("--record-id", required=True, help="Lark record ID.")
+    get_task_parser.set_defaults(func=cmd_get_lark_task)
+
+    upsert_task_parser = subparsers.add_parser("upsert-lark-task", help="Create or update a normalized TeamFlow task.")
+    add_workspace_args(upsert_task_parser)
+    upsert_task_parser.add_argument("--record-id", help="Lark record ID. Omit to create a task.")
+    upsert_task_parser.add_argument("--json", required=True, help="Task JSON with title, task_id, status, role, agent, description, acceptance_criteria, or result_evidence.")
+    upsert_task_parser.set_defaults(func=cmd_upsert_lark_task)
 
     refresh_lark_parser = subparsers.add_parser("refresh-lark-identity", help="Refresh a saved Lark identity's app information.")
     add_workspace_args(refresh_lark_parser)
@@ -210,6 +250,39 @@ def cmd_verify_lark_user_identity(args: argparse.Namespace) -> int:
 
 def cmd_configure_lark_board(args: argparse.Namespace) -> int:
     print_json(configure_lark_board(args.workspace, board_url=args.url, write_gitignore=args.write_gitignore))
+    return 0
+
+
+def cmd_verify_lark_board(args: argparse.Namespace) -> int:
+    if args.stream:
+        verify_lark_board(args.workspace, identity_id=args.identity_id, emit=print_ndjson)
+    else:
+        print_json(verify_lark_board(args.workspace, identity_id=args.identity_id))
+    return 0
+
+
+def cmd_grant_lark_board_access(args: argparse.Namespace) -> int:
+    print_json(grant_lark_board_access(args.workspace, identity_id=args.identity_id))
+    return 0
+
+
+def cmd_initialize_lark_board(args: argparse.Namespace) -> int:
+    print_json(initialize_lark_board(args.workspace))
+    return 0
+
+
+def cmd_list_lark_tasks(args: argparse.Namespace) -> int:
+    print_json(list_lark_tasks(args.workspace, limit=args.limit, offset=args.offset))
+    return 0
+
+
+def cmd_get_lark_task(args: argparse.Namespace) -> int:
+    print_json(get_lark_task(args.workspace, record_id=args.record_id))
+    return 0
+
+
+def cmd_upsert_lark_task(args: argparse.Namespace) -> int:
+    print_json(upsert_lark_task(args.workspace, task=json_object(args.json), record_id=args.record_id))
     return 0
 
 
@@ -366,7 +439,19 @@ def cmd_self_check(args: argparse.Namespace) -> int:
         assert configured_board["base_token"] == "bascnCheck"
         assert configured_board["table_id"] == "tblCheck"
         assert configured_board["view_id"] == "vewCheck"
-        assert configured_board["identity_id"] == configured_user["id"]
+        assert configured_board["primary_identity_id"] == configured_user["id"]
+        with patch("core.db.resolve_lark_wiki_bitable", return_value="bascnCheck"):
+            configure_lark_board(workspace, board_url="https://example.feishu.cn/wiki/wikcnCheck")
+        with patch("core.db.resolve_lark_wiki_bitable", side_effect=ValueError("API error: [131005] not found")):
+            try:
+                configure_lark_board(workspace, board_url="https://example.feishu.cn/wiki/wikcnCheck?from=from_copylink")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("a missing configured Bitable should fail")
+        unavailable_board = inspect_workspace(workspace)["lark_board"]
+        assert unavailable_board["access_status"] == "unavailable"
+        assert unavailable_board["last_verified_at"] is None
         with patch(
             "core.db.run_lark_cli_json",
             side_effect=[user_status, {"base": {"base_token": "bascnUser", "url": "https://example.feishu.cn/base/bascnUser"}}],
@@ -474,7 +559,7 @@ def cmd_self_check(args: argparse.Namespace) -> int:
     user_identity = next(identity for identity in result["lark_identities"] if identity["auth_mode"] == "user")
     board = result["lark_board"]
     assert result["initialized"] is True
-    assert result["schema_version"] == "012_agent_runtime_ephemeral"
+    assert result["schema_version"] == "013_lark_board_identity_access"
     assert {workflow["key"] for workflow in result["workflows"]} == {DEFAULT_WORKFLOW_KEY, "general-task"}
     assert all(workflow["short_description"] for workflow in result["workflows"])
     assert result["current_workflow"]["key"] == DEFAULT_WORKFLOW_KEY
@@ -492,7 +577,7 @@ def cmd_self_check(args: argparse.Namespace) -> int:
     assert user_identity["access_status"] == "verified"
     assert user_identity["is_default"] == 1
     assert board["base_token"] == "bascnUser"
-    assert board["identity_id"] == user_identity["id"]
+    assert board["primary_identity_id"] == user_identity["id"]
     assert len([agent for agent in agents if agent["role_key"] == "qa"]) == 1
     assert len([agent for agent in agents if agent["role_key"] == "pm"]) == 1
     assert len([agent for agent in agents if agent["role_key"] == "tl"]) == 1
@@ -546,6 +631,20 @@ def env_value(name: str | None) -> str | None:
 
 def print_json(payload: object) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def print_ndjson(payload: object) -> None:
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
+def json_object(value: str) -> dict[str, object]:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError("--json must be valid JSON") from error
+    if not isinstance(payload, dict):
+        raise ValueError("--json must be a JSON object")
+    return payload
 
 
 if __name__ == "__main__":

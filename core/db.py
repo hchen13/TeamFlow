@@ -7,9 +7,11 @@ import subprocess
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+from urllib.parse import urlencode, urlparse
 
 from .codex import codex_thread_error, codex_thread_name, list_codex_threads, read_codex_thread
 from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
@@ -25,11 +27,16 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
+@contextmanager
+def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_workspace(workspace: str | None, display_name: str | None = None, write_gitignore: bool = False) -> dict[str, Any]:
@@ -74,6 +81,20 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
             workspace_row = conn.execute("SELECT * FROM workspaces ORDER BY created_at LIMIT 1").fetchone()
 
         workspace_id = workspace_row["id"] if workspace_row else None
+        board_row = conn.execute("SELECT * FROM lark_boards WHERE workspace_id = ?", (workspace_id,)).fetchone()
+        access_rows = fetch_all(
+            conn,
+            """
+            SELECT access.*
+            FROM lark_board_identity_access AS access
+            JOIN lark_boards AS board ON board.id = access.board_id
+            WHERE board.workspace_id = ?
+            ORDER BY access.identity_id
+            """,
+            workspace_id,
+        )
+        for access in access_rows:
+            access["missing_scopes"] = json.loads(access["missing_scopes"] or "[]")
         return {
             "ok": True,
             "initialized": True,
@@ -83,7 +104,8 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
             "schema_version": current_schema_version(conn),
             "workspace": row_dict(workspace_row),
             "lark_identities": redact_rows(fetch_all(conn, "SELECT * FROM lark_identities WHERE workspace_id = ? ORDER BY is_default DESC, updated_at DESC", workspace_id)),
-            "lark_board": row_dict(conn.execute("SELECT * FROM lark_boards WHERE workspace_id = ?", (workspace_id,)).fetchone()),
+            "lark_board": row_dict(board_row),
+            "lark_board_access": access_rows,
             "current_workflow": row_dict(current_workflow(conn, workspace_row)),
             "workflows": fetch_all(conn, "SELECT * FROM workflows ORDER BY key"),
             "roles": fetch_all(conn, """
@@ -223,20 +245,46 @@ def configure_lark_board(
     paths = resolve_workspace_paths(workspace)
     board_url = board_url.strip()
     parsed = parse_lark_bitable_url(board_url)
-    if not parsed["base_token"]:
-        raise ValueError("a valid Feishu/Lark Bitable URL is required")
 
-    with connect(paths.db_path) as conn:
-        workspace_id = workspace_id_for_root(conn, paths.root)
-        board_id = upsert_lark_board(
-            conn,
-            workspace_id=workspace_id,
-            identity_id=default_lark_identity_id(conn, workspace_id),
-            base_url=board_url,
-            base_token=parsed["base_token"],
-            table_id=parsed["table_id"],
-            view_id=parsed["view_id"],
-        )
+    try:
+        with connect(paths.db_path) as conn:
+            workspace_id = workspace_id_for_root(conn, paths.root)
+            identity = default_lark_identity(conn, workspace_id)
+            base_token = parsed["base_token"]
+            if not base_token and parsed["wiki_token"]:
+                base_token = resolve_lark_wiki_bitable(identity, parsed["wiki_token"], board_url)
+            if not base_token:
+                raise ValueError("a valid Feishu/Lark Bitable URL is required")
+            board_id = upsert_lark_board(
+                conn,
+                workspace_id=workspace_id,
+                primary_identity_id=identity["id"] if identity else None,
+                base_url=board_url,
+                base_token=base_token,
+                table_id=parsed["table_id"],
+                view_id=parsed["view_id"],
+            )
+    except ValueError as error:
+        message = str(error)
+        if "131005" in message and "not found" in message.lower():
+            with connect(paths.db_path) as conn:
+                workspace_id = workspace_id_for_root(conn, paths.root)
+                board = conn.execute("SELECT * FROM lark_boards WHERE workspace_id = ?", (workspace_id,)).fetchone()
+                if board:
+                    current = parse_lark_bitable_url(board["base_url"])
+                    same_resource = (
+                        parsed["wiki_token"] and parsed["wiki_token"] == current["wiki_token"]
+                    ) or (
+                        parsed["base_token"] and parsed["base_token"] == board["base_token"]
+                    )
+                    if same_resource:
+                        timestamp = now()
+                        conn.execute("DELETE FROM lark_board_identity_access WHERE board_id = ?", (board["id"],))
+                        conn.execute(
+                            "UPDATE lark_boards SET access_status = 'unavailable', last_verified_at = NULL, last_error = ?, updated_at = ? WHERE id = ?",
+                            (message, timestamp, board["id"]),
+                        )
+        raise
 
     return {
         "ok": True,
@@ -244,6 +292,42 @@ def configure_lark_board(
         "lark_board_id": board_id,
         "access_status": "unverified",
     }
+
+
+def resolve_lark_wiki_bitable(identity: sqlite3.Row | None, wiki_token: str, board_url: str) -> str:
+    if identity is None:
+        raise ValueError("save an available Lark identity before using a Wiki Bitable URL")
+    if identity["auth_mode"] == "user":
+        payload = run_lark_cli_json([
+            "wiki",
+            "spaces",
+            "get_node",
+            "--params",
+            json.dumps({"token": wiki_token}, separators=(",", ":")),
+            "--as",
+            "user",
+        ])
+    else:
+        host = urlparse(board_url).hostname or ""
+        origin = "https://open.larksuite.com" if host.endswith("larksuite.com") else "https://open.feishu.cn"
+        token_payload, error = post_json(
+            f"{origin}/open-apis/auth/v3/tenant_access_token/internal",
+            {"app_id": identity["app_id"], "app_secret": identity["app_secret"]},
+            {},
+        )
+        token = token_payload.get("tenant_access_token")
+        if error or not token:
+            raise ValueError(error or token_payload.get("msg") or "failed to get tenant access token")
+        payload, error = get_json(
+            f"{origin}/open-apis/wiki/v2/spaces/get_node?{urlencode({'token': wiki_token})}",
+            {"Authorization": f"Bearer {token}"},
+        )
+        if error:
+            raise ValueError(error)
+    node = (payload.get("data") or {}).get("node") or payload.get("node") or {}
+    if node.get("obj_type") != "bitable" or not node.get("obj_token"):
+        raise ValueError("the Wiki URL does not point to a Bitable")
+    return str(node["obj_token"])
 
 
 def select_workflow(workspace: str | None, *, workflow: str) -> dict[str, Any]:
@@ -372,7 +456,7 @@ def create_lark_board(workspace: str | None, *, domain: str, name: str) -> dict[
         board_id = upsert_lark_board(
             conn,
             workspace_id=workspace_id,
-            identity_id=identity["id"],
+            primary_identity_id=identity["id"],
             base_url=base_url,
             base_token=base_token,
             table_id=None,
@@ -799,35 +883,43 @@ def upsert_lark_board(
     conn: sqlite3.Connection,
     *,
     workspace_id: str,
-    identity_id: str | None,
+    primary_identity_id: str | None,
     base_url: str | None,
     base_token: str | None,
     table_id: str | None,
     view_id: str | None,
 ) -> str:
-    existing = conn.execute("SELECT id FROM lark_boards WHERE workspace_id = ?", (workspace_id,)).fetchone()
+    existing = conn.execute("SELECT * FROM lark_boards WHERE workspace_id = ?", (workspace_id,)).fetchone()
     timestamp = now()
     if existing:
+        changed = any((existing[key] or None) != value for key, value in (
+            ("base_token", base_token),
+            ("table_id", table_id),
+            ("view_id", view_id),
+        ))
+        stable_primary_id = primary_identity_id if changed or not existing["primary_identity_id"] else existing["primary_identity_id"]
         conn.execute(
             """
             UPDATE lark_boards
-            SET identity_id = COALESCE(?, identity_id),
+            SET primary_identity_id = ?,
                 base_url = ?, base_token = ?, table_id = ?, view_id = ?,
                 access_status = 'unverified', last_verified_at = NULL, last_error = NULL, updated_at = ?
             WHERE id = ?
             """,
-            (identity_id, base_url, base_token, table_id, view_id, timestamp, existing["id"]),
+            (stable_primary_id, base_url, base_token, table_id, view_id, timestamp, existing["id"]),
         )
+        if changed:
+            conn.execute("DELETE FROM lark_board_identity_access WHERE board_id = ?", (existing["id"],))
         return existing["id"]
 
     board_id = f"board_{uuid.uuid4().hex}"
     conn.execute(
         """
         INSERT INTO lark_boards
-          (id, workspace_id, identity_id, base_url, base_token, table_id, view_id, created_at, updated_at)
+          (id, workspace_id, primary_identity_id, base_url, base_token, table_id, view_id, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (board_id, workspace_id, identity_id, base_url, base_token, table_id, view_id, timestamp, timestamp),
+        (board_id, workspace_id, primary_identity_id, base_url, base_token, table_id, view_id, timestamp, timestamp),
     )
     return board_id
 
@@ -880,11 +972,6 @@ def default_lark_identity(conn: sqlite3.Connection, workspace_id: str) -> sqlite
         """,
         (workspace_id,),
     ).fetchone()
-
-
-def default_lark_identity_id(conn: sqlite3.Connection, workspace_id: str) -> str | None:
-    row = default_lark_identity(conn, workspace_id)
-    return row["id"] if row else None
 
 
 def upsert_agent(

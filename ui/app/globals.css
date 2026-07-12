@@ -1095,7 +1095,8 @@ legend {
 .boardUrlActions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: 12px;
   font-size: 12px;
 }
 
@@ -1104,6 +1105,343 @@ legend {
   font-weight: 900;
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+.accessMatrixSection {
+  display: grid;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.accessMatrixTitle {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.accessMatrixTitle > div {
+  display: grid;
+  gap: 3px;
+}
+
+.accessMatrixTitle h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.accessMatrixTitle span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.accessRefresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.accessRefresh .buttonSpinner {
+  border-color: rgba(42, 113, 95, 0.25);
+  border-top-color: var(--accent);
+}
+
+.refreshIcon {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.accessMatrix {
+  overflow: visible;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfbf9;
+}
+
+.accessMatrixHeader,
+.accessIdentityRow {
+  display: grid;
+  grid-template-columns: minmax(210px, 1.45fr) minmax(450px, 3fr);
+  align-items: center;
+}
+
+.accessMatrixHeader {
+  min-height: 34px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: #f1f3ef;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.accessCheckHeaders,
+.accessChecks {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+.accessCheckHeaders > span {
+  text-align: center;
+}
+
+.accessIdentityRow {
+  padding: 9px 12px;
+  background: var(--surface);
+}
+
+.accessIdentityRow + .accessIdentityRow {
+  border-top: 1px solid var(--line);
+}
+
+.accessIdentityRow.expanded {
+  background: #fcfdfb;
+}
+
+.accessIdentityCell {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding-right: 12px;
+}
+
+.accessAvatar {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 7px;
+  background: #eaf1ed;
+  color: var(--accent-dark);
+}
+
+.accessAvatar img,
+.accessAvatar svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.accessAvatar.user img {
+  object-fit: cover;
+}
+
+.accessAvatar.user > span {
+  font-size: 16px;
+  font-weight: 900;
+}
+
+.accessAvatar .defaultBotAvatar {
+  padding: 6px;
+}
+
+.accessIdentityText {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.accessIdentityName {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.accessIdentityName strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accessIdentityName em {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #edf7f1;
+  color: var(--accent-dark);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.accessIdentityText small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accessCheck {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 40px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--line-strong);
+}
+
+button.accessCheck.failed {
+  color: var(--danger);
+}
+
+button.accessCheck.failed:hover,
+button.accessCheck.failed:focus-visible {
+  outline: none;
+  background: #faeeee;
+}
+
+.accessCheck.passed {
+  color: var(--accent);
+}
+
+.accessCheck.blocked {
+  color: #9aa39e;
+}
+
+.accessCheck svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.accessSpinner {
+  width: 17px;
+  height: 17px;
+  border: 2px solid #d5ddd8;
+  border-top-color: var(--accent);
+  border-radius: 999px;
+  animation: spin 0.7s linear infinite;
+}
+
+.accessUnverifiedDot {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+}
+
+.accessMobileLabel {
+  display: none;
+}
+
+.accessTooltip {
+  position: absolute;
+  z-index: 40;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  width: max-content;
+  max-width: 220px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  background: #24312b;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  text-align: center;
+  transform: translate(-50%, 3px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.accessCheck:hover .accessTooltip,
+.accessCheck:focus-visible .accessTooltip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.accessRepairPanel {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 8px;
+  padding: 10px 11px;
+  border: 1px solid #e1c9c0;
+  border-radius: 7px;
+  background: #fdf7f4;
+}
+
+.accessRepairMessage {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.accessRepairMessage > strong {
+  color: #824638;
+  font-size: 12px;
+}
+
+.scopeList {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.scopeList small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.scopeList code {
+  font-size: 10px;
+}
+
+.accessRepairActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.accessRepairActions form {
+  display: inline-flex;
+}
+
+.accessStreamError {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.boardUrlCheck svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.4;
 }
 
 .boardCreateDisclosure {
@@ -1708,6 +2046,79 @@ legend {
   .authBlock .primary,
   .boardUrlSubmit,
   .linkButton {
+    width: 100%;
+  }
+}
+
+@media (max-width: 760px) {
+  .accessMatrixTitle {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .accessRefresh {
+    width: 100%;
+  }
+
+  .accessMatrixHeader {
+    display: none;
+  }
+
+  .accessIdentityRow {
+    grid-template-columns: 1fr;
+    gap: 9px;
+    padding: 11px;
+  }
+
+  .accessIdentityCell {
+    padding-right: 0;
+  }
+
+  .accessChecks {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 5px;
+  }
+
+  .accessCheck {
+    min-height: 54px;
+    gap: 4px;
+    border: 1px solid #e1e5df;
+    background: #fafbf9;
+  }
+
+  button.accessCheck.failed {
+    border-color: #e2baba;
+  }
+
+  .accessMobileLabel {
+    display: block;
+    color: var(--muted);
+    font-size: 9px;
+    font-weight: 800;
+  }
+
+  .accessRepairPanel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .accessRepairActions {
+    justify-content: flex-start;
+  }
+
+  .accessTooltip {
+    display: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .accessChecks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .accessRepairActions,
+  .accessRepairActions form,
+  .accessRepairActions .mini {
     width: 100%;
   }
 }

@@ -1,5 +1,6 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { getCodexBridge } from "./codex-ipc";
 import { run, startLarkUserAuthFlow, workspaceArgs } from "./teamflow";
@@ -12,7 +13,9 @@ const messages = {
     agentBusy: "Agent 正在工作，完成后才能切换或移除。",
     authGenerated: "授权链接已生成，打开后完成确认",
     boardCreated: "多维表格已创建",
-    boardSaved: "多维表格链接已验证",
+    boardNotFound: "找不到这个多维表格。它可能已被删除，或当前默认身份无权访问。请恢复原表并确认已向默认身份开放权限；也可以粘贴新的多维表格链接，或在下方用默认身份创建新表。",
+    boardSaved: "多维表格链接已保存，正在验证身份访问",
+    boardAccessGranted: "身份已添加为协作者，访问状态已重新验证",
     identityDefaulted: "默认身份已更新",
     identityRemoved: "身份已删除",
     identityRefreshed: "应用名称已刷新",
@@ -31,7 +34,9 @@ const messages = {
     agentBusy: "This agent is working. Wait until it finishes before switching or removing it.",
     authGenerated: "Authorization link generated. Open it to confirm.",
     boardCreated: "Bitable created",
-    boardSaved: "Bitable link verified",
+    boardNotFound: "This Bitable could not be found. It may have been deleted, or the default identity may not have access. Restore it and grant access to the default identity, paste a new Bitable link, or create one below with the default identity.",
+    boardSaved: "Bitable link saved. Identity access is being verified",
+    boardAccessGranted: "The identity was added as a collaborator and verified again",
     identityDefaulted: "Default identity updated",
     identityRemoved: "Identity removed",
     identityRefreshed: "App name refreshed",
@@ -65,8 +70,10 @@ export async function configureLarkBoard(formData) {
   let target;
   try {
     await run(args);
+    revalidatePath("/");
     target = redirectTarget("lark", lang, messages[lang].boardSaved, false, "board");
   } catch (error) {
+    revalidatePath("/");
     target = redirectTarget("lark", lang, localizedError(error, lang), true, "board", "", { board_url: boardUrl });
   }
   redirect(target);
@@ -123,6 +130,13 @@ export async function createLarkBoard(formData) {
   await finish(args, {}, "lark", "boardCreated", lang, "board");
 }
 
+export async function grantLarkBoardAccess(formData) {
+  const lang = language(formData);
+  const args = ["grant-lark-board-access", ...workspaceArgs()];
+  add(args, "--identity-id", field(formData, "identity_id"));
+  await finish(args, {}, "lark", "boardAccessGranted", lang, "board");
+}
+
 export async function setDefaultLarkIdentity(formData) {
   const lang = language(formData);
   const args = ["set-default-lark-identity", ...workspaceArgs()];
@@ -170,6 +184,7 @@ async function finish(args, env, tab, okMessage, lang, step = "", authMode = "")
   let target;
   try {
     await run(args, env);
+    revalidatePath("/");
     target = redirectTarget(tab, lang, messages[lang][okMessage], false, step, authMode);
   } catch (error) {
     target = redirectTarget(tab, lang, localizedError(error, lang), true, step, authMode);
@@ -187,6 +202,9 @@ function language(formData) {
 
 function localizedError(error, lang) {
   const message = error.message || String(error);
+  if (/"code"\s*:\s*131005\b|API error:\s*\[131005\]\s*not found/i.test(message)) {
+    return messages[lang].boardNotFound;
+  }
   if (/valid Feishu\/Lark Bitable URL/i.test(message)) {
     return messages[lang].invalidBoardUrl;
   }

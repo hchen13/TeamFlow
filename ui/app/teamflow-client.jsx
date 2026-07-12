@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
+import { useRouter } from "next/navigation";
 
 const FEISHU_APP_URL = "https://open.feishu.cn/app";
 const FEISHU_CREATE_APP_URL = "https://open.feishu.cn/page/launcher?from=backend_oneclick";
@@ -37,6 +38,45 @@ const text = {
     createBoard: "创建多维表格",
     verifyBoardUrl: "验证并使用",
     boardUrlVerified: "链接已验证",
+    boardAccessVerified: "访问已验证",
+    boardAccessChecking: "正在验证身份访问",
+    boardAccessPending: "已保存，尚未验证",
+    boardAccessFailed: "验证失败",
+    boardUnavailableHint: "当前多维表格不可用。请更换链接，或用默认身份创建新表。",
+    boardAccessPartial: "部分身份可用",
+    boardAccessTitle: "身份访问",
+    boardAccessSummary: "{verified} / {total} 个身份可用",
+    verifyAllIdentities: "验证全部身份",
+    reverifyAllIdentities: "全部重新验证",
+    verifyingAllIdentities: "正在验证",
+    accessIdentity: "身份",
+    accessAuth: "认证",
+    accessApi: "API 权限",
+    accessCollaborator: "协作者",
+    accessRead: "读取",
+    accessWrite: "写入",
+    accessCleanup: "清理",
+    accessUnverified: "尚未检查",
+    accessRunning: "正在检查",
+    accessWaiting: "等待写入验证",
+    accessPassed: "已通过",
+    accessBlocked: "等待前置检查",
+    accessFailed: "检查失败",
+    primaryIdentity: "主身份",
+    botIdentityType: "应用身份",
+    userIdentityType: "用户身份",
+    grantAccess: "授权访问",
+    retryIdentity: "重新验证",
+    accessMissingScope: "缺少多维表格 API 权限",
+    accessNotCollaborator: "当前身份没有多维表格的 API 编辑权限",
+    accessAuthExpired: "用户授权已过期",
+    accessAuthFailed: "身份认证失败",
+    accessReadFailed: "无法读取多维表格",
+    accessWriteFailed: "可以访问，但无法完成写入验证",
+    accessCleanupFailed: "测试记录未能清理",
+    accessGenericFailed: "身份访问验证失败",
+    requiredScopes: "需要权限",
+    verificationStreamFailed: "无法完成身份访问验证，请重新检查。",
     openBoard: "打开多维表格",
     accessMode: "身份",
     bot: "应用身份",
@@ -162,6 +202,45 @@ const text = {
     createBoard: "Create Bitable",
     verifyBoardUrl: "Verify and use",
     boardUrlVerified: "Link verified",
+    boardAccessVerified: "Access verified",
+    boardAccessChecking: "Verifying identity access",
+    boardAccessPending: "Saved, not verified",
+    boardAccessFailed: "Verification failed",
+    boardUnavailableHint: "The current Bitable is unavailable. Replace the link or create a new one with the default identity.",
+    boardAccessPartial: "Some identities available",
+    boardAccessTitle: "Identity access",
+    boardAccessSummary: "{verified} of {total} identities available",
+    verifyAllIdentities: "Verify all identities",
+    reverifyAllIdentities: "Verify all again",
+    verifyingAllIdentities: "Verifying",
+    accessIdentity: "Identity",
+    accessAuth: "Authentication",
+    accessApi: "API access",
+    accessCollaborator: "Collaborator",
+    accessRead: "Read",
+    accessWrite: "Write",
+    accessCleanup: "Cleanup",
+    accessUnverified: "Not checked",
+    accessRunning: "Checking",
+    accessWaiting: "Waiting for write check",
+    accessPassed: "Passed",
+    accessBlocked: "Waiting for prerequisite",
+    accessFailed: "Failed",
+    primaryIdentity: "Primary",
+    botIdentityType: "Bot identity",
+    userIdentityType: "User identity",
+    grantAccess: "Grant access",
+    retryIdentity: "Verify again",
+    accessMissingScope: "Required Bitable API permissions are missing",
+    accessNotCollaborator: "This identity does not have API edit access to the Bitable",
+    accessAuthExpired: "User authorization has expired",
+    accessAuthFailed: "Identity authentication failed",
+    accessReadFailed: "Cannot read this Bitable",
+    accessWriteFailed: "Access works, but the write check failed",
+    accessCleanupFailed: "The verification record could not be removed",
+    accessGenericFailed: "Identity access verification failed",
+    requiredScopes: "Required permissions",
+    verificationStreamFailed: "Identity access verification could not finish. Try again.",
     openBoard: "Open Bitable",
     accessMode: "Identity",
     bot: "Bot",
@@ -402,6 +481,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
             authMode={authMode}
             authUrl={authUrl}
             board={board}
+            boardAccess={state.lark_board_access || []}
             boardUrlDraft={boardUrlDraft}
             botIdentities={botIdentities}
             userIdentities={userIdentities}
@@ -447,7 +527,7 @@ function TabNav({ tab, setTab, t }) {
   );
 }
 
-function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, boardUrlDraft, botIdentities, currentWorkflow, createAppUrl, initialStep, lang, setAuthMode, state, t, userIdentities }) {
+function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, boardAccess, boardUrlDraft, botIdentities, currentWorkflow, createAppUrl, initialStep, lang, setAuthMode, state, t, userIdentities }) {
   const larkDomain = lang === "en" ? "larksuite" : "feishu";
   const hasIdentity = botIdentities.length > 0 || userIdentities.some((identity) => identity.access_status === "verified");
   const [activeStep, setActiveStep] = useState(() => initialLarkStep(initialStep, hasIdentity));
@@ -495,7 +575,18 @@ function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, boa
             userIdentities={userIdentities}
           />
         ) : (
-          <BoardStep actions={actions} board={board} boardName={boardName} boardUrlDraft={boardUrlDraft} canCreateBoard={hasIdentity} lang={lang} larkDomain={larkDomain} t={t} />
+          <BoardStep
+            actions={actions}
+            board={board}
+            boardAccess={boardAccess}
+            boardName={boardName}
+            boardUrlDraft={boardUrlDraft}
+            canCreateBoard={hasIdentity}
+            identities={[...userIdentities, ...botIdentities]}
+            lang={lang}
+            larkDomain={larkDomain}
+            t={t}
+          />
         )}
         <StepFooter activeStep={activeStep} hasIdentity={hasIdentity} setActiveStep={setActiveStep} t={t} />
       </section>
@@ -799,10 +890,34 @@ function DefaultBotAvatar() {
   );
 }
 
-function BoardStep({ actions, board, boardName, boardUrlDraft, canCreateBoard, lang, larkDomain, t }) {
+function BoardStep({ actions, board, boardAccess, boardName, boardUrlDraft, canCreateBoard, identities, lang, larkDomain, t }) {
+  const router = useRouter();
   const configured = Boolean(board.base_token || board.base_url);
   const [boardUrl, setBoardUrl] = useState(boardUrlDraft || board.base_url || "");
-  const urlVerified = configured && boardUrl.trim() === board.base_url;
+  const [accessRows, setAccessRows] = useState(() => initialAccessRows(identities, boardAccess));
+  const [boardStatus, setBoardStatus] = useState(board.access_status || "unverified");
+  const [verificationError, setVerificationError] = useState("");
+  const [verificationRunning, setVerificationRunning] = useState(
+    configured && board.access_status === "unverified" && identities.length > 0
+  );
+  const verificationInFlight = useRef(false);
+  const verificationAbort = useRef(null);
+  const autoVerificationKey = useRef("");
+  const savedUrl = configured && boardUrl.trim() === board.base_url;
+  const verifiedCount = accessRows.filter((row) => row.status === "verified").length;
+  const boardUnavailable = boardStatus === "unavailable";
+  const urlVerified = savedUrl && !boardUnavailable && verifiedCount > 0;
+  const accessLabel = verificationRunning
+    ? t.boardAccessChecking
+    : verifiedCount === identities.length && identities.length
+      ? t.boardAccessVerified
+      : verifiedCount
+        ? t.boardAccessPartial
+        : boardStatus === "unavailable"
+          ? t.boardAccessFailed
+          : t.boardAccessPending;
+  const identityKey = identities.map((identity) => identity.id).join(",");
+  const accessKey = boardAccess.map((access) => `${access.identity_id}:${access.last_verified_at || ""}`).join(",");
 
   useEffect(() => {
     if (!boardUrlDraft && board.base_url) {
@@ -810,10 +925,91 @@ function BoardStep({ actions, board, boardName, boardUrlDraft, canCreateBoard, l
     }
   }, [board.base_url, boardUrlDraft]);
 
+  useEffect(() => {
+    setAccessRows(initialAccessRows(identities, boardAccess));
+    setBoardStatus(board.access_status || "unverified");
+  }, [accessKey, board.access_status, board.id, identityKey]);
+
+  const runVerification = useCallback(async (identityId = "") => {
+    if (verificationInFlight.current) {
+      return;
+    }
+    verificationInFlight.current = true;
+    setVerificationRunning(true);
+    setVerificationError("");
+    const controller = new AbortController();
+    verificationAbort.current = controller;
+    let streamError = "";
+    let completed = false;
+    try {
+      const response = await fetch("/api/lark/board-access", {
+        method: "POST",
+        body: JSON.stringify(identityId ? { identity_id: identityId } : {}),
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`Verification request failed: ${response.status}`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) {
+            continue;
+          }
+          const event = JSON.parse(line);
+          if (event.type === "verification_error") {
+            streamError = event.error || "Verification failed";
+          } else if (event.type === "verification_completed") {
+            setBoardStatus(event.access_status || "unverified");
+          }
+          setAccessRows((current) => applyAccessEvent(current, event));
+        }
+        if (done) {
+          break;
+        }
+      }
+      if (streamError) {
+        throw new Error(streamError);
+      }
+      completed = true;
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        setVerificationError(error.message || String(error));
+        setAccessRows(markInterruptedAccess);
+      }
+    } finally {
+      verificationAbort.current = null;
+      verificationInFlight.current = false;
+      setVerificationRunning(false);
+    }
+    if (completed) {
+      router.refresh();
+    }
+  }, [router]);
+
+  useEffect(() => () => verificationAbort.current?.abort(), []);
+
+  useEffect(() => {
+    const key = `${board.id || ""}:${board.updated_at || ""}`;
+    if (!configured || board.access_status !== "unverified" || !identities.length || autoVerificationKey.current === key) {
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      autoVerificationKey.current = key;
+      runVerification();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [board.access_status, board.id, board.updated_at, configured, identities.length, runVerification]);
+
   return (
-    <form action={actions.configureLarkBoard} className="stackForm">
-      <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
-      <input name="lark_domain" type="hidden" value={larkDomain} suppressHydrationWarning />
+    <div className="stackForm">
       <div className="configStep">
         <div className="sectionHeader">
           <div>
@@ -822,7 +1018,9 @@ function BoardStep({ actions, board, boardName, boardUrlDraft, canCreateBoard, l
             <p>{t.boardUrlHint}</p>
           </div>
         </div>
-        <div className="boardUrlRow">
+        <form action={actions.configureLarkBoard} className="boardUrlRow">
+          <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+          <input name="lark_domain" type="hidden" value={larkDomain} suppressHydrationWarning />
           <label className="field boardUrlField">
             {t.boardUrl}
             <span className="boardUrlInput">
@@ -835,35 +1033,218 @@ function BoardStep({ actions, board, boardName, boardUrlDraft, canCreateBoard, l
               />
               {urlVerified ? (
                 <span aria-label={t.boardUrlVerified} className="boardUrlCheck" tabIndex={0}>
-                  ✓
+                  <AccessStatusIcon status="passed" />
                   <span className="boardUrlTooltip" role="tooltip">{t.boardUrlVerified}</span>
                 </span>
               ) : null}
             </span>
           </label>
-          <PendingSubmitButton className="primary compact boardUrlSubmit" label={t.verifyBoardUrl} />
-        </div>
-        {urlVerified ? (
-          <div className="boardUrlActions">
-            <a href={board.base_url} rel="noreferrer" target="_blank">{t.openBoard} ↗</a>
-          </div>
+          <PendingSubmitButton className="primary compact boardUrlSubmit" disabled={verificationRunning} label={t.verifyBoardUrl} />
+        </form>
+        {boardUnavailable ? <p className="accessStreamError">{t.boardUnavailableHint}</p> : null}
+        {savedUrl && !boardUnavailable ? (
+          <>
+            <div className="boardUrlActions">
+            <span className={`statusBadge compact ${urlVerified ? "saved" : boardStatus === "unavailable" ? "error" : ""}`}>
+              {accessLabel}
+            </span>
+              <a href={board.base_url} rel="noreferrer" target="_blank">{t.openBoard} ↗</a>
+            </div>
+            <BoardAccessMatrix
+              actions={actions}
+              board={board}
+              identities={identities}
+              lang={lang}
+              onVerify={runVerification}
+              rows={accessRows}
+              running={verificationRunning}
+              t={t}
+            />
+            {verificationError ? <p className="accessStreamError">{t.verificationStreamFailed}</p> : null}
+          </>
         ) : null}
         {canCreateBoard ? (
           <details className="boardCreateDisclosure">
             <summary><span>{t.boardCreatePrompt}</span> <strong>{t.createBoardWithIdentity}</strong></summary>
             <p>{t.boardCreateHint}</p>
-            <div className="boardCreate">
+            <form action={actions.createLarkBoard} className="boardCreate">
+              <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+              <input name="lark_domain" type="hidden" value={larkDomain} suppressHydrationWarning />
               <label className="field">
                 {t.boardName}
                 <input name="board_name" defaultValue={boardName} suppressHydrationWarning />
               </label>
-              <PendingActionButton action={actions.createLarkBoard} className="secondary" label={t.createBoard} />
-            </div>
+              <PendingSubmitButton className="secondary" label={t.createBoard} />
+            </form>
           </details>
         ) : null}
       </div>
-    </form>
+    </div>
   );
+}
+
+function BoardAccessMatrix({ actions, board, identities, lang, onVerify, rows, running, t }) {
+  const verified = rows.filter((row) => row.status === "verified").length;
+  const hasChecked = rows.some((row) => row.last_verified_at);
+  const canGrant = rows.some((row) => row.status === "verified");
+  const labels = [t.accessAuth, t.accessApi, t.accessCollaborator, t.accessRead, t.accessWrite, t.accessCleanup];
+  return (
+    <section className="accessMatrixSection">
+      <header className="accessMatrixTitle">
+        <div>
+          <h4>{t.boardAccessTitle}</h4>
+          <span>{t.boardAccessSummary.replace("{verified}", verified).replace("{total}", rows.length)}</span>
+        </div>
+        <button className="secondary mini accessRefresh" disabled={running} type="button" onClick={() => onVerify()}>
+          {running ? <span className="buttonSpinner" aria-hidden="true" /> : <RefreshIcon />}
+          {running ? t.verifyingAllIdentities : hasChecked ? t.reverifyAllIdentities : t.verifyAllIdentities}
+        </button>
+      </header>
+      <div className="accessMatrix">
+        <div className="accessMatrixHeader" aria-hidden="true">
+          <span>{t.accessIdentity}</span>
+          <span className="accessCheckHeaders">{labels.map((label) => <span key={label}>{label}</span>)}</span>
+        </div>
+        {rows.map((row) => (
+          <BoardAccessRow
+            actions={actions}
+            board={board}
+            canGrant={canGrant}
+            key={row.id}
+            lang={lang}
+            onVerify={onVerify}
+            row={row}
+            running={running}
+            t={t}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function BoardAccessRow({ actions, board, canGrant, lang, onVerify, row, running, t }) {
+  const [expanded, setExpanded] = useState(false);
+  const checks = ["auth", "api", "collaborator", "read", "write", "cleanup"];
+  const labels = {
+    auth: t.accessAuth,
+    api: t.accessApi,
+    collaborator: t.accessCollaborator,
+    read: t.accessRead,
+    write: t.accessWrite,
+    cleanup: t.accessCleanup
+  };
+  const failureMessage = accessFailureMessage(row.failure_kind, t);
+  const isBot = row.auth_mode === "bot";
+  return (
+    <div className={expanded ? "accessIdentityRow expanded" : "accessIdentityRow"}>
+      <div className="accessIdentityCell">
+        <IdentityAccessAvatar identity={row} />
+        <span className="accessIdentityText">
+          <span className="accessIdentityName">
+            <strong>{row.app_name || row.user_name || row.app_id || t.userIdentityLabel}</strong>
+            {board.primary_identity_id === row.id ? <em>{t.primaryIdentity}</em> : null}
+            {row.is_default ? <em>{t.defaultIdentity}</em> : null}
+          </span>
+          <small>{isBot ? `${t.botIdentityType} · ${row.app_id}` : t.userIdentityType}</small>
+        </span>
+      </div>
+      <div className="accessChecks">
+        {checks.map((check) => (
+          <AccessCheck
+            check={check}
+            key={check}
+            label={labels[check]}
+            onFailure={() => setExpanded((value) => !value)}
+            status={row.checks[check] || "unverified"}
+            t={t}
+            tooltip={row.checks[check] === "failed" ? failureMessage : ""}
+          />
+        ))}
+      </div>
+      {expanded && row.status === "failed" ? (
+        <div className="accessRepairPanel">
+          <div className="accessRepairMessage">
+            <strong>{failureMessage}</strong>
+            {row.missing_scopes?.length ? (
+              <span className="scopeList">
+                <small>{t.requiredScopes}</small>
+                {row.missing_scopes.map((scope) => <code key={scope}>{scope}</code>)}
+              </span>
+            ) : null}
+          </div>
+          <div className="accessRepairActions">
+            {row.failure_kind === "missing_scope" && row.repair_url ? (
+              <a className="secondary mini" href={row.repair_url} rel="noreferrer" target="_blank">{t.openPermission}</a>
+            ) : null}
+            {!isBot && ["auth_expired", "missing_scope"].includes(row.failure_kind) ? (
+              <form action={actions.startLarkUserAuth}>
+                <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+                <PendingSubmitButton className="secondary mini" label={t.reauthorize} />
+              </form>
+            ) : null}
+            {row.failure_kind === "not_collaborator" && canGrant ? (
+              <form action={actions.grantLarkBoardAccess}>
+                <input name="identity_id" type="hidden" value={row.id} suppressHydrationWarning />
+                <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+                <PendingSubmitButton className="primary mini" label={t.grantAccess} />
+              </form>
+            ) : null}
+            {row.failure_kind === "not_collaborator" ? (
+              <a className="secondary mini" href={board.base_url} rel="noreferrer" target="_blank">{t.openBoard}</a>
+            ) : null}
+            <button className="secondary mini" disabled={running} type="button" onClick={() => onVerify(row.id)}>{t.retryIdentity}</button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AccessCheck({ label, onFailure, status, t, tooltip }) {
+  const statusLabel = accessStatusLabel(status, t);
+  const content = (
+    <>
+      <span className="accessMobileLabel">{label}</span>
+      <AccessStatusIcon status={status} />
+      <span className="accessTooltip" role="tooltip">{tooltip || statusLabel}</span>
+    </>
+  );
+  return status === "failed" ? (
+    <button aria-label={`${label}: ${tooltip || statusLabel}`} className="accessCheck failed" type="button" onClick={onFailure}>{content}</button>
+  ) : (
+    <span aria-label={`${label}: ${statusLabel}`} className={`accessCheck ${status}`} tabIndex={0}>{content}</span>
+  );
+}
+
+function AccessStatusIcon({ status }) {
+  if (["running", "waiting"].includes(status)) {
+    return <span className="accessSpinner" aria-hidden="true" />;
+  }
+  if (status === "passed") {
+    return <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 10 3 3 7-7" /></svg>;
+  }
+  if (status === "failed") {
+    return <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m6 6 8 8M14 6l-8 8" /></svg>;
+  }
+  if (status === "blocked") {
+    return <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M6 10h8" /></svg>;
+  }
+  return <span className="accessUnverifiedDot" aria-hidden="true" />;
+}
+
+function IdentityAccessAvatar({ identity }) {
+  const image = identity.auth_mode === "bot" ? identity.app_avatar_url : identity.user_avatar_url;
+  const initial = Array.from(identity.user_name || "U")[0];
+  return (
+    <span className={identity.auth_mode === "bot" ? "accessAvatar" : "accessAvatar user"}>
+      {image ? <img alt="" src={image} /> : identity.auth_mode === "bot" ? <DefaultBotAvatar /> : <span>{initial}</span>}
+    </span>
+  );
+}
+
+function RefreshIcon() {
+  return <svg aria-hidden="true" className="refreshIcon" viewBox="0 0 20 20"><path d="M15 7a6 6 0 1 0 .4 5M15 3v4h-4" /></svg>;
 }
 
 function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSessions, currentRoles, currentWorkflow, lifecycleBySession, lang, refreshCodexState, runtimeBySession, setAgentFormOpen, t }) {
@@ -1298,6 +1679,112 @@ function settledLifecycle(current, agents) {
     }
   }
   return next;
+}
+
+function initialAccessRows(identities, snapshots) {
+  const byIdentity = new Map(snapshots.map((snapshot) => [snapshot.identity_id, snapshot]));
+  return identities.map((identity) => {
+    const snapshot = byIdentity.get(identity.id) || {};
+    const missingScopes = Array.isArray(snapshot.missing_scopes)
+      ? snapshot.missing_scopes
+      : String(snapshot.missing_scopes || "").split(",").filter(Boolean);
+    return {
+      ...identity,
+      status: snapshot.status || "unverified",
+      checks: {
+        auth: snapshot.auth_status || "unverified",
+        api: snapshot.api_status || "unverified",
+        collaborator: snapshot.collaborator_status || "unverified",
+        read: snapshot.read_status || "unverified",
+        write: snapshot.write_status || "unverified",
+        cleanup: snapshot.cleanup_status || "unverified"
+      },
+      failure_kind: snapshot.failure_kind || null,
+      missing_scopes: missingScopes,
+      repair_url: snapshot.repair_url || null,
+      last_error: snapshot.last_error || null,
+      last_verified_at: snapshot.last_verified_at || null
+    };
+  });
+}
+
+function applyAccessEvent(rows, event) {
+  if (!event.identity_id && event.type !== "identity_completed") {
+    return rows;
+  }
+  if (event.type === "identity_started") {
+    return rows.map((row) => row.id === event.identity_id ? {
+      ...row,
+      status: "checking",
+      checks: Object.fromEntries(Object.keys(row.checks).map((check) => [check, "unverified"])),
+      failure_kind: null,
+      missing_scopes: [],
+      repair_url: null,
+      last_error: null
+    } : row);
+  }
+  if (event.type === "check_updated") {
+    return rows.map((row) => row.id === event.identity_id ? {
+      ...row,
+      checks: { ...row.checks, [event.check]: event.status }
+    } : row);
+  }
+  if (event.type === "identity_completed") {
+    const result = event.result;
+    return rows.map((row) => row.id === result.identity_id ? {
+      ...row,
+      ...result,
+      checks: { ...row.checks, ...result.checks }
+    } : row);
+  }
+  return rows;
+}
+
+function markInterruptedAccess(rows) {
+  return rows.map((row) => ({
+    ...row,
+    status: row.status === "checking" ? "unverified" : row.status,
+    checks: Object.fromEntries(Object.entries(row.checks).map(([check, status]) => [
+      check,
+      ["running", "waiting"].includes(status) ? "unverified" : status
+    ]))
+  }));
+}
+
+function accessStatusLabel(status, t) {
+  return {
+    passed: t.accessPassed,
+    failed: t.accessFailed,
+    running: t.accessRunning,
+    waiting: t.accessWaiting,
+    blocked: t.accessBlocked,
+    unverified: t.accessUnverified
+  }[status] || t.accessUnverified;
+}
+
+function accessFailureMessage(kind, t) {
+  if (kind === "missing_scope") {
+    return t.accessMissingScope;
+  }
+  if (kind === "not_collaborator") {
+    return t.accessNotCollaborator;
+  }
+  if (kind === "auth_expired") {
+    return t.accessAuthExpired;
+  }
+  if (kind?.startsWith("auth")) {
+    return t.accessAuthFailed;
+  }
+  if (kind?.startsWith("read")) {
+    return t.accessReadFailed;
+  }
+  if (kind?.startsWith("write")) {
+    return t.accessWriteFailed;
+  }
+  if (kind?.startsWith("cleanup")) {
+    return t.accessCleanupFailed;
+  }
+  return t.accessGenericFailed;
 }
 
 function initialLarkStep(step, hasIdentity) {

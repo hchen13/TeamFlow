@@ -43,7 +43,7 @@ def apply(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS lark_boards (
           id TEXT PRIMARY KEY,
           workspace_id TEXT NOT NULL UNIQUE REFERENCES workspaces(id) ON DELETE CASCADE,
-          identity_id TEXT REFERENCES lark_identities(id) ON DELETE SET NULL,
+          primary_identity_id TEXT REFERENCES lark_identities(id) ON DELETE SET NULL,
           base_url TEXT,
           base_token TEXT,
           table_id TEXT,
@@ -53,6 +53,24 @@ def apply(conn: sqlite3.Connection) -> None:
           last_error TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS lark_board_identity_access (
+          board_id TEXT NOT NULL REFERENCES lark_boards(id) ON DELETE CASCADE,
+          identity_id TEXT NOT NULL REFERENCES lark_identities(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'unverified',
+          auth_status TEXT NOT NULL DEFAULT 'unverified',
+          api_status TEXT NOT NULL DEFAULT 'unverified',
+          collaborator_status TEXT NOT NULL DEFAULT 'unverified',
+          read_status TEXT NOT NULL DEFAULT 'unverified',
+          write_status TEXT NOT NULL DEFAULT 'unverified',
+          cleanup_status TEXT NOT NULL DEFAULT 'unverified',
+          failure_kind TEXT,
+          missing_scopes TEXT,
+          repair_url TEXT,
+          last_error TEXT,
+          last_verified_at TEXT,
+          PRIMARY KEY (board_id, identity_id)
         );
 
         CREATE TABLE IF NOT EXISTS workflows (
