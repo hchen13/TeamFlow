@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.codex import run_codex_turn
 from core.db import (
     DEFAULT_WORKFLOW_KEY,
     SUPPORTED_HARNESS_TYPES,
@@ -165,6 +166,12 @@ def main() -> int:
     add_workspace_args(verify_agent_parser)
     verify_agent_parser.add_argument("--agent-id", help="Agent ID. Omit to verify every registered Codex agent.")
     verify_agent_parser.set_defaults(func=cmd_verify_agent)
+
+    send_agent_parser = subparsers.add_parser("send-agent", help="Send a message to a registered Codex agent and wait for completion.")
+    add_workspace_args(send_agent_parser)
+    send_agent_parser.add_argument("--agent-id", required=True, help="Registered agent ID.")
+    send_agent_parser.add_argument("--message", required=True, help="Message to send to the agent session.")
+    send_agent_parser.set_defaults(func=cmd_send_agent)
 
     sessions_parser = subparsers.add_parser("list-codex-sessions", help="List Codex sessions for the current workspace.")
     add_workspace_args(sessions_parser)
@@ -342,6 +349,26 @@ def cmd_update_agent(args: argparse.Namespace) -> int:
 def cmd_verify_agent(args: argparse.Namespace) -> int:
     print_json(verify_agents(args.workspace, agent_id=args.agent_id))
     return 0
+
+
+def cmd_send_agent(args: argparse.Namespace) -> int:
+    state = inspect_workspace(args.workspace)
+    if not state.get("initialized"):
+        raise ValueError("TeamFlow workspace is not initialized")
+    agent = next((item for item in state["agents"] if item["id"] == args.agent_id), None)
+    if agent is None:
+        raise ValueError("agent not found")
+    if agent["harness_type"] != "codex":
+        raise ValueError(f"unsupported harness type: {agent['harness_type']}")
+    result = run_codex_turn(agent["session_id"], args.message)
+    print_json({
+        "agent_id": agent["id"],
+        "role_key": agent["role_key"],
+        "harness_type": agent["harness_type"],
+        "session_id": agent["session_id"],
+        **result,
+    })
+    return 0 if result["ok"] else 1
 
 
 def cmd_list_codex_sessions(args: argparse.Namespace) -> int:
