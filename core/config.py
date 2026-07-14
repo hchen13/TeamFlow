@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -20,6 +21,23 @@ def resolve_workspace_paths(workspace: str | None) -> WorkspacePaths:
     root = Path(workspace or ".").expanduser().resolve()
     state_dir = root / TEAMFLOW_DIR
     return WorkspacePaths(root=root, state_dir=state_dir, db_path=state_dir / DB_NAME)
+
+
+def default_task_prefix(display_name: str | None, workspace: str | Path) -> str:
+    name = (display_name or "").strip() or Path(workspace).name
+    name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", name)
+    words = re.findall(r"[^\W_]+", name)
+    if not words:
+        raise ValueError("workspace name must contain a letter or number")
+    prefix = "".join(word[0] for word in words) if len(words) > 1 else words[0][:3]
+    return normalize_task_prefix(prefix[:5])
+
+
+def normalize_task_prefix(prefix: str) -> str:
+    normalized = prefix.strip().upper()
+    if not 1 <= len(normalized) <= 5 or not normalized.isalnum():
+        raise ValueError("task prefix must contain 1 to 5 letters, numbers, or Chinese characters")
+    return normalized
 
 
 def parse_lark_bitable_url(board_url: str | None) -> dict[str, str | None]:

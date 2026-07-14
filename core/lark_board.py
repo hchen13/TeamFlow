@@ -4,14 +4,15 @@ import json
 import threading
 import time
 import urllib.request
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 
-from .config import resolve_workspace_paths
+from .config import default_task_prefix, normalize_task_prefix, resolve_workspace_paths
 from .db import (
+    bootstrap_workspace,
     connect,
+    current_workflow_key,
     default_lark_identity,
     lark_identity_is_usable,
     lark_user_status_values,
@@ -19,39 +20,25 @@ from .db import (
     post_json,
     read_json,
     run_lark_cli_json,
-    run_migrations,
     workspace_id_for_root,
+)
+from .workflow import (
+    TASK_FIELD_KEYS,
+    load_workflow_definition,
+    task_field_aliases,
+    task_field_specs,
+    task_option_aliases,
+    task_option_maps,
 )
 
 
 TASK_NAMES = {
-    "zh": {"table": "任务", "view": "看板", "primary": "任务"},
-    "en": {"table": "Tasks", "view": "Kanban", "primary": "Title"},
+    "zh": {"table": "TeamFlow 任务表", "view": "看板", "primary": "任务"},
+    "en": {"table": "TeamFlow Tasks", "view": "Kanban", "primary": "Title"},
 }
 LEGACY_TASK_TABLE_NAME = "TeamFlow Tasks"
 LEGACY_TASK_VIEW_NAME = "TeamFlow Board"
-TASK_FIELD_SPECS = {
-    "task_id": {"name": "Task ID", "type": "text"},
-    "status": {
-        "name": "Status",
-        "type": "select",
-        "multiple": False,
-        "options": [
-            {"name": "Backlog", "hue": "Gray", "lightness": "Lighter"},
-            {"name": "Ready", "hue": "Blue", "lightness": "Lighter"},
-            {"name": "In Progress", "hue": "Orange", "lightness": "Light"},
-            {"name": "Review", "hue": "Purple", "lightness": "Lighter"},
-            {"name": "Blocked", "hue": "Red", "lightness": "Lighter"},
-            {"name": "Done", "hue": "Green", "lightness": "Light"},
-        ],
-    },
-    "role": {"name": "Role", "type": "text"},
-    "agent": {"name": "Agent", "type": "text"},
-    "description": {"name": "Description", "type": "text"},
-    "acceptance_criteria": {"name": "Acceptance Criteria", "type": "text"},
-    "result_evidence": {"name": "Result / Evidence", "type": "text"},
-}
-TASK_KEYS = {"title", *TASK_FIELD_SPECS}
+TASK_KEYS = TASK_FIELD_KEYS
 ACCESS_CHECKS = ("auth", "api", "collaborator", "read", "write", "cleanup")
 BOARD_REQUIRED_SCOPES = ("bitable:app", "docs:permission.member:auth")
 
@@ -183,9 +170,15 @@ class LarkBoardClient:
                 table["primary_field"] = primary["field_id"]
         return {"table": table, "fields": fields, "views": views}
 
-    def create_table(self, name: str) -> dict[str, Any]:
+    def create_table(self, name: str, primary_field_name: str) -> dict[str, Any]:
         if self.user:
-            data = self._user("+table-create", "--name", name)
+            data = self._user(
+                "+table-create",
+                "--name",
+                name,
+                "--fields",
+                _json([{"name": primary_field_name, "type": "text"}]),
+            )
         else:
             data = self._bot("POST", f"/open-apis/base/v3/bases/{self._id(self.base_token)}/tables", body={"name": name})
         table = _table(data.get("table") or data)
@@ -208,6 +201,14 @@ class LarkBoardClient:
             path = f"/open-apis/base/v3/bases/{self._id(self.base_token)}/tables/{self._id(table_id)}/fields"
             data = self._bot("GET", path, query={"limit": 200, "offset": 0})
         return [_field(item) for item in _items(data)]
+
+    def get_field(self, table_id: str, field_id: str) -> dict[str, Any]:
+        if self.user:
+            data = self._user("+field-get", "--table-id", table_id, "--field-id", field_id)
+        else:
+            path = f"/open-apis/base/v3/bases/{self._id(self.base_token)}/tables/{self._id(table_id)}/fields/{self._id(field_id)}"
+            data = self._bot("GET", path)
+        return _field(data.get("field") or data)
 
     def create_field(self, table_id: str, spec: dict[str, Any]) -> dict[str, Any]:
         if self.user:
@@ -394,7 +395,7 @@ def verify_lark_board(
 def grant_lark_board_access(workspace: str | None, *, identity_id: str) -> dict[str, Any]:
     paths = resolve_workspace_paths(workspace)
     with connect(paths.db_path) as conn:
-        run_migrations(conn)
+        bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
         board_row = conn.execute("SELECT * FROM lark_boards WHERE workspace_id = ?", (workspace_id,)).fetchone()
         identity_row = conn.execute(
@@ -455,8 +456,9 @@ def _board_verification_context(
     if not paths.db_path.exists():
         raise ValueError("TeamFlow workspace is not initialized")
     with connect(paths.db_path) as conn:
-        run_migrations(conn)
+        bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
+        workflow_key = current_workflow_key(conn, workspace_id)
         board = conn.execute("SELECT * FROM lark_boards WHERE workspace_id = ?", (workspace_id,)).fetchone()
         if board is None or not board["base_token"]:
             raise ValueError("configure a Lark Bitable before verifying access")
@@ -471,7 +473,9 @@ def _board_verification_context(
         raise ValueError("lark identity not found")
     if not identities:
         raise ValueError("configure at least one Lark identity before verifying access")
-    return paths, dict(board), [dict(identity) for identity in identities]
+    board_data = dict(board)
+    board_data["_workflow_key"] = workflow_key
+    return paths, board_data, [dict(identity) for identity in identities]
 
 
 def _verify_lark_identity(
@@ -606,7 +610,20 @@ def _read_board_access(
             (view for view in bundle["views"] if _is_task_view(view)),
             None,
         )
-        initialized = bool(_task_field_map(bundle, strict=False) and task_view)
+        try:
+            definition = load_workflow_definition(str(board["_workflow_key"]))
+        except ValueError:
+            definition = None
+        initialized = bool(
+            definition
+            and _task_field_map(
+                bundle,
+                task_field_specs(definition, _board_locale(board)),
+                task_field_aliases(),
+                strict=False,
+            )
+            and task_view
+        )
         view_id = task_view["view_id"] if initialized else None
     else:
         client.list_records(probe_table["table_id"], limit=1)
@@ -814,14 +831,30 @@ def _lark_request_error(payload: dict[str, Any], message: str) -> LarkRequestErr
     )
 
 
-def initialize_lark_board(workspace: str | None) -> dict[str, Any]:
+def initialize_lark_board(workspace: str | None, *, task_prefix: str | None = None) -> dict[str, Any]:
     paths, board, identity = _board_context(workspace)
+    workflow_key = str(board["_workflow_key"])
+    definition = load_workflow_definition(workflow_key)
+    locale = _board_locale(board)
+    prefix = normalize_task_prefix(task_prefix) if task_prefix is not None else default_task_prefix(
+        board.get("_workspace_display_name"),
+        paths.root,
+    )
+    field_specs = task_field_specs(definition, locale, task_prefix=prefix)
+    field_aliases = task_field_aliases()
     try:
         client = LarkBoardClient(identity, board)
         base = client.get_base()
         tables = client.list_tables()
         names = _task_names(board)
-        table, bundle, empty_records, created = _initialization_table(client, board, tables, names)
+        table, bundle, empty_records, created = _initialization_table(
+            client,
+            board,
+            tables,
+            names,
+            field_specs,
+            field_aliases,
+        )
         adopted_empty_table = empty_records is not None
         if adopted_empty_table:
             for record in empty_records:
@@ -841,16 +874,11 @@ def initialize_lark_board(workspace: str | None) -> dict[str, Any]:
             primary.update(updated or {"field_name": names["primary"], "type": "text"})
             primary["field_name"] = names["primary"]
 
-        by_name = {field["field_name"]: field for field in bundle["fields"]}
-        for spec in TASK_FIELD_SPECS.values():
-            existing = by_name.get(spec["name"])
-            if existing and existing["type"] != spec["type"]:
-                raise ValueError(f"field {spec['name']} must be {spec['type']}, found {existing['type']}")
-        for spec in TASK_FIELD_SPECS.values():
-            if spec["name"] not in by_name:
-                field = client.create_field(table["table_id"], spec)
-                bundle["fields"].append(field)
-                by_name[field["field_name"]] = field
+        task_fields = _ensure_task_fields(client, table["table_id"], bundle, field_specs, field_aliases)
+        configured_prefix = _task_prefix(task_fields["task_id"])
+        if task_prefix is not None and configured_prefix and configured_prefix != prefix:
+            raise ValueError(f"task prefix is already {configured_prefix}; TeamFlow will not change it automatically")
+        prefix = configured_prefix or prefix
 
         views = bundle["views"] or client.list_views(table["table_id"])
         view = next((item for item in views if _is_task_view(item)), None)
@@ -860,7 +888,7 @@ def initialize_lark_board(workspace: str | None) -> dict[str, Any]:
             renamed = client.rename_view(table["table_id"], view["view_id"], names["view"])
             view.update(renamed or {"view_name": names["view"]})
             view["view_name"] = names["view"]
-        client.set_view_group(table["table_id"], view["view_id"], by_name["Status"]["field_id"])
+        client.set_view_group(table["table_id"], view["view_id"], task_fields["status"]["field_id"])
         base_url = _board_url(str(board.get("base_url") or base.get("url") or ""), table["table_id"], view["view_id"])
         _save_board_success(
             paths,
@@ -878,6 +906,8 @@ def initialize_lark_board(workspace: str | None) -> dict[str, Any]:
             "view": view,
             "fields": bundle["fields"],
             "board_url": base_url,
+            "workflow_key": workflow_key,
+            "task_prefix": prefix,
             "created_table": created,
             "reused_empty_table": adopted_empty_table and not created,
             "deleted_empty_records": len(empty_records or []),
@@ -892,13 +922,13 @@ def list_lark_tasks(workspace: str | None, *, limit: int = 100, offset: int = 0)
         raise ValueError("limit must be between 1 and 200")
     if offset < 0:
         raise ValueError("offset must be zero or greater")
-    paths, board, identity, client, fields = _task_context(workspace)
+    paths, board, identity, client, fields, _, option_aliases = _task_context(workspace)
     try:
         data = client.list_records(board["table_id"], view_id=board.get("view_id"), limit=limit, offset=offset)
         _save_board_success(paths, board["id"], table_id=board["table_id"], view_id=board.get("view_id"))
         return {
             "ok": True,
-            "tasks": [_task(record, fields) for record in _record_items(data)],
+            "tasks": [_task(record, fields, option_aliases) for record in _record_items(data)],
             "limit": limit,
             "offset": offset,
             "has_more": bool(data.get("has_more")),
@@ -909,11 +939,11 @@ def list_lark_tasks(workspace: str | None, *, limit: int = 100, offset: int = 0)
 
 
 def get_lark_task(workspace: str | None, *, record_id: str) -> dict[str, Any]:
-    paths, board, identity, client, fields = _task_context(workspace)
+    paths, board, identity, client, fields, _, option_aliases = _task_context(workspace)
     try:
         record = client.get_record(board["table_id"], record_id)
         _save_board_success(paths, board["id"], table_id=board["table_id"], view_id=board.get("view_id"))
-        return {"ok": True, "task": _task(record, fields)}
+        return {"ok": True, "task": _task(record, fields, option_aliases)}
     except Exception as error:
         _save_board_failure(paths, board["id"], error)
         raise
@@ -927,14 +957,13 @@ def upsert_lark_task(workspace: str | None, *, task: dict[str, Any], record_id: 
         raise ValueError("title is required when creating a task")
     if not task:
         raise ValueError("task fields are required")
+    if "task_id" in task:
+        raise ValueError("task_id is generated by Lark and cannot be written")
 
-    paths, board, identity, client, fields = _task_context(workspace)
+    paths, board, identity, client, fields, option_maps, option_aliases = _task_context(workspace)
     payload = {}
-    values = dict(task)
-    if not record_id and not values.get("task_id"):
-        values["task_id"] = f"task_{uuid.uuid4().hex[:12]}"
-    for key, value in values.items():
-        payload[fields[key]] = value
+    for key, value in task.items():
+        payload[fields[key]] = _task_write_value(key, value, option_maps, option_aliases)
     try:
         result = client.upsert_record(board["table_id"], payload, record_id=record_id)
         saved_id = str(result.get("record_id") or result.get("id") or record_id or "")
@@ -942,7 +971,7 @@ def upsert_lark_task(workspace: str | None, *, task: dict[str, Any], record_id: 
             raise ValueError("Lark did not return the task record ID")
         record = client.get_record(board["table_id"], saved_id)
         _save_board_success(paths, board["id"], table_id=board["table_id"], view_id=board.get("view_id"))
-        return {"ok": True, "created": record_id is None, "task": _task(record, fields)}
+        return {"ok": True, "created": record_id is None, "task": _task(record, fields, option_aliases)}
     except Exception as error:
         _save_board_failure(paths, board["id"], error)
         raise
@@ -953,8 +982,9 @@ def _board_context(workspace: str | None) -> tuple[Any, dict[str, Any], dict[str
     if not paths.db_path.exists():
         raise ValueError("TeamFlow workspace is not initialized")
     with connect(paths.db_path) as conn:
-        run_migrations(conn)
+        bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
+        workspace_row = conn.execute("SELECT display_name FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
         board = conn.execute("SELECT * FROM lark_boards WHERE workspace_id = ?", (workspace_id,)).fetchone()
         if board is None or not board["base_token"]:
             raise ValueError("configure a Lark Bitable before accessing the board")
@@ -992,16 +1022,40 @@ def _board_context(workspace: str | None) -> tuple[Any, dict[str, Any], dict[str
             identity = default_lark_identity(conn, workspace_id)
         if identity is None:
             raise ValueError("no saved Lark identity has verified access to the Bitable")
-        return paths, dict(board), dict(identity)
+        board_data = dict(board)
+        board_data["_workflow_key"] = current_workflow_key(conn, workspace_id)
+        board_data["_workspace_display_name"] = workspace_row["display_name"] if workspace_row else None
+        return paths, board_data, dict(identity)
 
 
-def _task_context(workspace: str | None) -> tuple[Any, dict[str, Any], dict[str, Any], LarkBoardClient, dict[str, str]]:
+def _task_context(
+    workspace: str | None,
+) -> tuple[
+    Any,
+    dict[str, Any],
+    dict[str, Any],
+    LarkBoardClient,
+    dict[str, str],
+    dict[str, dict[str, str]],
+    dict[str, dict[str, str]],
+]:
     paths, board, identity = _board_context(workspace)
     if not board.get("table_id"):
         raise ValueError("initialize the TeamFlow board before accessing tasks")
+    definition = load_workflow_definition(str(board["_workflow_key"]))
+    locale = _board_locale(board)
+    field_specs = task_field_specs(definition, locale)
     client = LarkBoardClient(identity, board)
     bundle = client.get_table(board["table_id"])
-    return paths, board, identity, client, _task_field_map(bundle)
+    return (
+        paths,
+        board,
+        identity,
+        client,
+        _task_field_map(bundle, field_specs, task_field_aliases()),
+        task_option_maps(definition, locale),
+        task_option_aliases(definition),
+    )
 
 
 def _selected_table(board: dict[str, Any], tables: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1016,6 +1070,8 @@ def _initialization_table(
     board: dict[str, Any],
     tables: list[dict[str, Any]],
     names: dict[str, str],
+    field_specs: dict[str, dict[str, Any]],
+    field_aliases: dict[str, tuple[str, ...]],
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]] | None, bool]:
     selected = _selected_table(board, tables)
     if board.get("table_id"):
@@ -1025,7 +1081,7 @@ def _initialization_table(
     reusable = None
     for table in tables:
         bundle = client.get_table(table["table_id"])
-        if _task_field_map(bundle, strict=False):
+        if _task_field_map(bundle, field_specs, field_aliases, strict=False):
             return table, bundle, None, False
         empty_records = _reusable_empty_records(client, bundle)
         if reusable is None and empty_records is not None:
@@ -1033,9 +1089,57 @@ def _initialization_table(
     if reusable:
         return reusable
 
-    table = client.create_table(names["table"])
+    table = client.create_table(names["table"], names["primary"])
     bundle = client.get_table(table["table_id"])
     return table, bundle, _reusable_empty_records(client, bundle), True
+
+
+def _ensure_task_fields(
+    client: LarkBoardClient,
+    table_id: str,
+    bundle: dict[str, Any],
+    field_specs: dict[str, dict[str, Any]],
+    field_aliases: dict[str, tuple[str, ...]],
+) -> dict[str, dict[str, Any]]:
+    resolved = {}
+    for key, spec in field_specs.items():
+        field = _find_task_field(bundle["fields"], spec, field_aliases[key], strict=True)
+        if field is None:
+            field = client.create_field(table_id, spec)
+            bundle["fields"].append(field)
+        elif spec["type"] == "select" and field["field_name"] == spec["name"]:
+            if not field.get("options"):
+                field.update(client.get_field(table_id, field["field_id"]))
+            options = _merged_options(field.get("options") or [], spec["options"])
+            if options is not None:
+                updated = client.update_field(table_id, field["field_id"], {**spec, "options": options})
+                field.update(updated)
+                field["options"] = options
+        resolved[key] = field
+    return resolved
+
+
+def _merged_options(existing: list[dict[str, Any]], desired: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    merged = []
+    names = set()
+    for option in existing:
+        name = str(option.get("name") or "").strip()
+        if not name:
+            continue
+        normalized = {"name": name}
+        for key in ("hue", "lightness"):
+            if option.get(key):
+                normalized[key] = option[key]
+        merged.append(normalized)
+        names.add(name)
+    missing = [option for option in desired if option["name"] not in names]
+    return [*merged, *missing] if missing else None
+
+
+def _task_prefix(field: dict[str, Any]) -> str | None:
+    rules = (field.get("style") or {}).get("rules") or []
+    text = "".join(str(rule.get("text") or "") for rule in rules if rule.get("type") == "text")
+    return text[:-1] if text.endswith("-") else text or None
 
 
 def _reusable_empty_records(client: LarkBoardClient, bundle: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -1078,8 +1182,12 @@ def _has_content(value: Any) -> bool:
 
 
 def _task_names(board: dict[str, Any]) -> dict[str, str]:
+    return TASK_NAMES["zh" if _board_locale(board) == "zh-CN" else "en"]
+
+
+def _board_locale(board: dict[str, Any]) -> str:
     host = urlparse(str(board.get("base_url") or "")).hostname or ""
-    return TASK_NAMES["en" if host.endswith("larksuite.com") else "zh"]
+    return "en" if host.endswith("larksuite.com") else "zh-CN"
 
 
 def _is_task_view(view: dict[str, Any]) -> bool:
@@ -1090,7 +1198,13 @@ def _is_task_view(view: dict[str, Any]) -> bool:
     }
 
 
-def _task_field_map(bundle: dict[str, Any], *, strict: bool = True) -> dict[str, str] | None:
+def _task_field_map(
+    bundle: dict[str, Any],
+    field_specs: dict[str, dict[str, Any]],
+    field_aliases: dict[str, tuple[str, ...]],
+    *,
+    strict: bool = True,
+) -> dict[str, str] | None:
     try:
         primary = _primary_field(bundle)
     except ValueError:
@@ -1098,15 +1212,34 @@ def _task_field_map(bundle: dict[str, Any], *, strict: bool = True) -> dict[str,
             raise
         return None
     fields = {"title": primary["field_name"]}
-    by_name = {field["field_name"]: field for field in bundle["fields"]}
-    for key, spec in TASK_FIELD_SPECS.items():
-        field = by_name.get(spec["name"])
-        if not field or field["type"] != spec["type"]:
+    for key, spec in field_specs.items():
+        field = _find_task_field(bundle["fields"], spec, field_aliases[key], strict=strict)
+        if field is None:
             if strict:
                 raise ValueError("initialize the TeamFlow board before accessing tasks")
             return None
         fields[key] = field["field_name"]
     return fields
+
+
+def _find_task_field(
+    fields: list[dict[str, Any]],
+    spec: dict[str, Any],
+    aliases: tuple[str, ...],
+    *,
+    strict: bool,
+) -> dict[str, Any] | None:
+    exact = next((field for field in fields if field["field_name"] == spec["name"]), None)
+    if exact:
+        if exact["type"] == spec["type"]:
+            return exact
+        if strict:
+            raise ValueError(f"field {spec['name']} must be {spec['type']}, found {exact['type']}")
+        return None
+    return next(
+        (field for field in fields if field["field_name"] in aliases and field["type"] == spec["type"]),
+        None,
+    )
 
 
 def _primary_field(bundle: dict[str, Any]) -> dict[str, Any]:
@@ -1119,12 +1252,39 @@ def _primary_field(bundle: dict[str, Any]) -> dict[str, Any]:
     return primary
 
 
-def _task(record: dict[str, Any], fields: dict[str, str]) -> dict[str, Any]:
+def _task(
+    record: dict[str, Any],
+    fields: dict[str, str],
+    option_aliases: dict[str, dict[str, str]],
+) -> dict[str, Any]:
     values = record.get("fields") if isinstance(record.get("fields"), dict) else record
     task = {"record_id": record.get("record_id") or record.get("id")}
     for key, field_name in fields.items():
-        task[key] = _cell(values.get(field_name))
+        value = _cell(values.get(field_name))
+        aliases = option_aliases.get(key)
+        if aliases and isinstance(value, list):
+            value = value[0] if value else None
+        task[key] = aliases.get(value, value) if aliases and isinstance(value, str) else value
     return task
+
+
+def _task_write_value(
+    key: str,
+    value: Any,
+    option_maps: dict[str, dict[str, str]],
+    option_aliases: dict[str, dict[str, str]],
+) -> Any:
+    options = option_maps.get(key)
+    if options is None or value is None or value == "":
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    if value in options:
+        return options[value]
+    stable = option_aliases[key].get(value)
+    if stable:
+        return options[stable]
+    raise ValueError(f"unsupported {key}: {value}. Supported values: {', '.join(options)}")
 
 
 def _cell(value: Any) -> Any:
@@ -1241,6 +1401,7 @@ def _field(item: dict[str, Any]) -> dict[str, Any]:
         "type": item.get("type") or "",
         "multiple": item.get("multiple"),
         "options": item.get("options") or [],
+        "style": item.get("style") or {},
         "is_primary": bool(item.get("is_primary")),
     }
 

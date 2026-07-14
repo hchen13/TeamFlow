@@ -16,6 +16,7 @@ from urllib.parse import urlencode, urlparse
 from .codex import codex_thread_error, codex_thread_name, list_codex_threads, read_codex_thread
 from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
 from .migrations import MIGRATIONS
+from .workflow import load_workflow_definitions, sync_workflow_definitions
 
 
 SCHEMA_VERSION = MIGRATIONS[-1].ID
@@ -45,7 +46,7 @@ def init_workspace(workspace: str | None, display_name: str | None = None, write
     os.chmod(paths.state_dir, 0o700)
 
     with connect(paths.db_path) as conn:
-        run_migrations(conn)
+        bootstrap_workspace(conn)
         upsert_workspace(conn, paths.root, display_name)
 
     os.chmod(paths.db_path, 0o600)
@@ -72,7 +73,7 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
         }
 
     with connect(paths.db_path) as conn:
-        run_migrations(conn)
+        bootstrap_workspace(conn)
         workspace_row = conn.execute(
             "SELECT * FROM workspaces WHERE root_path = ?",
             (str(paths.root),),
@@ -113,6 +114,12 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
                 FROM roles
                 JOIN workflows ON workflows.id = roles.workflow_id
                 ORDER BY workflows.key, roles.role_key
+            """),
+            "task_types": fetch_all(conn, """
+                SELECT task_types.*, workflows.key AS workflow_key
+                FROM task_types
+                JOIN workflows ON workflows.id = task_types.workflow_id
+                ORDER BY workflows.key, task_types.type_key
             """),
             "agents": fetch_all(conn, """
                 SELECT agents.*, workflows.key AS workflow_key
@@ -185,7 +192,7 @@ def verify_lark_user_identity(
     except ValueError as error:
         if paths.db_path.exists():
             with connect(paths.db_path) as conn:
-                run_migrations(conn)
+                bootstrap_workspace(conn)
                 workspace_id = workspace_id_for_root(conn, paths.root)
                 conn.execute(
                     """
@@ -349,6 +356,7 @@ def select_workflow(workspace: str | None, *, workflow: str) -> dict[str, Any]:
 def remove_lark_identity(workspace: str | None, *, identity_id: str) -> dict[str, Any]:
     paths = resolve_workspace_paths(workspace)
     with connect(paths.db_path) as conn:
+        bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
         cursor = conn.execute(
             "DELETE FROM lark_identities WHERE workspace_id = ? AND id = ?",
@@ -361,6 +369,7 @@ def remove_lark_identity(workspace: str | None, *, identity_id: str) -> dict[str
 def set_default_lark_identity(workspace: str | None, *, identity_id: str) -> dict[str, Any]:
     paths = resolve_workspace_paths(workspace)
     with connect(paths.db_path) as conn:
+        bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
         row = conn.execute(
             "SELECT * FROM lark_identities WHERE workspace_id = ? AND id = ?",
@@ -378,6 +387,7 @@ def set_default_lark_identity(workspace: str | None, *, identity_id: str) -> dic
 def refresh_lark_identity(workspace: str | None, *, identity_id: str, domain: str) -> dict[str, Any]:
     paths = resolve_workspace_paths(workspace)
     with connect(paths.db_path) as conn:
+        bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
         row = conn.execute(
             "SELECT * FROM lark_identities WHERE workspace_id = ? AND id = ?",
@@ -532,7 +542,7 @@ def verify_agents(workspace: str | None, *, agent_id: str | None = None) -> dict
         raise ValueError("TeamFlow workspace is not initialized")
 
     with connect(paths.db_path) as conn:
-        run_migrations(conn)
+        bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
         query = "SELECT * FROM agents WHERE workspace_id = ? AND harness_type = 'codex'"
         params: tuple[Any, ...] = (workspace_id,)
@@ -637,7 +647,7 @@ def update_agent(workspace: str | None, *, agent_id: str, session_id: str) -> di
         raise ValueError("session_id is required")
 
     with connect(paths.db_path) as conn:
-        run_migrations(conn)
+        bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
         agent = conn.execute(
             "SELECT * FROM agents WHERE workspace_id = ? AND id = ?",
@@ -726,6 +736,7 @@ def unregister_agent(
         return {"ok": True, "deleted": 0}
 
     with connect(paths.db_path) as conn:
+        bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
         if agent_id:
             cursor = conn.execute("DELETE FROM agents WHERE workspace_id = ? AND id = ?", (workspace_id, agent_id))
@@ -755,6 +766,11 @@ def run_migrations(conn: sqlite3.Connection) -> None:
             "INSERT INTO migrations (id, applied_at) VALUES (?, ?)",
             (migration.ID, now()),
         )
+
+
+def bootstrap_workspace(conn: sqlite3.Connection) -> None:
+    run_migrations(conn)
+    sync_workflow_definitions(conn, load_workflow_definitions())
 
 
 def upsert_workspace(conn: sqlite3.Connection, root: Path, display_name: str | None) -> str:

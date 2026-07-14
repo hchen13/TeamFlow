@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "key": "software-development",
+  "labels": {
+    "zh-CN": "软件开发",
+    "en": "Software development"
+  },
+  "short_descriptions": {
+    "zh-CN": "由 PM、技术负责人、QA 和设计共同完成规划、实现、评审与验证。",
+    "en": "Plan, build, review, and verify software work with PM, Technical Lead, QA, and Design."
+  },
+  "coordinator_role": "pm",
+  "roles": [
+    {
+      "key": "pm",
+      "labels": {
+        "zh-CN": "PM",
+        "en": "PM"
+      },
+      "descriptions": {
+        "zh-CN": "负责范围、优先级、验收标准、任务路由、最终评审和项目决策人沟通。",
+        "en": "Owns scope, priority, acceptance criteria, task routing, final review, and stakeholder alignment."
+      },
+      "allow_multiple": false
+    },
+    {
+      "key": "tl",
+      "labels": {
+        "zh-CN": "技术负责人",
+        "en": "Technical Lead"
+      },
+      "descriptions": {
+        "zh-CN": "负责技术方案、任务拆解、实现、代码质量和技术风险。",
+        "en": "Owns technical design, task breakdown, implementation, code quality, and technical risk."
+      },
+      "allow_multiple": true
+    },
+    {
+      "key": "qa",
+      "labels": {
+        "zh-CN": "QA",
+        "en": "QA"
+      },
+      "descriptions": {
+        "zh-CN": "负责行为验证、回归检查、测试证据和缺陷反馈。",
+        "en": "Owns behavior verification, regression checks, test evidence, and defect feedback."
+      },
+      "allow_multiple": true
+    },
+    {
+      "key": "design",
+      "labels": {
+        "zh-CN": "设计",
+        "en": "Design"
+      },
+      "descriptions": {
+        "zh-CN": "负责产品交互、视觉设计、用户体验和用户文案。",
+        "en": "Owns product interaction, visual design, user experience, and user-facing copy."
+      },
+      "allow_multiple": true
+    }
+  ],
+  "task_types": [
+    {
+      "key": "requirement",
+      "labels": {
+        "zh-CN": "需求",
+        "en": "Requirement"
+      },
+      "descriptions": {
+        "zh-CN": "澄清问题、范围、目标和验收标准。",
+        "en": "Clarifies the problem, scope, goals, and acceptance criteria."
+      },
+      "default_role": "pm"
+    },
+    {
+      "key": "decision",
+      "labels": {
+        "zh-CN": "决策",
+        "en": "Decision"
+      },
+      "descriptions": {
+        "zh-CN": "比较选项、记录取舍并形成明确结论。",
+        "en": "Compares options, records tradeoffs, and produces a clear decision."
+      },
+      "default_role": "pm"
+    },
+    {
+      "key": "design",
+      "labels": {
+        "zh-CN": "设计",
+        "en": "Design"
+      },
+      "descriptions": {
+        "zh-CN": "产出用户体验、界面、视觉、交互或用户文案。",
+        "en": "Produces user experience, interface, visual, interaction, or user-copy work."
+      },
+      "default_role": "design"
+    },
+    {
+      "key": "development",
+      "labels": {
+        "zh-CN": "开发",
+        "en": "Development"
+      },
+      "descriptions": {
+        "zh-CN": "完成实现、重构或技术改造。",
+        "en": "Implements, refactors, or performs technical changes."
+      },
+      "default_role": "tl"
+    },
+    {
+      "key": "bug",
+      "labels": {
+        "zh-CN": "缺陷",
+        "en": "Bug"
+      },
+      "descriptions": {
+        "zh-CN": "完成缺陷复现、定位、修复和回归准备。",
+        "en": "Reproduces, diagnoses, fixes, and prepares defects for regression testing."
+      },
+      "default_role": "tl"
+    },
+    {
+      "key": "validation",
+      "labels": {
+        "zh-CN": "验证",
+        "en": "Validation"
+      },
+      "descriptions": {
+        "zh-CN": "执行测试、验证、回归和发布检查。",
+        "en": "Performs testing, validation, regression, and release checks."
+      },
+      "default_role": "qa"
+    },
+    {
+      "key": "chore",
+      "labels": {
+        "zh-CN": "工程事务",
+        "en": "Chore"
+      },
+      "descriptions": {
+        "zh-CN": "处理配置、构建、文档和工程维护。",
+        "en": "Handles configuration, build work, documentation, and engineering maintenance."
+      },
+      "default_role": "tl"
+    }
+  ],
+  "task_schema": {
+    "base": "teamflow-task-v1",
+    "required_for_ready": [
+      "type",
+      "priority",
+      "role",
+      "description",
+      "acceptance_criteria"
+    ],
+    "task_id": {
+      "sequence_length": 4
+    }
+  },
+  "policies": {
+    "review_role": "pm",
+    "stakeholder_escalation_role": "pm"
+  }
+}

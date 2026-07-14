@@ -5,9 +5,9 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from core.config import parse_lark_bitable_url, resolve_workspace_paths
+from core.config import default_task_prefix, normalize_task_prefix, parse_lark_bitable_url, resolve_workspace_paths
 from core.db import (
     connect,
     configure_lark_board,
@@ -15,16 +15,18 @@ from core.db import (
     init_workspace,
     inspect_workspace,
     resolve_lark_wiki_bitable,
+    select_workflow,
     verify_lark_user_identity,
 )
 from core.lark_board import (
     LarkBoardClient,
     LarkRequestError,
-    TASK_FIELD_SPECS,
     _board_context,
+    _ensure_task_fields,
     _items,
     _record_page,
     _single_record,
+    _task,
     get_lark_task,
     grant_lark_board_access,
     initialize_lark_board,
@@ -32,9 +34,41 @@ from core.lark_board import (
     upsert_lark_task,
     verify_lark_board,
 )
+from core.workflow import load_workflow_definition, task_field_specs
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class TaskPrefixTest(unittest.TestCase):
+    def test_default_task_prefix(self):
+        cases = (
+            ("TeamFlow", "/projects/teamflow", "TF"),
+            ("Work Time Justin", "/projects/worktime-justin", "WTJ"),
+            ("alpha191-quant", "/projects/alpha191-quant", "AQ"),
+            ("Mara", "/projects/mara", "MAR"),
+            ("teamflow", "/projects/teamflow", "TEA"),
+            ("同舟项目", "/projects/teamflow", "同舟项"),
+            (None, "/projects/WorkTimeJustin", "WTJ"),
+        )
+        for display_name, workspace, expected in cases:
+            with self.subTest(display_name=display_name, workspace=workspace):
+                self.assertEqual(default_task_prefix(display_name, workspace), expected)
+
+    def test_explicit_task_prefix(self):
+        self.assertEqual(normalize_task_prefix(" 同舟1 "), "同舟1")
+        with self.assertRaisesRegex(ValueError, "1 to 5"):
+            normalize_task_prefix("TEAMFLOW")
+
+
+class WorkflowDefinitionTest(unittest.TestCase):
+    def test_software_development_definition(self):
+        definition = load_workflow_definition("software-development")
+
+        self.assertEqual(definition["coordinator_role"], "pm")
+        self.assertEqual({role["key"] for role in definition["roles"]}, {"pm", "tl", "qa", "design"})
+        self.assertEqual(len(definition["task_types"]), 7)
+        self.assertEqual(definition["task_schema"]["task_id"]["sequence_length"], 4)
 
 
 class FakeBoardClient:
@@ -79,10 +113,10 @@ class FakeBoardClient:
     def list_tables(self):
         return [dict(self.table)]
 
-    def create_table(self, name):
+    def create_table(self, name, primary_field_name):
         self.created_tables += 1
         self.table = {"table_id": "tblTasks", "table_name": name, "primary_field": "fldTitle"}
-        self.fields = [{"field_id": "fldTitle", "field_name": "Text", "type": "text", "is_primary": True}]
+        self.fields = [{"field_id": "fldTitle", "field_name": primary_field_name, "type": "text", "is_primary": True}]
         self.views = [{"view_id": "vewGrid", "view_name": "Grid", "view_type": "grid"}]
         self.records = {}
         return dict(self.table)
@@ -96,12 +130,26 @@ class FakeBoardClient:
 
     def update_field(self, table_id, field_id, spec):
         field = next(field for field in self.fields if field["field_id"] == field_id)
-        field.update({"field_name": spec["name"], "type": spec["type"]})
+        field.update({
+            "field_name": spec["name"],
+            "type": spec["type"],
+            "multiple": spec.get("multiple"),
+            "options": list(spec.get("options") or []),
+            "style": dict(spec.get("style") or {}),
+        })
         return dict(field)
 
     def create_field(self, table_id, spec):
         self.created_fields += 1
-        field = {"field_id": f"fld{self.created_fields}", "field_name": spec["name"], "type": spec["type"], "is_primary": False}
+        field = {
+            "field_id": f"fld{self.created_fields}",
+            "field_name": spec["name"],
+            "type": spec["type"],
+            "multiple": spec.get("multiple"),
+            "options": list(spec.get("options") or []),
+            "style": dict(spec.get("style") or {}),
+            "is_primary": False,
+        }
         self.fields.append(field)
         return dict(field)
 
@@ -143,9 +191,18 @@ class FakeBoardClient:
                 time.sleep(self.write_delay)
             if self.write_error:
                 raise self.write_error
+            creating = record_id is None
             record_id = record_id or f"rec{len(self.records) + 1}"
             record = self.records.setdefault(record_id, {"record_id": record_id, "fields": {}})
             record["fields"].update(fields)
+            if creating:
+                auto_number = next((field for field in self.fields if field["type"] == "auto_number"), None)
+                if auto_number:
+                    rules = auto_number["style"]["rules"]
+                    prefix = "".join(rule.get("text", "") for rule in rules if rule["type"] == "text")
+                    length = next(rule["length"] for rule in rules if rule["type"] == "incremental_number")
+                    number = 1 + sum(auto_number["field_name"] in item["fields"] for item in self.records.values())
+                    record["fields"][auto_number["field_name"]] = f"{prefix}{number:0{length}d}"
             return {"record_id": record_id}
         finally:
             with self.write_counter_lock:
@@ -189,32 +246,48 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(len(self.client.records), 5)
         self.assertEqual(inspect_workspace(self.workspace)["lark_board"]["view_id"], "vewGrid")
 
-        initialized = initialize_lark_board(self.workspace)
+        initialized = initialize_lark_board(self.workspace, task_prefix="TF")
         self.assertFalse(initialized["created_table"])
         self.assertTrue(initialized["reused_empty_table"])
         self.assertEqual(initialized["deleted_empty_records"], 5)
         self.assertEqual(self.client.created_tables, 0)
         self.assertEqual(self.client.deleted_records, 6)
-        self.assertEqual(self.client.table["table_name"], "任务")
+        self.assertEqual(self.client.table["table_name"], "TeamFlow 任务表")
         self.assertEqual(self.client.fields[0]["field_name"], "任务")
-        self.assertEqual(self.client.created_fields, len(TASK_FIELD_SPECS))
+        expected_fields = task_field_specs(load_workflow_definition("software-development"), "zh-CN", task_prefix="TF")
+        self.assertEqual(self.client.created_fields, len(expected_fields))
         self.assertEqual(self.client.created_views, 1)
+        self.assertEqual(next(field for field in self.client.fields if field["type"] == "auto_number")["style"]["rules"][0]["text"], "TF-")
 
-        initialize_lark_board(self.workspace)
+        status_field = next(field for field in self.client.fields if field["field_name"] == "状态")
+        status_field["options"] = [option for option in status_field["options"] if option["name"] != "已取消"]
+        status_field["options"].append({"name": "自定义", "hue": "Gray", "lightness": "Lighter"})
+        self.assertEqual(initialize_lark_board(self.workspace)["task_prefix"], "TF")
         self.assertEqual(self.client.created_tables, 0)
-        self.assertEqual(self.client.created_fields, len(TASK_FIELD_SPECS))
+        self.assertEqual(self.client.created_fields, len(expected_fields))
         self.assertEqual(self.client.created_views, 1)
+        self.assertEqual({option["name"] for option in status_field["options"]} & {"已取消", "自定义"}, {"已取消", "自定义"})
+        with self.assertRaisesRegex(ValueError, "already TF"):
+            initialize_lark_board(self.workspace, task_prefix="OTHER")
 
-        created = upsert_lark_task(self.workspace, task={"title": "Implement access", "status": "Ready", "role": "tl"})
+        created = upsert_lark_task(
+            self.workspace,
+            task={"title": "Implement access", "status": "ready", "type": "development", "role": "tl"},
+        )
         task = created["task"]
         self.assertTrue(created["created"])
         self.assertEqual(task["title"], "Implement access")
-        self.assertTrue(task["task_id"].startswith("task_"))
+        self.assertEqual(task["task_id"], "TF-0001")
+        self.assertEqual(task["status"], "ready")
+        self.assertEqual(task["type"], "development")
+        self.assertEqual(task["role"], "tl")
 
-        updated = upsert_lark_task(self.workspace, record_id=task["record_id"], task={"status": "In Progress"})
-        self.assertEqual(updated["task"]["status"], "In Progress")
+        updated = upsert_lark_task(self.workspace, record_id=task["record_id"], task={"status": "in_progress"})
+        self.assertEqual(updated["task"]["status"], "in_progress")
         self.assertEqual(get_lark_task(self.workspace, record_id=task["record_id"])["task"]["title"], "Implement access")
         self.assertEqual(len(list_lark_tasks(self.workspace)["tasks"]), 1)
+        with self.assertRaisesRegex(ValueError, "generated by Lark"):
+            upsert_lark_task(self.workspace, task={"title": "Bad ID", "task_id": "TF-9999"})
 
         board = inspect_workspace(self.workspace)["lark_board"]
         self.assertEqual(board["access_status"], "verified")
@@ -230,7 +303,21 @@ class LarkBoardTest(unittest.TestCase):
         self.assertFalse(initialized["reused_empty_table"])
         self.assertEqual(self.client.created_tables, 1)
         self.assertEqual(self.client.deleted_records, 0)
-        self.assertEqual(self.client.table["table_name"], "任务")
+        self.assertEqual(self.client.table["table_name"], "TeamFlow 任务表")
+
+    def test_workflow_projection_is_loaded_on_startup(self):
+        state = inspect_workspace(self.workspace)
+        workflow = next(item for item in state["workflows"] if item["key"] == "software-development")
+        roles = [item for item in state["roles"] if item["workflow_key"] == "software-development"]
+        task_types = [item for item in state["task_types"] if item["workflow_key"] == "software-development"]
+
+        self.assertEqual(workflow["display_name_zh"], "软件开发")
+        self.assertEqual(workflow["display_name_en"], "Software development")
+        self.assertEqual([role["role_key"] for role in roles if role["is_coordinator"]], ["pm"])
+        self.assertEqual({item["type_key"] for item in task_types}, {
+            "requirement", "decision", "design", "development", "bug", "validation", "chore",
+        })
+        self.assertEqual(next(item for item in task_types if item["type_key"] == "validation")["default_role_key"], "qa")
 
     def test_blank_default_table_without_table_id_is_reused(self):
         initialized = initialize_lark_board(self.workspace)
@@ -296,6 +383,18 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(result["checks"]["read"], "passed")
         self.assertEqual(result["checks"]["write"], "passed")
         self.assertEqual(result["checks"]["cleanup"], "passed")
+
+    def test_access_verification_does_not_require_an_installed_board_schema(self):
+        configure_lark_board(
+            self.workspace,
+            board_url="https://example.feishu.cn/base/bascnTest?table=tblDefault&view=vewGrid",
+        )
+        select_workflow(self.workspace, workflow="general-task")
+
+        verification = verify_lark_board(self.workspace)
+
+        self.assertTrue(verification["ok"])
+        self.assertFalse(verification["identities"][0]["initialized"])
 
     def test_missing_api_scope_blocks_document_checks(self):
         error = LarkRequestError(
@@ -406,6 +505,37 @@ class LarkBoardTest(unittest.TestCase):
         )
         for key in ("tables", "fields", "views"):
             self.assertEqual(_items({key: [{"id": key}]}), [{"id": key}])
+
+    def test_single_select_arrays_decode_to_stable_keys(self):
+        task = _task(
+            {"record_id": "recTask", "fields": {"状态": ["可执行"], "负责人": ["技术负责人"]}},
+            {"status": "状态", "role": "负责人"},
+            {"status": {"可执行": "ready"}, "role": {"技术负责人": "tl"}},
+        )
+
+        self.assertEqual(task, {"record_id": "recTask", "status": "ready", "role": "tl"})
+
+    def test_existing_select_loads_full_options_before_update(self):
+        client = Mock()
+        existing = {
+            "field_id": "fldStatus",
+            "field_name": "状态",
+            "type": "select",
+            "options": [],
+        }
+        desired = {"name": "状态", "type": "select", "options": [{"name": "可执行"}]}
+        client.get_field.return_value = {**existing, "options": desired["options"]}
+
+        fields = _ensure_task_fields(
+            client,
+            "tblTask",
+            {"fields": [existing]},
+            {"status": desired},
+            {"status": ("Status",)},
+        )
+
+        self.assertEqual(fields["status"]["options"], desired["options"])
+        client.update_field.assert_not_called()
 
     def test_user_client_adds_collaborator_with_user_token(self):
         board = {"base_token": "bascnUser", "base_url": "https://example.feishu.cn/base/bascnUser"}
