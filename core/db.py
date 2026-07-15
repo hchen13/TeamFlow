@@ -104,7 +104,7 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
             "db_path": str(paths.db_path),
             "schema_version": current_schema_version(conn),
             "workspace": row_dict(workspace_row),
-            "lark_identities": redact_rows(fetch_all(conn, "SELECT * FROM lark_identities WHERE workspace_id = ? ORDER BY is_default DESC, updated_at DESC", workspace_id)),
+            "lark_identities": redact_rows(fetch_all(conn, "SELECT * FROM lark_identities WHERE workspace_id = ? ORDER BY updated_at DESC", workspace_id)),
             "lark_board": row_dict(board_row),
             "lark_board_access": access_rows,
             "current_workflow": row_dict(current_workflow(conn, workspace_row)),
@@ -157,7 +157,6 @@ def configure_lark_identity(
             app_name=app_name,
             app_avatar_url=app_avatar_url,
             app_name_synced_at=timestamp if app_name else None,
-            is_default=None,
             app_secret=app_secret,
             access_token=None,
             refresh_token=None,
@@ -197,12 +196,11 @@ def verify_lark_user_identity(
                 conn.execute(
                     """
                     UPDATE lark_identities
-                    SET access_status = ?, last_verified_at = ?, last_error = ?, is_default = 0, updated_at = ?
+                    SET access_status = ?, last_verified_at = ?, last_error = ?, updated_at = ?
                     WHERE workspace_id = ? AND auth_mode = 'user'
                     """,
                     (status.get("tokenStatus") or "unavailable", timestamp, str(error), timestamp, workspace_id),
                 )
-                ensure_default_lark_identity(conn, workspace_id)
         raise
 
     profile_user = ((profile or {}).get("data") or {}).get("user") or {}
@@ -256,16 +254,29 @@ def configure_lark_board(
     try:
         with connect(paths.db_path) as conn:
             workspace_id = workspace_id_for_root(conn, paths.root)
-            identity = default_lark_identity(conn, workspace_id)
             base_token = parsed["base_token"]
             if not base_token and parsed["wiki_token"]:
-                base_token = resolve_lark_wiki_bitable(identity, parsed["wiki_token"], board_url)
+                identities = conn.execute(
+                    "SELECT * FROM lark_identities WHERE workspace_id = ? ORDER BY updated_at DESC",
+                    (workspace_id,),
+                ).fetchall()
+                errors = []
+                for identity in identities:
+                    if not lark_identity_is_usable(identity):
+                        continue
+                    try:
+                        base_token = resolve_lark_wiki_bitable(identity, parsed["wiki_token"], board_url)
+                        break
+                    except ValueError as error:
+                        errors.append(str(error))
+                if not base_token and errors:
+                    raise ValueError(errors[-1])
             if not base_token:
                 raise ValueError("a valid Feishu/Lark Bitable URL is required")
             board_id = upsert_lark_board(
                 conn,
                 workspace_id=workspace_id,
-                primary_identity_id=identity["id"] if identity else None,
+                primary_identity_id=None,
                 base_url=board_url,
                 base_token=base_token,
                 table_id=parsed["table_id"],
@@ -362,26 +373,7 @@ def remove_lark_identity(workspace: str | None, *, identity_id: str) -> dict[str
             "DELETE FROM lark_identities WHERE workspace_id = ? AND id = ?",
             (workspace_id, identity_id),
         )
-        ensure_default_lark_identity(conn, workspace_id)
     return {"ok": True, "deleted": cursor.rowcount}
-
-
-def set_default_lark_identity(workspace: str | None, *, identity_id: str) -> dict[str, Any]:
-    paths = resolve_workspace_paths(workspace)
-    with connect(paths.db_path) as conn:
-        bootstrap_workspace(conn)
-        workspace_id = workspace_id_for_root(conn, paths.root)
-        row = conn.execute(
-            "SELECT * FROM lark_identities WHERE workspace_id = ? AND id = ?",
-            (workspace_id, identity_id),
-        ).fetchone()
-        if row is None:
-            raise ValueError("lark identity not found")
-        if not lark_identity_is_usable(row):
-            raise ValueError("lark identity is unavailable")
-        conn.execute("UPDATE lark_identities SET is_default = 0 WHERE workspace_id = ?", (workspace_id,))
-        conn.execute("UPDATE lark_identities SET is_default = 1, updated_at = ? WHERE id = ?", (now(), identity_id))
-    return {"ok": True, "identity_id": identity_id}
 
 
 def refresh_lark_identity(workspace: str | None, *, identity_id: str, domain: str) -> dict[str, Any]:
@@ -412,31 +404,42 @@ def refresh_lark_identity(workspace: str | None, *, identity_id: str, domain: st
     return {"ok": False, "identity_id": identity_id, "last_error": error or "failed to read app name"}
 
 
-def create_lark_board(workspace: str | None, *, domain: str, name: str) -> dict[str, Any]:
+def create_lark_board(workspace: str | None, *, identity_id: str, domain: str, name: str) -> dict[str, Any]:
     init_workspace(workspace)
     paths = resolve_workspace_paths(workspace)
     with connect(paths.db_path) as conn:
         workspace_id = workspace_id_for_root(conn, paths.root)
         project_name = paths.root.name
         board_name = name.strip() or f"{project_name}{'看板' if project_name.endswith('项目') else '项目看板'}"
-        identity = default_lark_identity(conn, workspace_id)
+        identity = conn.execute(
+            "SELECT * FROM lark_identities WHERE workspace_id = ? AND id = ?",
+            (workspace_id, identity_id),
+        ).fetchone()
         if identity is None:
-            raise ValueError("save an available Lark identity before creating a Bitable")
+            raise ValueError("lark identity not found")
+        if not lark_identity_is_usable(identity):
+            raise ValueError("lark identity is unavailable")
         if identity["auth_mode"] == "user":
             status = run_lark_cli_json(["auth", "status", "--verify"])
             try:
-                lark_user_status_values(status, expected_user_open_id=identity["user_open_id"])
+                active_app_id, _, _ = lark_user_status_values(
+                    status,
+                    expected_user_open_id=identity["user_open_id"],
+                )
+                if active_app_id != identity["app_id"]:
+                    raise ValueError(
+                        f"lark-cli is authorized for {active_app_id}, but this identity uses {identity['app_id']}"
+                    )
             except ValueError as error:
                 timestamp = now()
                 conn.execute(
                     """
                     UPDATE lark_identities
-                    SET access_status = ?, last_verified_at = ?, last_error = ?, is_default = 0, updated_at = ?
+                    SET access_status = ?, last_verified_at = ?, last_error = ?, updated_at = ?
                     WHERE id = ?
                     """,
                     (status.get("tokenStatus") or "unavailable", timestamp, str(error), timestamp, identity["id"]),
                 )
-                ensure_default_lark_identity(conn, workspace_id)
                 conn.commit()
                 raise
             base_payload = run_lark_cli_json(["base", "+base-create", "--as", "user", "--name", board_name])
@@ -472,7 +475,7 @@ def create_lark_board(workspace: str | None, *, domain: str, name: str) -> dict[
             table_id=None,
             view_id=None,
         )
-    return {"ok": True, "lark_board_id": board_id, "board_url": base_url}
+    return {"ok": True, "lark_board_id": board_id, "primary_identity_id": identity_id, "board_url": base_url}
 
 
 def register_agent(
@@ -809,7 +812,6 @@ def upsert_lark_identity(
     app_name: str | None,
     app_avatar_url: str | None,
     app_name_synced_at: str | None,
-    is_default: int | None,
     app_secret: str | None,
     access_token: str | None,
     refresh_token: str | None,
@@ -828,28 +830,24 @@ def upsert_lark_identity(
             UPDATE lark_identities
             SET app_name = COALESCE(?, app_name),
                 app_avatar_url = COALESCE(?, app_avatar_url),
-                app_name_synced_at = COALESCE(?, app_name_synced_at), is_default = COALESCE(?, is_default), app_secret = COALESCE(?, app_secret),
+                app_name_synced_at = COALESCE(?, app_name_synced_at), app_secret = COALESCE(?, app_secret),
                 access_token = COALESCE(?, access_token), refresh_token = COALESCE(?, refresh_token),
                 access_status = 'unverified', last_verified_at = NULL, last_error = NULL, updated_at = ?
             WHERE id = ?
             """,
-            (app_name, app_avatar_url, app_name_synced_at, is_default, app_secret, access_token, refresh_token, timestamp, existing["id"]),
+            (app_name, app_avatar_url, app_name_synced_at, app_secret, access_token, refresh_token, timestamp, existing["id"]),
         )
-        ensure_default_lark_identity(conn, workspace_id)
         return existing["id"]
 
     identity_id = f"lark_{uuid.uuid4().hex}"
-    default_value = is_default if is_default is not None else int(auth_mode == "bot" and app_id and not has_default_lark_identity(conn, workspace_id))
     conn.execute(
         """
         INSERT INTO lark_identities
-          (id, workspace_id, auth_mode, app_id, app_name, app_avatar_url, app_name_synced_at, is_default, app_secret, access_token, refresh_token, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, workspace_id, auth_mode, app_id, app_name, app_avatar_url, app_name_synced_at, app_secret, access_token, refresh_token, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (identity_id, workspace_id, auth_mode, app_id, app_name, app_avatar_url, app_name_synced_at, default_value, app_secret, access_token, refresh_token, timestamp, timestamp),
+        (identity_id, workspace_id, auth_mode, app_id, app_name, app_avatar_url, app_name_synced_at, app_secret, access_token, refresh_token, timestamp, timestamp),
     )
-    if default_value:
-        conn.execute("UPDATE lark_identities SET is_default = 0 WHERE workspace_id = ? AND id != ?", (workspace_id, identity_id))
     return identity_id
 
 
@@ -867,13 +865,12 @@ def upsert_lark_user_identity(
         (workspace_id,),
     ).fetchone()
     timestamp = now()
-    conn.execute("UPDATE lark_identities SET is_default = 0 WHERE workspace_id = ?", (workspace_id,))
     if existing:
         conn.execute(
             """
             UPDATE lark_identities
             SET app_id = ?, user_open_id = ?, user_name = ?,
-                user_avatar_url = COALESCE(?, user_avatar_url), is_default = 1,
+                user_avatar_url = COALESCE(?, user_avatar_url),
                 access_token = NULL, refresh_token = NULL, access_status = 'verified',
                 last_verified_at = ?, last_error = NULL, updated_at = ?
             WHERE id = ?
@@ -886,9 +883,9 @@ def upsert_lark_user_identity(
     conn.execute(
         """
         INSERT INTO lark_identities
-          (id, workspace_id, auth_mode, app_id, user_open_id, user_name, user_avatar_url, is_default,
+          (id, workspace_id, auth_mode, app_id, user_open_id, user_name, user_avatar_url,
            access_status, last_verified_at, created_at, updated_at)
-        VALUES (?, ?, 'user', ?, ?, ?, ?, 1, 'verified', ?, ?, ?)
+        VALUES (?, ?, 'user', ?, ?, ?, ?, 'verified', ?, ?, ?)
         """,
         (identity_id, workspace_id, app_id, user_open_id, user_name, user_avatar_url or None, timestamp, timestamp, timestamp),
     )
@@ -919,7 +916,9 @@ def upsert_lark_board(
             UPDATE lark_boards
             SET primary_identity_id = ?,
                 base_url = ?, base_token = ?, table_id = ?, view_id = ?,
-                access_status = 'unverified', last_verified_at = NULL, last_error = NULL, updated_at = ?
+                access_status = 'unverified', last_verified_at = NULL, last_error = NULL,
+                listener_status = 'unverified', listener_last_verified_at = NULL,
+                listener_failure_kind = NULL, listener_last_error = NULL, updated_at = ?
             WHERE id = ?
             """,
             (stable_primary_id, base_url, base_token, table_id, view_id, timestamp, existing["id"]),
@@ -940,54 +939,10 @@ def upsert_lark_board(
     return board_id
 
 
-def has_default_lark_identity(conn: sqlite3.Connection, workspace_id: str) -> bool:
-    return conn.execute(
-        """
-        SELECT id FROM lark_identities
-        WHERE workspace_id = ? AND is_default = 1
-          AND ((auth_mode = 'bot' AND app_id IS NOT NULL AND app_secret IS NOT NULL)
-            OR (auth_mode = 'user' AND user_open_id IS NOT NULL AND access_status = 'verified'))
-        """,
-        (workspace_id,),
-    ).fetchone() is not None
-
-
-def lark_identity_is_usable(identity: sqlite3.Row) -> bool:
+def lark_identity_is_usable(identity: sqlite3.Row | dict[str, Any]) -> bool:
     if identity["auth_mode"] == "bot":
         return bool(identity["app_id"] and identity["app_secret"])
     return bool(identity["user_open_id"] and identity["access_status"] == "verified")
-
-
-def ensure_default_lark_identity(conn: sqlite3.Connection, workspace_id: str) -> None:
-    if has_default_lark_identity(conn, workspace_id):
-        return
-    row = conn.execute(
-        """
-        SELECT id FROM lark_identities
-        WHERE workspace_id = ?
-          AND ((auth_mode = 'bot' AND app_id IS NOT NULL AND app_secret IS NOT NULL)
-            OR (auth_mode = 'user' AND user_open_id IS NOT NULL AND access_status = 'verified'))
-        ORDER BY updated_at DESC LIMIT 1
-        """,
-        (workspace_id,),
-    ).fetchone()
-    if row:
-        conn.execute("UPDATE lark_identities SET is_default = 0 WHERE workspace_id = ?", (workspace_id,))
-        conn.execute("UPDATE lark_identities SET is_default = 1 WHERE id = ?", (row["id"],))
-
-
-def default_lark_identity(conn: sqlite3.Connection, workspace_id: str) -> sqlite3.Row | None:
-    return conn.execute(
-        """
-        SELECT * FROM lark_identities
-        WHERE workspace_id = ?
-          AND ((auth_mode = 'bot' AND app_id IS NOT NULL AND app_secret IS NOT NULL)
-            OR (auth_mode = 'user' AND user_open_id IS NOT NULL AND access_status = 'verified'))
-        ORDER BY is_default DESC, updated_at DESC
-        LIMIT 1
-        """,
-        (workspace_id,),
-    ).fetchone()
 
 
 def upsert_agent(

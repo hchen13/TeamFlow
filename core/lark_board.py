@@ -13,7 +13,6 @@ from .db import (
     bootstrap_workspace,
     connect,
     current_workflow_key,
-    default_lark_identity,
     lark_identity_is_usable,
     lark_user_status_values,
     now,
@@ -75,7 +74,9 @@ class LarkBoardClient:
         self.token: str | None = None
         if self.user:
             status = run_lark_cli_json(["auth", "status", "--verify"])
-            lark_user_status_values(status, expected_user_open_id=identity.get("user_open_id"))
+            app_id, _, _ = lark_user_status_values(status, expected_user_open_id=identity.get("user_open_id"))
+            if identity.get("app_id") and identity["app_id"] != app_id:
+                raise ValueError(f"lark-cli is configured for {app_id}, but this identity uses {identity['app_id']}")
         elif not identity.get("app_id") or not identity.get("app_secret"):
             raise ValueError("the configured Lark bot identity is incomplete")
 
@@ -135,6 +136,37 @@ class LarkBoardClient:
             raise ValueError("bot information requires an application identity")
         data = self._bot("GET", "/open-apis/bot/v3/info")
         return dict(data.get("bot") or data)
+
+    def identity_open_id(self) -> str:
+        if self.user:
+            return str(self.identity.get("user_open_id") or "")
+        return str(self.get_bot_info().get("open_id") or "")
+
+    def get_file_metadata(self) -> dict[str, Any]:
+        query = {"user_id_type": "open_id"}
+        body = {"request_docs": [{"doc_token": self.base_token, "doc_type": "bitable"}], "with_url": True}
+        if self.user:
+            data = self._user_api("POST", "/open-apis/drive/v1/metas/batch_query", query=query, body=body)
+        else:
+            data = self._bot("POST", "/open-apis/drive/v1/metas/batch_query", query=query, body=body)
+        metas = data.get("metas") or []
+        if not metas:
+            raise ValueError("Lark did not return Bitable file metadata")
+        return dict(metas[0])
+
+    def file_events_subscribed(self) -> bool:
+        path = f"/open-apis/drive/v1/files/{self._id(self.base_token)}/get_subscribe"
+        query = {"file_type": "bitable"}
+        data = self._user_api("GET", path, query=query) if self.user else self._bot("GET", path, query=query)
+        return bool(data.get("is_subscribe"))
+
+    def subscribe_file_events(self) -> None:
+        path = f"/open-apis/drive/v1/files/{self._id(self.base_token)}/subscribe"
+        query = {"file_type": "bitable"}
+        if self.user:
+            self._user_api("POST", path, query=query)
+        else:
+            self._bot("POST", path, query=query)
 
     def get_base(self) -> dict[str, Any]:
         if self.user:
@@ -316,6 +348,24 @@ class LarkBoardClient:
             raise ValueError(payload.get("error") or payload.get("message") or "Lark CLI request failed")
         return _data(payload)
 
+    def _user_api(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        args = ["api", method, path, "--as", "user"]
+        if query:
+            args.extend(["--params", _json(query)])
+        if body is not None:
+            args.extend(["--data", _json(body)])
+        try:
+            return _data(run_lark_cli_json(args))
+        except ValueError as error:
+            raise _lark_request_error({}, str(error)) from error
+
     def _bot(self, method: str, path: str, *, query: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.origin}{path}"
         if query:
@@ -374,7 +424,8 @@ def verify_lark_board(
         }
         for future in as_completed(futures):
             result = future.result()
-            _save_identity_access(paths, board["id"], result)
+            if not _save_identity_access(paths, board, result):
+                raise ValueError("the configured Bitable changed during access verification; verify the current URL again")
             results.append(result)
             send({"type": "identity_completed", "result": result})
 
@@ -410,7 +461,7 @@ def grant_lark_board_access(workspace: str | None, *, identity_id: str) -> dict[
             WHERE identity.workspace_id = ? AND access.board_id = ?
               AND access.status = 'verified' AND identity.id != ?
             ORDER BY CASE WHEN identity.id = ? THEN 0 ELSE 1 END,
-                     identity.is_default DESC, identity.updated_at DESC
+                     identity.updated_at DESC
             """,
             (workspace_id, board_row["id"], identity_id, board_row["primary_identity_id"]),
         ).fetchall()
@@ -467,7 +518,7 @@ def _board_verification_context(
         if identity_id:
             query += " AND id = ?"
             params += (identity_id,)
-        query += " ORDER BY is_default DESC, updated_at DESC"
+        query += " ORDER BY updated_at DESC"
         identities = conn.execute(query, params).fetchall()
     if identity_id and not identities:
         raise ValueError("lark identity not found")
@@ -497,6 +548,8 @@ def _verify_lark_identity(
         "table_id": None,
         "view_id": None,
         "initialized": False,
+        "is_owner": None,
+        "owner_error": None,
     }
 
     def mark(check: str, status: str) -> None:
@@ -516,6 +569,11 @@ def _verify_lark_identity(
         client.get_base()
         tables = client.list_tables()
         mark("api", "passed")
+        try:
+            metadata = client.get_file_metadata()
+            result["is_owner"] = bool(metadata.get("owner_id")) and metadata.get("owner_id") == client.identity_open_id()
+        except Exception as error:
+            result["owner_error"] = str(error)
 
         stage = "collaborator"
         mark("collaborator", "running")
@@ -646,9 +704,12 @@ def _read_verification_record(client: LarkBoardClient, table_id: str, record_id:
     raise AssertionError("unreachable")
 
 
-def _save_identity_access(paths: Any, board_id: str, result: dict[str, Any]) -> None:
+def _save_identity_access(paths: Any, board: dict[str, Any], result: dict[str, Any]) -> bool:
     checks = result["checks"]
     with connect(paths.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not _same_board_resource(conn, board):
+            return False
         conn.execute(
             """
             INSERT INTO lark_board_identity_access
@@ -671,7 +732,7 @@ def _save_identity_access(paths: Any, board_id: str, result: dict[str, Any]) -> 
               last_verified_at = excluded.last_verified_at
             """,
             (
-                board_id,
+                board["id"],
                 result["identity_id"],
                 result["status"],
                 checks["auth"],
@@ -687,6 +748,7 @@ def _save_identity_access(paths: Any, board_id: str, result: dict[str, Any]) -> 
                 result["last_verified_at"],
             ),
         )
+    return True
 
 
 def _update_board_access_summary(
@@ -695,9 +757,12 @@ def _update_board_access_summary(
     results: list[dict[str, Any]],
 ) -> dict[str, Any]:
     with connect(paths.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not _same_board_resource(conn, board):
+            raise ValueError("the configured Bitable changed during access verification; verify the current URL again")
         rows = conn.execute(
             """
-            SELECT identity.id, identity.is_default, access.status, access.last_error
+            SELECT identity.id, access.status, access.last_error
             FROM lark_identities AS identity
             LEFT JOIN lark_board_identity_access AS access
               ON access.identity_id = identity.id AND access.board_id = ?
@@ -722,22 +787,38 @@ def _update_board_access_summary(
             (result for result in results if result["status"] == "verified" and result["identity_id"] == board.get("primary_identity_id")),
             None,
         ) or next((result for result in results if result["status"] == "verified"), None)
-        verified_rows = [row for row in rows if row["status"] == "verified"]
-        primary_identity_id = board.get("primary_identity_id")
-        if primary_identity_id not in {row["id"] for row in verified_rows}:
-            primary_identity_id = next((row["id"] for row in verified_rows if row["is_default"]), None)
-            primary_identity_id = primary_identity_id or next((row["id"] for row in verified_rows), None)
-            primary_identity_id = primary_identity_id or board.get("primary_identity_id")
+        owner = next((result for result in results if result["status"] == "verified" and result["is_owner"] is True), None)
+        primary_identity_id = owner["identity_id"] if owner else board.get("primary_identity_id")
         timestamp = now()
         conn.execute(
             """
             UPDATE lark_boards
-            SET primary_identity_id = COALESCE(?, primary_identity_id),
+            SET listener_status = CASE
+                  WHEN COALESCE(primary_identity_id, '') != COALESCE(?, '') THEN 'unverified'
+                  ELSE listener_status
+                END,
+                listener_last_verified_at = CASE
+                  WHEN COALESCE(primary_identity_id, '') != COALESCE(?, '') THEN NULL
+                  ELSE listener_last_verified_at
+                END,
+                listener_failure_kind = CASE
+                  WHEN COALESCE(primary_identity_id, '') != COALESCE(?, '') THEN NULL
+                  ELSE listener_failure_kind
+                END,
+                listener_last_error = CASE
+                  WHEN COALESCE(primary_identity_id, '') != COALESCE(?, '') THEN NULL
+                  ELSE listener_last_error
+                END,
+                primary_identity_id = ?,
                 table_id = COALESCE(?, table_id), view_id = COALESCE(?, view_id),
                 access_status = ?, last_verified_at = ?, last_error = ?, updated_at = ?
             WHERE id = ?
             """,
             (
+                primary_identity_id,
+                primary_identity_id,
+                primary_identity_id,
+                primary_identity_id,
                 primary_identity_id,
                 metadata.get("table_id") if metadata else None,
                 metadata.get("view_id") if metadata else None,
@@ -749,6 +830,17 @@ def _update_board_access_summary(
             ),
         )
     return {"status": status, "total": total, "verified": verified, "failed": failed, "pending": pending}
+
+
+def _same_board_resource(conn: Any, board: dict[str, Any]) -> bool:
+    current = conn.execute(
+        "SELECT base_token, table_id, view_id FROM lark_boards WHERE id = ?",
+        (board["id"],),
+    ).fetchone()
+    return current is not None and all(
+        (current[key] or None) == (board.get(key) or None)
+        for key in ("base_token", "table_id", "view_id")
+    )
 
 
 def _access_error_details(
@@ -992,36 +1084,20 @@ def _board_context(workspace: str | None) -> tuple[Any, dict[str, Any], dict[str
             "SELECT COUNT(*) FROM lark_board_identity_access WHERE board_id = ?",
             (board["id"],),
         ).fetchone()[0]
-        identity = None
-        if board["primary_identity_id"]:
-            primary = conn.execute(
-                "SELECT * FROM lark_identities WHERE workspace_id = ? AND id = ?",
-                (workspace_id, board["primary_identity_id"]),
-            ).fetchone()
-            access = conn.execute(
-                "SELECT status FROM lark_board_identity_access WHERE board_id = ? AND identity_id = ?",
-                (board["id"], board["primary_identity_id"]),
-            ).fetchone()
-            if primary and lark_identity_is_usable(primary) and (not snapshot_count or (access and access["status"] == "verified")):
-                identity = primary
-        if identity is None and snapshot_count:
-            identity = conn.execute(
-                """
-                SELECT identity.*
-                FROM lark_identities AS identity
-                JOIN lark_board_identity_access AS access ON access.identity_id = identity.id
-                WHERE identity.workspace_id = ? AND access.board_id = ? AND access.status = 'verified'
-                  AND ((identity.auth_mode = 'bot' AND identity.app_id IS NOT NULL AND identity.app_secret IS NOT NULL)
-                    OR (identity.auth_mode = 'user' AND identity.user_open_id IS NOT NULL AND identity.access_status = 'verified'))
-                ORDER BY identity.is_default DESC, identity.updated_at DESC
-                LIMIT 1
-                """,
-                (workspace_id, board["id"]),
-            ).fetchone()
-        if identity is None and not snapshot_count:
-            identity = default_lark_identity(conn, workspace_id)
-        if identity is None:
-            raise ValueError("no saved Lark identity has verified access to the Bitable")
+        if not board["primary_identity_id"]:
+            raise ValueError("the configured Bitable owner or manager identity has not been selected")
+        identity = conn.execute(
+            "SELECT * FROM lark_identities WHERE workspace_id = ? AND id = ?",
+            (workspace_id, board["primary_identity_id"]),
+        ).fetchone()
+        access = conn.execute(
+            "SELECT status FROM lark_board_identity_access WHERE board_id = ? AND identity_id = ?",
+            (board["id"], board["primary_identity_id"]),
+        ).fetchone()
+        if identity is None or not lark_identity_is_usable(identity):
+            raise ValueError("the Bitable primary identity is unavailable")
+        if snapshot_count and (access is None or access["status"] != "verified"):
+            raise ValueError("the Bitable primary identity does not have verified access")
         board_data = dict(board)
         board_data["_workflow_key"] = current_workflow_key(conn, workspace_id)
         board_data["_workspace_display_name"] = workspace_row["display_name"] if workspace_row else None

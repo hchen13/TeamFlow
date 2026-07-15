@@ -5,7 +5,7 @@ const execFileAsync = promisify(execFile);
 const cliPath = process.env.TEAMFLOW_CLI || "../scripts/teamflow.py";
 const larkCliPath = process.env.LARK_CLI || "lark-cli";
 const workspace = process.env.TEAMFLOW_WORKSPACE || "..";
-const larkUserScopes = "bitable:app docs:permission.member:auth docs:permission.member:create offline_access";
+const larkUserScopes = "bitable:app docs:event:subscribe docs:permission.member:auth docs:permission.member:create drive:drive.metadata:readonly offline_access";
 
 export async function getState() {
   return runJson(["inspect", "--workspace", workspace, "--json"]);

@@ -107,6 +107,12 @@ class FakeBoardClient:
     def get_bot_info(self):
         return {"open_id": "ou_bot"}
 
+    def identity_open_id(self):
+        return "ou_bot"
+
+    def get_file_metadata(self):
+        return {"owner_id": "ou_bot"}
+
     def add_collaborator(self, open_id):
         self.granted_open_ids.append(open_id)
 
@@ -295,6 +301,8 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(board["view_id"], "vewBoard")
 
     def test_nonempty_default_table_is_not_repurposed(self):
+        verify_lark_board(self.workspace)
+        self.client.deleted_records = 0
         self.client.records = {"recUsed": {"record_id": "recUsed", "fields": {"文本": "Existing data"}}}
 
         initialized = initialize_lark_board(self.workspace)
@@ -320,6 +328,8 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(next(item for item in task_types if item["type_key"] == "validation")["default_role_key"], "qa")
 
     def test_blank_default_table_without_table_id_is_reused(self):
+        verify_lark_board(self.workspace)
+        self.client.deleted_records = 0
         initialized = initialize_lark_board(self.workspace)
 
         self.assertFalse(initialized["created_table"])
@@ -357,6 +367,30 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(verification["checked"], 2)
         self.assertEqual(verification["summary"]["verified"], 2)
         self.assertEqual(self.client.max_active_writes, 1)
+
+    def test_switching_boards_discards_stale_verification(self):
+        self.client.write_delay = 0.1
+        errors = []
+
+        def verify():
+            try:
+                verify_lark_board(self.workspace)
+            except ValueError as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=verify)
+        thread.start()
+        deadline = time.monotonic() + 1
+        while not self.client.active_writes and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.client.active_writes, 1)
+        configure_lark_board(self.workspace, board_url="https://example.feishu.cn/base/bascnNew")
+        thread.join()
+
+        state = inspect_workspace(self.workspace)
+        self.assertRegex(str(errors[0]), "changed during access verification")
+        self.assertEqual(state["lark_board"]["base_token"], "bascnNew")
+        self.assertEqual(state["lark_board_access"], [])
 
     def test_collaborator_failure_is_reported_per_identity(self):
         self.client.permission_allowed = False
@@ -411,7 +445,8 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(result["checks"]["collaborator"], "blocked")
         self.assertEqual(result["missing_scopes"], ["bitable:app"])
 
-    def test_board_access_falls_back_to_a_verified_identity(self):
+    def test_board_access_does_not_fall_back_from_the_primary_identity(self):
+        verify_lark_board(self.workspace)
         state = inspect_workspace(self.workspace)
         primary_id = state["lark_board"]["primary_identity_id"]
         with patch("core.db.fetch_lark_app_info", return_value=("Second app", None, None)):
@@ -422,7 +457,11 @@ class LarkBoardTest(unittest.TestCase):
         with connect(paths.db_path) as conn:
             board_id = state["lark_board"]["id"]
             conn.execute(
-                "INSERT INTO lark_board_identity_access (board_id, identity_id, status) VALUES (?, ?, 'failed')",
+                """
+                INSERT INTO lark_board_identity_access (board_id, identity_id, status)
+                VALUES (?, ?, 'failed')
+                ON CONFLICT(board_id, identity_id) DO UPDATE SET status = 'failed'
+                """,
                 (board_id, primary_id),
             )
             conn.execute(
@@ -430,9 +469,8 @@ class LarkBoardTest(unittest.TestCase):
                 (board_id, secondary_id),
             )
 
-        _, _, identity = _board_context(self.workspace)
-
-        self.assertEqual(identity["id"], secondary_id)
+        with self.assertRaisesRegex(ValueError, "primary identity does not have verified access"):
+            _board_context(self.workspace)
 
     def test_user_identity_can_grant_bot_board_access(self):
         bot_id = inspect_workspace(self.workspace)["lark_identities"][0]["id"]

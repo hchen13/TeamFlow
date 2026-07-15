@@ -937,19 +937,6 @@ legend {
   flex-wrap: wrap;
 }
 
-.defaultMark {
-  display: inline-flex;
-  align-items: center;
-  min-height: 21px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: #edf7f1;
-  color: var(--accent-dark);
-  font-size: 11px;
-  font-weight: 900;
-  white-space: nowrap;
-}
-
 .permissionHint {
   display: grid;
   gap: 3px;
@@ -1111,6 +1098,284 @@ legend {
   display: grid;
   gap: 10px;
   margin-top: 4px;
+}
+
+.boardListenerSection {
+  display: grid;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.boardListenerHeader {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.boardListenerHeader > div {
+  display: grid;
+  gap: 3px;
+}
+
+.boardListenerHeader h4,
+.boardListenerHeader p {
+  margin: 0;
+}
+
+.boardListenerHeader h4 {
+  font-size: 14px;
+}
+
+.boardListenerHeader p,
+.listenerTimestamp {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.boardListenerHeader .statusBadge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.accessSpinner.small {
+  width: 11px;
+  height: 11px;
+  border-width: 1.5px;
+}
+
+.listenerNotice {
+  margin: 0;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: #faf6eb;
+  color: #76520b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.boardListenerControl {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border-radius: 8px;
+  background: #f5f7f4;
+}
+
+.listenerIdentity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.listenerIdentity > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.listenerIdentity small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.listenerIdentity strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listenerIdentityMeta {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listenerIdentityPicker {
+  width: min(360px, 100%);
+}
+
+.listenerVerify {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.listenerRepair {
+  display: grid;
+  gap: 12px;
+  padding: 10px 11px;
+  border: 1px solid #e1c9c0;
+  border-radius: 7px;
+  background: #fdf7f4;
+  color: #824638;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.listenerRepairHeader {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.listenerRepairBody {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.listenerRepairBody span {
+  color: #76564e;
+}
+
+.listenerGuideSteps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 14px;
+  margin: 0;
+  padding: 12px 0 0;
+  border-top: 1px solid #ead8d1;
+  list-style: none;
+}
+
+.listenerGuideStep {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 9px;
+}
+
+.listenerGuideStepCopy {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+}
+
+.listenerGuideStepCopy > span {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 50%;
+  background: #985442;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.listenerGuideStepCopy p,
+.listenerGuideFinish {
+  margin: 0;
+}
+
+.listenerGuideStepCopy p {
+  color: #69453c;
+}
+
+.listenerGuideImage {
+  display: block;
+  width: 100%;
+  height: 210px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #e2d4cf;
+  border-radius: 6px;
+  background: #fff;
+  cursor: zoom-in;
+}
+
+.listenerGuideImage img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.listenerGuideFinish {
+  padding-top: 11px;
+  border-top: 1px solid #ead8d1;
+  color: #69453c;
+  font-weight: 700;
+}
+
+.listenerGuideDialog {
+  width: min(94vw, 1280px);
+  max-width: none;
+  height: min(90vh, 900px);
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.listenerGuideDialog::backdrop {
+  background: rgba(16, 22, 20, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.listenerGuideDialogPanel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  padding: 12px;
+  border: 1px solid #cdd4cf;
+  border-radius: 8px;
+  background: #f7f8f6;
+  box-shadow: 0 24px 70px rgba(8, 14, 12, 0.34);
+}
+
+.listenerGuideDialogPanel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 38px;
+  gap: 12px;
+  padding: 0 2px 10px;
+  color: var(--ink);
+}
+
+.listenerGuideDialogPanel .iconButton {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  place-items: center;
+}
+
+.listenerGuideDialogPanel .iconButton svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.8;
+}
+
+.listenerGuideDialogPanel > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  border-radius: 5px;
+  background: #fff;
 }
 
 .accessMatrixTitle {
@@ -1472,6 +1737,88 @@ button.accessCheck.failed:focus-visible {
   gap: 10px;
   align-items: end;
   margin-top: 10px;
+}
+
+.boardCreate.withIdentityPicker {
+  grid-template-columns: minmax(180px, 1fr) auto;
+}
+
+.boardCreatorField {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.boardCreatorField legend {
+  padding: 0;
+}
+
+.boardCreatorChoices {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 88px);
+  gap: 8px;
+}
+
+.boardCreatorOption {
+  position: relative;
+  cursor: pointer;
+}
+
+.boardCreatorOption input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.boardCreatorTile {
+  display: grid;
+  width: 88px;
+  height: 88px;
+  place-items: center;
+  align-content: center;
+  gap: 6px;
+  padding: 8px 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfbf9;
+}
+
+.boardCreatorTile .accessAvatar {
+  width: 42px;
+  height: 42px;
+}
+
+.boardCreatorTile strong {
+  display: -webkit-box;
+  width: 100%;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.boardCreatorOption:hover .boardCreatorTile {
+  border-color: #b6c8bf;
+  background: #ffffff;
+}
+
+.boardCreatorOption input:checked + .boardCreatorTile {
+  border-color: var(--accent);
+  background: #edf7f1;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.boardCreatorOption input:focus-visible + .boardCreatorTile {
+  outline: 2px solid rgba(42, 113, 95, 0.25);
+  outline-offset: 2px;
 }
 
 .emptyInline {
@@ -1940,8 +2287,42 @@ button.accessCheck.failed:focus-visible {
   .twoCols,
   .agentFormGrid,
   .boardUrlRow,
-  .boardCreate {
+  .boardCreate,
+  .boardCreate.withIdentityPicker {
     grid-template-columns: 1fr;
+  }
+
+  .boardListenerControl,
+  .listenerRepairHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .boardListenerHeader .statusBadge {
+    align-self: flex-start;
+    width: fit-content;
+  }
+
+  .listenerIdentityPicker,
+  .listenerVerify {
+    width: 100%;
+  }
+
+  .listenerRepairHeader .secondary {
+    align-self: flex-start;
+  }
+
+  .listenerGuideSteps {
+    grid-template-columns: 1fr;
+  }
+
+  .listenerGuideImage {
+    height: 190px;
+  }
+
+  .listenerGuideDialog {
+    width: calc(100vw - 20px);
+    height: calc(100vh - 20px);
   }
 
   .agentContext {

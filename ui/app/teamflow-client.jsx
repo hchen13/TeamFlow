@@ -8,6 +8,7 @@ const FEISHU_APP_URL = "https://open.feishu.cn/app";
 const FEISHU_CREATE_APP_URL = "https://open.feishu.cn/page/launcher?from=backend_oneclick";
 const LARK_APP_URL = "https://open.larksuite.com/app";
 const LARK_CREATE_APP_URL = "https://open.larksuite.com/page/launcher?from=backend_oneclick";
+const LISTENER_GUIDE_IMAGES = [1, 2, 3, 4].map((step) => `/listener-guide/listen-lark-event-0${step}.png`);
 
 const text = {
   zh: {
@@ -32,17 +33,18 @@ const text = {
     boardUrl: "多维表格 URL",
     boardUrlHint: "请先在飞书中创建一个多维表格，再将链接粘贴到这里。TeamFlow 会将它作为协作看板。",
     boardName: "看板名称",
-    boardCreateHint: "TeamFlow 将使用当前默认身份创建一个新的多维表格。",
+    boardCreateHint: "选择一个已保存身份创建新的多维表格；该身份会成为看板主身份。",
     boardCreatePrompt: "不想手动创建？",
-    createBoardWithIdentity: "用默认身份创建",
+    createBoardWithIdentity: "选择身份创建",
     createBoard: "创建多维表格",
+    boardCreator: "创建身份",
     verifyBoardUrl: "验证并使用",
     boardUrlVerified: "链接已验证",
     boardAccessVerified: "访问已验证",
     boardAccessChecking: "正在验证身份访问",
     boardAccessPending: "已保存，尚未验证",
     boardAccessFailed: "验证失败",
-    boardUnavailableHint: "当前多维表格不可用。请更换链接，或用默认身份创建新表。",
+    boardUnavailableHint: "当前多维表格不可用。请更换链接，或选择一个身份创建新表。",
     boardAccessPartial: "部分身份可用",
     boardAccessTitle: "身份访问",
     boardAccessSummary: "{verified} / {total} 个身份可用",
@@ -77,6 +79,37 @@ const text = {
     accessGenericFailed: "身份访问验证失败",
     requiredScopes: "需要权限",
     verificationStreamFailed: "无法完成身份访问验证，请重新检查。",
+    boardListenerTitle: "看板监听",
+    boardListenerHint: "验证主身份能订阅并接收看板变化。验证过程会临时写入一条记录，并在结束后清理。",
+    boardListenerIdentity: "监听身份",
+    boardListenerUnverified: "待验证",
+    boardListenerRunning: "验证中",
+    boardListenerVerified: "监听正常",
+    boardListenerFailed: "监听异常",
+    boardListenerLastVerified: "验证时间",
+    verifyBoardListener: "验证监听",
+    reverifyBoardListener: "重新验证",
+    chooseBoardManager: "选择拥有者或管理者",
+    boardOwnerMissing: "尚未识别到看板拥有者。请选择一个已通过访问验证、且在飞书中拥有管理权限的身份。",
+    listenerNotManager: "该身份可以访问看板，但没有订阅所需的管理权限。请在飞书中将其权限设为可管理。",
+    listenerMissingScope: "应用缺少看板事件订阅所需的 API 权限。",
+    listenerEventMissing: "当前 TeamFlow 监听连接没有收到测试事件。请检查下方配置；如果已经配置，请关闭同一应用的其他长连接后重新验证。",
+    listenerAuthExpired: "用户授权已失效，请重新授权。",
+    listenerCleanupFailed: "监听已测试，但临时记录清理失败。请打开看板检查。",
+    listenerConnectionFailed: "无法连接或验证飞书事件通道。",
+    listenerScopeSetup: "先开通上面提示的 API 权限。",
+    listenerGuideContext: "请在 {app} 中为{mode}完成以下配置。",
+    listenerGuideStep1: "进入「开发配置 > 事件与回调」，将订阅方式设为「使用长连接接收事件」，然后点击「添加事件」。",
+    listenerGuideStep2: "搜索 drive.file.bitable，切换到「{mode}」，勾选「多维表格字段变更」和「多维表格记录变更」，然后点击「添加」。",
+    listenerGuideStep3: "事件添加完成后，点击页面顶部的「创建版本」。",
+    listenerGuideStep4: "填写版本信息，保存并发布版本。",
+    listenerGuideFinish: "发布完成后回到这里，点击「重新验证」。",
+    listenerGuideImage: "配置示例",
+    closePreview: "关闭预览",
+    userEventSubscription: "用户身份订阅",
+    botEventSubscription: "应用身份订阅",
+    openAppSettings: "打开应用配置",
+    configureEvents: "配置事件",
     openBoard: "打开多维表格",
     accessMode: "身份",
     bot: "应用身份",
@@ -105,11 +138,9 @@ const text = {
     appInfoIncomplete: "应用信息未完整读取，可能缺少权限，或应用还没有设置头像。",
     fixAppInfo: "点击这里设置",
     appNameUnknown: "应用名称未读取",
-    defaultIdentity: "默认",
     openPermission: "开通权限",
     permissionScopes: "需要 admin:app.info:readonly 或 application:application:self_manage。",
     refresh: "刷新",
-    setDefault: "设为默认",
     startAuth: "生成授权链接",
     openAuth: "打开授权页面",
     authReady: "授权链接已生成",
@@ -196,17 +227,18 @@ const text = {
     boardUrl: "Bitable URL",
     boardUrlHint: "Create a Bitable in Lark, then paste its link here. TeamFlow will use it as the collaboration board.",
     boardName: "Board name",
-    boardCreateHint: "TeamFlow will create a new Bitable with the current default identity.",
+    boardCreateHint: "Choose a saved identity to create a new Bitable. It becomes the board's primary identity.",
     boardCreatePrompt: "Prefer not to create one manually?",
-    createBoardWithIdentity: "Create with default identity",
+    createBoardWithIdentity: "Choose identity to create",
     createBoard: "Create Bitable",
+    boardCreator: "Creating identity",
     verifyBoardUrl: "Verify and use",
     boardUrlVerified: "Link verified",
     boardAccessVerified: "Access verified",
     boardAccessChecking: "Verifying identity access",
     boardAccessPending: "Saved, not verified",
     boardAccessFailed: "Verification failed",
-    boardUnavailableHint: "The current Bitable is unavailable. Replace the link or create a new one with the default identity.",
+    boardUnavailableHint: "The current Bitable is unavailable. Replace the link or choose an identity to create a new one.",
     boardAccessPartial: "Some identities available",
     boardAccessTitle: "Identity access",
     boardAccessSummary: "{verified} of {total} identities available",
@@ -241,6 +273,37 @@ const text = {
     accessGenericFailed: "Identity access verification failed",
     requiredScopes: "Required permissions",
     verificationStreamFailed: "Identity access verification could not finish. Try again.",
+    boardListenerTitle: "Board listener",
+    boardListenerHint: "Verify that the primary identity can subscribe to and receive board changes. The check writes one temporary record and cleans it up afterward.",
+    boardListenerIdentity: "Listener identity",
+    boardListenerUnverified: "Not verified",
+    boardListenerRunning: "Verifying",
+    boardListenerVerified: "Listening ready",
+    boardListenerFailed: "Listener unavailable",
+    boardListenerLastVerified: "Verified",
+    verifyBoardListener: "Verify listener",
+    reverifyBoardListener: "Verify again",
+    chooseBoardManager: "Choose owner or manager",
+    boardOwnerMissing: "The board owner has not been identified. Choose an identity that passed access verification and has board management permission in Lark.",
+    listenerNotManager: "This identity can access the board but lacks the management permission required to subscribe. Grant it management access in Lark.",
+    listenerMissingScope: "The app is missing API scopes required for board event subscriptions.",
+    listenerEventMissing: "The current TeamFlow listener did not receive the test event. Check the configuration below; if it is already correct, stop other long-lived connections for the same app and verify again.",
+    listenerAuthExpired: "The user authorization has expired. Authorize again.",
+    listenerCleanupFailed: "The listener was tested, but the temporary record could not be removed. Check the board.",
+    listenerConnectionFailed: "TeamFlow could not connect to or verify the Lark event channel.",
+    listenerScopeSetup: "Enable the API permissions shown above first.",
+    listenerGuideContext: "Complete these steps for {mode} in {app}.",
+    listenerGuideStep1: "Open Development configuration > Events & callbacks, set the subscription method to long connection, then click Add event.",
+    listenerGuideStep2: "Search for drive.file.bitable, switch to {mode}, select Bitable field changed and Bitable record changed, then click Add.",
+    listenerGuideStep3: "After adding the events, click Create version at the top of the page.",
+    listenerGuideStep4: "Enter the version details, then save and publish the version.",
+    listenerGuideFinish: "When publishing finishes, return here and click Verify again.",
+    listenerGuideImage: "Configuration example",
+    closePreview: "Close preview",
+    userEventSubscription: "User subscription",
+    botEventSubscription: "App subscription",
+    openAppSettings: "Open app settings",
+    configureEvents: "Configure events",
     openBoard: "Open Bitable",
     accessMode: "Identity",
     bot: "Bot",
@@ -269,11 +332,9 @@ const text = {
     appInfoIncomplete: "App information is incomplete. Permissions may be missing, or the app has no avatar.",
     fixAppInfo: "Open settings",
     appNameUnknown: "App name not read",
-    defaultIdentity: "Default",
     openPermission: "Enable permissions",
     permissionScopes: "Requires admin:app.info:readonly or application:application:self_manage.",
     refresh: "Refresh",
-    setDefault: "Set default",
     startAuth: "Generate auth link",
     openAuth: "Open authorization page",
     authReady: "Authorization link generated",
@@ -797,7 +858,6 @@ function BotIdentityRow({ actions, identity, lang, larkDomain, t }) {
       <div className="connectionMain">
         <div className="connectionTitle">
           <strong>{identity.app_name || t.appNameUnknown}</strong>
-          {identity.is_default ? <span className="defaultMark">{t.defaultIdentity}</span> : null}
         </div>
         <span className="connectionMeta">{t.appId}: <code>{identity.app_id}</code></span>
         {hasName ? (
@@ -822,13 +882,6 @@ function BotIdentityRow({ actions, identity, lang, larkDomain, t }) {
           <input name="identity_id" type="hidden" value={identity.id} suppressHydrationWarning />
           <button className="secondary mini" type="submit">{t.refresh}</button>
         </form>
-        {!identity.is_default ? (
-          <form action={actions.setDefaultLarkIdentity}>
-            <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
-            <input name="identity_id" type="hidden" value={identity.id} suppressHydrationWarning />
-            <button className="secondary mini" type="submit">{t.setDefault}</button>
-          </form>
-        ) : null}
         <form action={actions.removeLarkIdentity}>
           <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
           <input name="identity_id" type="hidden" value={identity.id} suppressHydrationWarning />
@@ -851,7 +904,6 @@ function UserIdentityRow({ actions, identity, lang, t }) {
       <div className="connectionMain userConnectionMain">
         <div className="connectionTitle userConnectionTitle">
           <strong>{identity.user_name || t.userIdentityLabel}</strong>
-          {identity.is_default ? <span className="defaultMark">{t.defaultIdentity}</span> : null}
           <span className={verified ? "statusBadge compact saved" : "statusBadge compact"}>{status}</span>
         </div>
         <span className="userIdentityMeta">{t.lastVerified}: {shortDate(identity.last_verified_at)}</span>
@@ -862,13 +914,6 @@ function UserIdentityRow({ actions, identity, lang, t }) {
           <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
           <PendingSubmitButton className="secondary mini" label={t.refresh} />
         </form>
-        {verified && !identity.is_default ? (
-          <form action={actions.setDefaultLarkIdentity}>
-            <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
-            <input name="identity_id" type="hidden" value={identity.id} suppressHydrationWarning />
-            <button className="secondary mini" type="submit">{t.setDefault}</button>
-          </form>
-        ) : null}
         <form action={actions.removeLarkIdentity}>
           <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
           <input name="identity_id" type="hidden" value={identity.id} suppressHydrationWarning />
@@ -900,6 +945,7 @@ function BoardStep({ actions, board, boardAccess, boardName, boardUrlDraft, canC
   const [verificationRunning, setVerificationRunning] = useState(
     configured && board.access_status === "unverified" && identities.length > 0
   );
+  const creatorIdentities = identities.filter((identity) => identity.auth_mode === "bot" || identity.access_status === "verified");
   const verificationInFlight = useRef(false);
   const verificationAbort = useRef(null);
   const autoVerificationKey = useRef("");
@@ -1060,26 +1106,255 @@ function BoardStep({ actions, board, boardAccess, boardName, boardUrlDraft, canC
               running={verificationRunning}
               t={t}
             />
-            {verificationError ? <p className="accessStreamError">{t.verificationStreamFailed}</p> : null}
+            <BoardListener
+              board={board}
+              identities={identities}
+              larkDomain={larkDomain}
+              rows={accessRows}
+              t={t}
+            />
+            {verificationError ? <p className="accessStreamError"><strong>{t.verificationStreamFailed}</strong> {verificationError}</p> : null}
           </>
         ) : null}
         {canCreateBoard ? (
           <details className="boardCreateDisclosure">
             <summary><span>{t.boardCreatePrompt}</span> <strong>{t.createBoardWithIdentity}</strong></summary>
             <p>{t.boardCreateHint}</p>
-            <form action={actions.createLarkBoard} className="boardCreate">
+            <form action={actions.createLarkBoard} className="boardCreate withIdentityPicker">
               <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
               <input name="lark_domain" type="hidden" value={larkDomain} suppressHydrationWarning />
+              <fieldset className="boardCreatorField">
+                <legend className="fieldLabel">{t.boardCreator}</legend>
+                <div className="boardCreatorChoices">
+                  {creatorIdentities.map((identity, index) => {
+                    const name = identity.auth_mode === "user"
+                      ? identity.user_name || identity.app_name || identity.app_id
+                      : identity.app_name || identity.app_id;
+                    return (
+                      <label className="boardCreatorOption" key={identity.id}>
+                        <input defaultChecked={index === 0} name="identity_id" required type="radio" value={identity.id} />
+                        <span className="boardCreatorTile">
+                          <IdentityAccessAvatar identity={identity} />
+                          <strong title={name}>{name}</strong>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </fieldset>
               <label className="field">
                 {t.boardName}
                 <input name="board_name" defaultValue={boardName} suppressHydrationWarning />
               </label>
-              <PendingSubmitButton className="secondary" label={t.createBoard} />
+              <PendingSubmitButton className="secondary" disabled={verificationRunning} label={t.createBoard} />
             </form>
           </details>
         ) : null}
       </div>
     </div>
+  );
+}
+
+function BoardListener({ board, identities, larkDomain, rows, t }) {
+  const router = useRouter();
+  const guideDialogRef = useRef(null);
+  const primaryIdentity = identities.find((identity) => identity.id === board.primary_identity_id);
+  const eligibleIdentities = rows.filter((row) => row.status === "verified");
+  const [selectedIdentityId, setSelectedIdentityId] = useState("");
+  const effectiveIdentityId = primaryIdentity?.id
+    || (eligibleIdentities.some((identity) => identity.id === selectedIdentityId) ? selectedIdentityId : eligibleIdentities[0]?.id)
+    || "";
+  const [status, setStatus] = useState(board.listener_status || "unverified");
+  const [failureKind, setFailureKind] = useState(board.listener_failure_kind || "");
+  const [lastError, setLastError] = useState(board.listener_last_error || "");
+  const [lastVerifiedAt, setLastVerifiedAt] = useState(board.listener_last_verified_at || "");
+  const [running, setRunning] = useState(false);
+  const [previewIndex, setPreviewIndex] = useState(null);
+
+  useEffect(() => {
+    setStatus(board.listener_status || "unverified");
+    setFailureKind(board.listener_failure_kind || "");
+    setLastError(board.listener_last_error || "");
+    setLastVerifiedAt(board.listener_last_verified_at || "");
+  }, [board.listener_failure_kind, board.listener_last_error, board.listener_last_verified_at, board.listener_status]);
+
+  useEffect(() => {
+    const dialog = guideDialogRef.current;
+    if (previewIndex === null) {
+      if (dialog?.open) dialog.close();
+    } else if (dialog && !dialog.open) {
+      dialog.showModal();
+    }
+  }, [previewIndex]);
+
+  const selectedIdentity = identities.find((identity) => identity.id === effectiveIdentityId);
+  const selectedAccess = rows.find((row) => row.id === selectedIdentity?.id);
+  const canVerify = Boolean(selectedIdentity && selectedAccess?.status === "verified");
+  const statusLabel = running
+    ? t.boardListenerRunning
+    : status === "verified"
+      ? t.boardListenerVerified
+      : status === "failed"
+        ? t.boardListenerFailed
+        : t.boardListenerUnverified;
+  const repairUrl = listenerRepairUrl(failureKind, selectedIdentity, board, larkDomain);
+  const appRoot = larkDomain === "larksuite" ? LARK_APP_URL : FEISHU_APP_URL;
+  const appSettingsUrl = selectedIdentity?.app_id ? `${appRoot}/${encodeURIComponent(selectedIdentity.app_id)}` : "";
+  const identityName = selectedIdentity?.auth_mode === "user"
+    ? selectedIdentity.user_name || selectedIdentity.app_name || selectedIdentity.app_id
+    : selectedIdentity?.app_name || selectedIdentity?.app_id;
+  const listenerAppName = identities.find((identity) => identity.app_id === selectedIdentity?.app_id && identity.app_name)?.app_name
+    || selectedIdentity?.app_name
+    || selectedIdentity?.app_id;
+  const subscriptionMode = selectedIdentity?.auth_mode === "user" ? t.userEventSubscription : t.botEventSubscription;
+  const listenerGuideSteps = [
+    t.listenerGuideStep1,
+    t.listenerGuideStep2.replace("{mode}", subscriptionMode),
+    t.listenerGuideStep3,
+    t.listenerGuideStep4
+  ];
+
+  async function verifyListener() {
+    if (!canVerify || running) {
+      return;
+    }
+    setRunning(true);
+    setFailureKind("");
+    setLastError("");
+    try {
+      const response = await fetch("/api/lark/board-listener", {
+        method: "POST",
+        body: JSON.stringify(primaryIdentity ? {} : { identity_id: effectiveIdentityId }),
+        headers: { "Content-Type": "application/json" }
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `Listener verification failed: ${response.status}`);
+      }
+      setStatus(payload.status || (payload.ok ? "verified" : "failed"));
+      setFailureKind(payload.failure_kind || "");
+      setLastError(payload.last_error || "");
+      setLastVerifiedAt(payload.last_verified_at || "");
+      router.refresh();
+    } catch (error) {
+      setStatus("failed");
+      setFailureKind("connection_failed");
+      setLastError(error.message || String(error));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <section className="boardListenerSection">
+      <header className="boardListenerHeader">
+        <div>
+          <h4>{t.boardListenerTitle}</h4>
+          <p>{t.boardListenerHint}</p>
+        </div>
+        <span className={`statusBadge compact ${status === "verified" ? "saved" : status === "failed" ? "error" : ""}`} title={lastError || undefined}>
+          {running ? <span className="accessSpinner small" aria-hidden="true" /> : null}
+          {statusLabel}
+        </span>
+      </header>
+
+      {!primaryIdentity ? <p className="listenerNotice">{t.boardOwnerMissing}</p> : null}
+      <div className="boardListenerControl">
+        {primaryIdentity ? (
+          <div className="listenerIdentity">
+            <IdentityAccessAvatar identity={primaryIdentity} />
+            <span>
+              <small>{t.boardListenerIdentity}</small>
+              <strong>{identityName}</strong>
+              <span className="listenerIdentityMeta">{listenerAppName} · {subscriptionMode}</span>
+            </span>
+          </div>
+        ) : (
+          <div className="field listenerIdentityPicker">
+            <span className="fieldLabel">{t.chooseBoardManager}</span>
+            <Dropdown
+              label={t.chooseBoardManager}
+              name="listener_identity_id"
+              onChange={setSelectedIdentityId}
+              options={eligibleIdentities.map((identity) => ({
+                description: identity.auth_mode === "bot" ? identity.app_id : t.userIdentityType,
+                label: identity.app_name || identity.user_name || identity.app_id,
+                value: identity.id
+              }))}
+              value={effectiveIdentityId}
+            />
+          </div>
+        )}
+        <button className="secondary listenerVerify" disabled={!canVerify || running} type="button" onClick={verifyListener}>
+          {running ? <span className="buttonSpinner" aria-hidden="true" /> : <RefreshIcon />}
+          {status === "unverified" ? t.verifyBoardListener : t.reverifyBoardListener}
+        </button>
+      </div>
+
+      {lastVerifiedAt ? <small className="listenerTimestamp" suppressHydrationWarning>{t.boardListenerLastVerified}: {shortDateTime(lastVerifiedAt)}</small> : null}
+      {status === "failed" ? (
+        <div className={`listenerRepair ${failureKind === "event_not_received" ? "withGuide" : ""}`}>
+          <div className="listenerRepairHeader">
+            <div className="listenerRepairBody">
+              <strong>{listenerFailureMessage(failureKind, t)}</strong>
+              {failureKind === "missing_scope" ? <span>{t.listenerScopeSetup}</span> : null}
+              {failureKind === "event_not_received" ? (
+                <span>{t.listenerGuideContext.replace("{app}", listenerAppName).replace("{mode}", subscriptionMode)}</span>
+              ) : null}
+            </div>
+            {failureKind === "event_not_received" && appSettingsUrl ? (
+              <a className="secondary mini" href={appSettingsUrl} rel="noreferrer" target="_blank">{t.openAppSettings}</a>
+            ) : repairUrl ? (
+              <a className="secondary mini" href={repairUrl} rel="noreferrer" target="_blank">
+                {failureKind === "not_manager" || failureKind === "cleanup_failed" ? t.openBoard : t.openPermission}
+              </a>
+            ) : null}
+          </div>
+          {failureKind === "event_not_received" ? (
+            <>
+              <ol className="listenerGuideSteps">
+                {listenerGuideSteps.map((step, index) => (
+                  <li className="listenerGuideStep" key={step}>
+                    <div className="listenerGuideStepCopy">
+                      <span aria-hidden="true">{index + 1}</span>
+                      <p>{step}</p>
+                    </div>
+                    <button
+                      aria-label={`${t.listenerGuideImage} ${index + 1}`}
+                      className="listenerGuideImage"
+                      onClick={() => setPreviewIndex(index)}
+                      type="button"
+                    >
+                      <img alt={`${t.listenerGuideImage} ${index + 1}`} src={LISTENER_GUIDE_IMAGES[index]} />
+                    </button>
+                  </li>
+                ))}
+              </ol>
+              <p className="listenerGuideFinish">{t.listenerGuideFinish}</p>
+              <dialog
+                className="listenerGuideDialog"
+                onCancel={() => setPreviewIndex(null)}
+                onClick={(event) => {
+                  if (event.target === event.currentTarget) event.currentTarget.close();
+                }}
+                onClose={() => setPreviewIndex(null)}
+                ref={guideDialogRef}
+              >
+                <div className="listenerGuideDialogPanel">
+                  <header>
+                    <strong>{t.listenerGuideImage} {(previewIndex ?? 0) + 1}</strong>
+                    <button aria-label={t.closePreview} className="iconButton" onClick={() => guideDialogRef.current?.close()} type="button">
+                      <CloseIcon />
+                    </button>
+                  </header>
+                  <img alt={`${t.listenerGuideImage} ${(previewIndex ?? 0) + 1}`} src={LISTENER_GUIDE_IMAGES[previewIndex ?? 0]} />
+                </div>
+              </dialog>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -1144,7 +1419,6 @@ function BoardAccessRow({ actions, board, canGrant, lang, onVerify, row, running
           <span className="accessIdentityName">
             <strong>{row.app_name || row.user_name || row.app_id || t.userIdentityLabel}</strong>
             {board.primary_identity_id === row.id ? <em>{t.primaryIdentity}</em> : null}
-            {row.is_default ? <em>{t.defaultIdentity}</em> : null}
           </span>
           <small>{isBot ? `${t.botIdentityType} · ${row.app_id}` : t.userIdentityType}</small>
         </span>
@@ -1245,6 +1519,10 @@ function IdentityAccessAvatar({ identity }) {
 
 function RefreshIcon() {
   return <svg aria-hidden="true" className="refreshIcon" viewBox="0 0 20 20"><path d="M15 7a6 6 0 1 0 .4 5M15 3v4h-4" /></svg>;
+}
+
+function CloseIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m6 6 8 8M14 6l-8 8" /></svg>;
 }
 
 function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSessions, currentRoles, currentWorkflow, lifecycleBySession, lang, refreshCodexState, runtimeBySession, setAgentFormOpen, t }) {
@@ -1815,6 +2093,45 @@ function permissionUrl(appId, larkDomain) {
   return `${origin}/app/${encodeURIComponent(appId)}/auth?q=admin:app.info:readonly,application:application:self_manage&op_from=openapi&token_type=tenant`;
 }
 
+function listenerFailureMessage(kind, t) {
+  return {
+    primary_identity_missing: t.boardOwnerMissing,
+    not_manager: t.listenerNotManager,
+    missing_scope: t.listenerMissingScope,
+    event_not_received: t.listenerEventMissing,
+    auth_expired: t.listenerAuthExpired,
+    cleanup_failed: t.listenerCleanupFailed,
+    connection_failed: t.listenerConnectionFailed
+  }[kind] || t.listenerConnectionFailed;
+}
+
+function listenerRepairUrl(kind, identity, board, larkDomain) {
+  if (["not_manager", "cleanup_failed"].includes(kind)) {
+    return board.base_url || "";
+  }
+  if (!identity?.app_id) {
+    return "";
+  }
+  const origin = larkDomain === "larksuite" ? "https://open.larksuite.com" : "https://open.feishu.cn";
+  if (kind === "event_not_received") {
+    return `${origin}/app/${encodeURIComponent(identity.app_id)}`;
+  }
+  if (kind === "missing_scope") {
+    const tokenType = identity.auth_mode === "user" ? "user" : "tenant";
+    return `${origin}/app/${encodeURIComponent(identity.app_id)}/auth?q=bitable:app,docs:event:subscribe,drive:drive.metadata:readonly&op_from=openapi&token_type=${tokenType}`;
+  }
+  return "";
+}
+
 function shortDate(value) {
   return value ? value.slice(0, 10) : "-";
+}
+
+function shortDateTime(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    return "-";
+  }
+  const pad = (part) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }

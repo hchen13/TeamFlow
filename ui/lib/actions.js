@@ -13,10 +13,9 @@ const messages = {
     agentBusy: "Agent 正在工作，完成后才能切换或移除。",
     authGenerated: "授权链接已生成，打开后完成确认",
     boardCreated: "多维表格已创建",
-    boardNotFound: "找不到这个多维表格。它可能已被删除，或当前默认身份无权访问。请恢复原表并确认已向默认身份开放权限；也可以粘贴新的多维表格链接，或在下方用默认身份创建新表。",
+    boardNotFound: "找不到这个多维表格。它可能已被删除，或当前身份无权访问。请恢复原表并检查权限；也可以粘贴新的多维表格链接，或在下方选择身份创建新表。",
     boardSaved: "多维表格链接已保存，正在验证身份访问",
     boardAccessGranted: "身份已添加为协作者，访问状态已重新验证",
-    identityDefaulted: "默认身份已更新",
     identityRemoved: "身份已删除",
     identityRefreshed: "应用名称已刷新",
     identitySaved: "飞书身份已保存",
@@ -34,10 +33,9 @@ const messages = {
     agentBusy: "This agent is working. Wait until it finishes before switching or removing it.",
     authGenerated: "Authorization link generated. Open it to confirm.",
     boardCreated: "Bitable created",
-    boardNotFound: "This Bitable could not be found. It may have been deleted, or the default identity may not have access. Restore it and grant access to the default identity, paste a new Bitable link, or create one below with the default identity.",
+    boardNotFound: "This Bitable could not be found. It may have been deleted, or the current identity may not have access. Restore it and check access, paste a new Bitable link, or choose an identity to create one below.",
     boardSaved: "Bitable link saved. Identity access is being verified",
     boardAccessGranted: "The identity was added as a collaborator and verified again",
-    identityDefaulted: "Default identity updated",
     identityRemoved: "Identity removed",
     identityRefreshed: "App name refreshed",
     identitySaved: "Lark identity saved",
@@ -125,6 +123,7 @@ export async function removeLarkIdentity(formData) {
 export async function createLarkBoard(formData) {
   const lang = language(formData);
   const args = ["create-lark-board", ...workspaceArgs()];
+  add(args, "--identity-id", field(formData, "identity_id"));
   add(args, "--domain", field(formData, "lark_domain") || "feishu");
   add(args, "--name", field(formData, "board_name"));
   await finish(args, {}, "lark", "boardCreated", lang, "board");
@@ -135,13 +134,6 @@ export async function grantLarkBoardAccess(formData) {
   const args = ["grant-lark-board-access", ...workspaceArgs()];
   add(args, "--identity-id", field(formData, "identity_id"));
   await finish(args, {}, "lark", "boardAccessGranted", lang, "board");
-}
-
-export async function setDefaultLarkIdentity(formData) {
-  const lang = language(formData);
-  const args = ["set-default-lark-identity", ...workspaceArgs()];
-  add(args, "--identity-id", field(formData, "identity_id"));
-  await finish(args, {}, "lark", "identityDefaulted", lang, "identity");
 }
 
 export async function registerAgent(formData) {

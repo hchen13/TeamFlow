@@ -15,6 +15,8 @@ MIGRATION_MODULES = (
     "012_agent_runtime_ephemeral",
     "013_lark_board_identity_access",
     "014_workflow_definitions",
+    "015_lark_primary_identity",
+    "016_lark_board_listener",
 )
 
 MIGRATIONS = [import_module(f"{__name__}.{name}") for name in MIGRATION_MODULES]
