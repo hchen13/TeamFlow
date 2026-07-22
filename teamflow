@@ -6,4 +6,17 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
+if [ -z "${LARK_CLI:-}" ]; then
+  LARK_CLI="$ROOT/ui/node_modules/.bin/lark-cli"
+  if [ ! -x "$LARK_CLI" ]; then
+    if ! command -v npm >/dev/null 2>&1; then
+      echo "teamflow: npm is required to install local Lark dependencies" >&2
+      exit 1
+    fi
+    echo "teamflow: installing local dependencies..." >&2
+    npm ci --prefix "$ROOT/ui" || exit 1
+  fi
+  export LARK_CLI
+fi
+
 exec uv run --project "$ROOT" --locked python "$ROOT/scripts/teamflow.py" "$@"

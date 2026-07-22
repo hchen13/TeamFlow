@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlencode, urlparse
 
-from .codex import codex_thread_error, codex_thread_name, list_codex_threads, read_codex_thread
+from .codex import (
+    codex_thread_error,
+    codex_thread_name,
+    list_codex_threads,
+    read_codex_thread,
+)
 from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
 from .migrations import MIGRATIONS
 from .workflow import load_workflow_definitions, sync_workflow_definitions
@@ -596,13 +601,13 @@ def verify_agents(workspace: str | None, *, agent_id: str | None = None) -> dict
                 ))
                 continue
 
-        runtime_status = (thread.get("status") or {}).get("type")
-        if runtime_status == "systemError" and not thread_archived:
+        thread_status = (thread.get("status") or {}).get("type")
+        if thread_status == "systemError" and not thread_archived:
             try:
                 thread = read_codex_thread(agent["session_id"], include_turns=True)
             except ValueError:
                 pass
-            runtime_status = (thread.get("status") or {}).get("type")
+            thread_status = (thread.get("status") or {}).get("type")
         thread_cwd = str(thread.get("cwd") or "").strip()
         thread_path = Path(thread_cwd).expanduser().resolve() if thread_cwd else None
         if thread_path is None or (thread_path != paths.root and paths.root not in thread_path.parents):
@@ -611,7 +616,7 @@ def verify_agents(workspace: str | None, *, agent_id: str | None = None) -> dict
         elif thread_archived:
             status = "archived"
             error = "Codex thread is archived"
-        elif runtime_status == "systemError":
+        elif thread_status == "systemError":
             status = "system_error"
             error = codex_thread_error(thread) or "Codex session entered a system error state"
         else:
@@ -623,7 +628,6 @@ def verify_agents(workspace: str | None, *, agent_id: str | None = None) -> dict
             checked_at=checked_at,
             session_name=codex_thread_name(thread),
             error=error,
-            runtime_status=runtime_status,
             thread_cwd=thread_cwd,
             thread_archived=thread_archived,
         ))

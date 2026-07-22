@@ -56,10 +56,7 @@ export async function POST() {
   }
   const state = await getState();
   const bridge = getCodexBridge();
-  bridge.track([
-    ...(codexState.sessions || []).map((session) => session.session_id),
-    ...(state.agents || []).map((agent) => agent.session_id)
-  ]);
+  bridge.track((state.agents || []).map((agent) => agent.session_id));
   return Response.json({
     agents: attachAgentHealth(state.agents || [], codexState.results || []),
     sessions: codexState.sessions || [],

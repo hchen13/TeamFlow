@@ -17,6 +17,7 @@ MIGRATION_MODULES = (
     "014_workflow_definitions",
     "015_lark_primary_identity",
     "016_lark_board_listener",
+    "017_lark_task_events",
 )
 
 MIGRATIONS = [import_module(f"{__name__}.{name}") for name in MIGRATION_MODULES]

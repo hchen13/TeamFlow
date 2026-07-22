@@ -6,13 +6,16 @@ import path from "node:path";
 import { createConnection } from "node:net";
 
 const STREAM_VERSION = 11;
+const FOLLOWING_VERSION = 1;
 const ARCHIVED_VERSION = 2;
 const UNARCHIVED_VERSION = 1;
 const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"]);
-const BRIDGE_VERSION = 5;
+const LOCAL_HOST_ID = "local";
+const FOLLOW_TIMEOUT_MS = 30000;
+const BRIDGE_VERSION = 8;
 const globalKey = Symbol.for("teamflow.codexBridge");
 
-class CodexBridge extends EventEmitter {
+export class CodexBridge extends EventEmitter {
   constructor() {
     super();
     this.version = BRIDGE_VERSION;
@@ -20,9 +23,14 @@ class CodexBridge extends EventEmitter {
     this.codexHome = path.resolve(process.env.CODEX_HOME || path.join(homedir(), ".codex"));
     this.connected = false;
     this.connecting = false;
+    this.clientId = null;
+    this.initializeRequestId = null;
     this.buffer = Buffer.alloc(0);
     this.runtimeBySource = new Map();
     this.knownThreads = new Set();
+    this.pendingThreads = new Set();
+    this.unconfirmedThreads = new Set();
+    this.followTimers = new Map();
     this.watchers = [];
     this.startWatchers();
     this.connect();
@@ -32,6 +40,12 @@ class CodexBridge extends EventEmitter {
     this.disposed = true;
     clearTimeout(this.catalogTimer);
     clearTimeout(this.reconnectTimer);
+    for (const threadId of this.knownThreads) {
+      this.sendFollowing(threadId, false);
+    }
+    for (const timer of this.followTimers.values()) {
+      clearTimeout(timer);
+    }
     this.socket?.destroy();
     this.watchers.forEach((watcher) => watcher.close());
     this.removeAllListeners();
@@ -50,7 +64,23 @@ class CodexBridge extends EventEmitter {
   }
 
   track(threadIds) {
-    this.knownThreads = new Set(threadIds.filter(Boolean));
+    const next = new Set(threadIds.filter(Boolean));
+    for (const threadId of this.knownThreads) {
+      if (!next.has(threadId)) {
+        this.sendFollowing(threadId, false);
+        this.clearThread(threadId);
+      }
+    }
+    const previous = this.knownThreads;
+    this.knownThreads = next;
+    if (!this.clientId) {
+      return;
+    }
+    for (const threadId of next) {
+      if (!previous.has(threadId) || this.unconfirmedThreads.has(threadId)) {
+        this.requestFollow(threadId);
+      }
+    }
   }
 
   async connect() {
@@ -91,9 +121,10 @@ class CodexBridge extends EventEmitter {
     socket.on("data", (chunk) => this.onData(chunk));
     socket.on("close", () => this.disconnect());
     socket.on("error", () => socket.destroy());
+    this.initializeRequestId = randomUUID();
     this.send({
       type: "request",
-      requestId: randomUUID(),
+      requestId: this.initializeRequestId,
       sourceClientId: "initializing-client",
       version: 0,
       method: "initialize",
@@ -109,8 +140,16 @@ class CodexBridge extends EventEmitter {
       return;
     }
     this.connected = false;
+    this.clientId = null;
+    this.initializeRequestId = null;
     this.socket = null;
     this.runtimeBySource.clear();
+    this.pendingThreads.clear();
+    this.unconfirmedThreads.clear();
+    for (const timer of this.followTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.followTimers.clear();
     this.emit("event", { type: "bridge", connected: false });
     this.scheduleReconnect();
   }
@@ -145,12 +184,35 @@ class CodexBridge extends EventEmitter {
   onMessage(message) {
     const method = message?.method;
     const params = message?.params ?? message?.payload ?? message?.result ?? {};
-    if (method === "client-discovery-request") {
-      this.respond(message, { canHandle: false });
+    if (message?.type === "response" && message.requestId === this.initializeRequestId) {
+      this.initializeRequestId = null;
+      if (message.resultType === "success" && message.result?.clientId) {
+        this.clientId = message.result.clientId;
+        for (const threadId of this.knownThreads) {
+          this.requestFollow(threadId);
+        }
+      } else {
+        this.socket?.destroy();
+      }
+      return;
+    }
+    if (message?.type === "client-discovery-request") {
+      this.send({
+        type: "client-discovery-response",
+        requestId: message.requestId,
+        response: { canHandle: false }
+      });
       return;
     }
     if (message?.type === "request") {
-      this.respond(message, null, "no-handler-for-request");
+      this.respond(message, "no-handler-for-request");
+      return;
+    }
+    if (method === "thread-stream-following-status-requested" && message.version === FOLLOWING_VERSION) {
+      const threadId = findValue(params, ["conversationId", "threadId"]);
+      if (params.hostId === LOCAL_HOST_ID && threadId && this.knownThreads.has(threadId)) {
+        this.requestFollow(threadId, [message.sourceClientId]);
+      }
       return;
     }
     if (method === "thread-stream-state-changed" && message.version === STREAM_VERSION) {
@@ -177,9 +239,10 @@ class CodexBridge extends EventEmitter {
     }
     const existing = this.runtimeBySource.get(sourceClientId)?.get(metadata.threadId);
     const cwd = metadata.cwd || existing?.cwd;
-    if ((!existing && !cwd && !this.knownThreads.has(metadata.threadId)) || (cwd && !insideWorkspace(cwd, this.workspace))) {
+    if (!this.knownThreads.has(metadata.threadId) || (cwd && !insideWorkspace(cwd, this.workspace))) {
       return;
     }
+    this.finishRuntimeCheck(metadata.threadId);
     const sourceRuntime = this.runtimeBySource.get(sourceClientId) || new Map();
     const next = { ...existing };
     for (const [key, value] of Object.entries(metadata)) {
@@ -206,12 +269,9 @@ class CodexBridge extends EventEmitter {
       return;
     }
     if (status === "archived") {
-      for (const sessions of this.runtimeBySource.values()) {
-        const current = sessions.get(threadId);
-        if (current) {
-          sessions.set(threadId, { ...current, status: "notLoaded" });
-        }
-      }
+      this.clearThread(threadId);
+    } else {
+      this.requestFollow(threadId);
     }
     this.emit("event", { type: "lifecycle", threadId, status });
   }
@@ -227,8 +287,77 @@ class CodexBridge extends EventEmitter {
     const aggregate = this.aggregateRuntime();
     for (const threadId of affected) {
       const runtime = aggregate.get(threadId);
-      this.emit("event", runtime ? { type: "runtime", ...runtime } : { type: "runtime", threadId, removed: true });
+      if (runtime) {
+        this.emit("event", { type: "runtime", ...runtime });
+      } else {
+        this.requestFollow(threadId);
+      }
     }
+  }
+
+  requestFollow(threadId, targetClientIds) {
+    if (!this.clientId || !this.knownThreads.has(threadId)) {
+      return;
+    }
+    this.clearThreadRuntime(threadId);
+    this.pendingThreads.add(threadId);
+    this.emit("event", { type: "runtime", threadId, status: "checking" });
+    clearTimeout(this.followTimers.get(threadId));
+    const timer = setTimeout(() => {
+      this.followTimers.delete(threadId);
+      if (!this.knownThreads.has(threadId) || this.hasRuntime(threadId)) {
+        return;
+      }
+      this.pendingThreads.delete(threadId);
+      this.unconfirmedThreads.add(threadId);
+      this.emit("event", { type: "runtime", threadId, status: "unconfirmed" });
+    }, FOLLOW_TIMEOUT_MS);
+    timer.unref?.();
+    this.followTimers.set(threadId, timer);
+    this.sendFollowing(threadId, true, targetClientIds);
+  }
+
+  sendFollowing(threadId, following, targetClientIds) {
+    if (!this.clientId) {
+      return;
+    }
+    this.send({
+      type: "broadcast",
+      method: "thread-stream-following-changed",
+      version: FOLLOWING_VERSION,
+      sourceClientId: this.clientId,
+      ...(targetClientIds?.length ? { targetClientIds } : {}),
+      params: {
+        conversationId: threadId,
+        hostId: LOCAL_HOST_ID,
+        following
+      }
+    });
+  }
+
+  finishRuntimeCheck(threadId) {
+    clearTimeout(this.followTimers.get(threadId));
+    this.followTimers.delete(threadId);
+    this.pendingThreads.delete(threadId);
+    this.unconfirmedThreads.delete(threadId);
+  }
+
+  clearThreadRuntime(threadId) {
+    for (const sessions of this.runtimeBySource.values()) {
+      sessions.delete(threadId);
+    }
+    this.pendingThreads.delete(threadId);
+    this.unconfirmedThreads.delete(threadId);
+  }
+
+  clearThread(threadId) {
+    this.clearThreadRuntime(threadId);
+    clearTimeout(this.followTimers.get(threadId));
+    this.followTimers.delete(threadId);
+  }
+
+  hasRuntime(threadId) {
+    return [...this.runtimeBySource.values()].some((sessions) => sessions.has(threadId));
   }
 
   hasThread(threadId) {
@@ -253,18 +382,26 @@ class CodexBridge extends EventEmitter {
         byThread.set(threadId, merged);
       }
     }
+    for (const threadId of this.pendingThreads) {
+      if (!byThread.has(threadId)) {
+        byThread.set(threadId, { threadId, status: "checking" });
+      }
+    }
+    for (const threadId of this.unconfirmedThreads) {
+      if (!byThread.has(threadId)) {
+        byThread.set(threadId, { threadId, status: "unconfirmed" });
+      }
+    }
     return byThread;
   }
 
-  respond(message, result, error) {
+  respond(message, error) {
     this.send({
       type: "response",
       requestId: message.requestId,
-      sourceClientId: message.targetClientId || "teamflow",
-      targetClientId: message.sourceClientId,
-      version: message.version,
+      resultType: "error",
       method: message.method,
-      ...(error ? { error: { code: error, message: error } } : { result })
+      error
     });
   }
 

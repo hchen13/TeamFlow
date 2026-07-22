@@ -9,6 +9,8 @@ const FEISHU_CREATE_APP_URL = "https://open.feishu.cn/page/launcher?from=backend
 const LARK_APP_URL = "https://open.larksuite.com/app";
 const LARK_CREATE_APP_URL = "https://open.larksuite.com/page/launcher?from=backend_oneclick";
 const LISTENER_GUIDE_IMAGES = [1, 2, 3, 4].map((step) => `/listener-guide/listen-lark-event-0${step}.png`);
+const TEAMFLOW_APP_SCOPES = "bitable:app,docs:event:subscribe,docs:permission.member:auth,docs:permission.member:create,drive:drive.metadata:readonly";
+const BITABLE_EVENT_USER_SCOPE = "bitable:app";
 
 const text = {
   zh: {
@@ -93,11 +95,13 @@ const text = {
     boardOwnerMissing: "尚未识别到看板拥有者。请选择一个已通过访问验证、且在飞书中拥有管理权限的身份。",
     listenerNotManager: "该身份可以访问看板，但没有订阅所需的管理权限。请在飞书中将其权限设为可管理。",
     listenerMissingScope: "应用缺少看板事件订阅所需的 API 权限。",
-    listenerEventMissing: "当前 TeamFlow 监听连接没有收到测试事件。请检查下方配置；如果已经配置，请关闭同一应用的其他长连接后重新验证。",
+    listenerEventMissing: "当前 TeamFlow 监听连接没有收到测试事件。请先检查下方权限、事件配置和版本发布；如果均已完成，再关闭同一应用的其他长连接后重新验证。",
     listenerAuthExpired: "用户授权已失效，请重新授权。",
     listenerCleanupFailed: "监听已测试，但临时记录清理失败。请打开看板检查。",
     listenerConnectionFailed: "无法连接或验证飞书事件通道。",
     listenerScopeSetup: "先开通上面提示的 API 权限。",
+    listenerBotDualScope: "飞书要求：即使用应用身份监听，也必须在「权限管理」中同时为应用身份和用户身份开通「查看、评论、编辑和管理多维表格（bitable:app）」权限。这里不是让你在「用户身份订阅」中重复添加事件。",
+    openUserEventPermission: "检查用户身份权限",
     listenerGuideContext: "请在 {app} 中为{mode}完成以下配置。",
     listenerGuideStep1: "进入「开发配置 > 事件与回调」，将订阅方式设为「使用长连接接收事件」，然后点击「添加事件」。",
     listenerGuideStep2: "搜索 drive.file.bitable，切换到「{mode}」，勾选「多维表格字段变更」和「多维表格记录变更」，然后点击「添加」。",
@@ -182,6 +186,10 @@ const text = {
     healthIdleHint: "此 Codex Session 已加载，当前空闲。",
     healthNotLoaded: "未加载",
     healthNotLoadedHint: "此 Codex Session 当前未被 Codex 客户端加载，但仍可使用。",
+    healthChecking: "正在确认",
+    healthCheckingHint: "正在向 Codex 客户端确认此 Session 的实时状态。",
+    healthUnconfirmed: "状态未知",
+    healthUnconfirmedHint: "Codex 客户端未返回实时状态；TeamFlow 不会据此推断此 Session 已加载或未加载。",
     healthArchived: "已归档",
     healthArchivedHint: "此 Codex Session 已归档；取消归档后会自动恢复。",
     healthDeleted: "已删除",
@@ -200,6 +208,8 @@ const text = {
     defaultValue: "默认",
     sessionSettingsUnavailable: "设置未加载",
     agentBusyActionHint: "Agent 正在工作，完成后才能切换或移除。",
+    agentCheckingActionHint: "正在确认 Agent 的实时状态，确认完成后才能切换或移除。",
+    agentUnconfirmedActionHint: "Agent 的实时状态尚未确认，暂时不能切换或移除。",
     changeWorkflow: "在飞书设置中更改",
     registeredCount: "已注册 {count} 个",
     singleAgentRole: "此角色仅允许一个 Agent；注册后可在列表中切换 Session。",
@@ -287,11 +297,13 @@ const text = {
     boardOwnerMissing: "The board owner has not been identified. Choose an identity that passed access verification and has board management permission in Lark.",
     listenerNotManager: "This identity can access the board but lacks the management permission required to subscribe. Grant it management access in Lark.",
     listenerMissingScope: "The app is missing API scopes required for board event subscriptions.",
-    listenerEventMissing: "The current TeamFlow listener did not receive the test event. Check the configuration below; if it is already correct, stop other long-lived connections for the same app and verify again.",
+    listenerEventMissing: "The current TeamFlow listener did not receive the test event. Check the permissions, event configuration, and published version below first. If all are correct, stop other long-lived connections for the same app and verify again.",
     listenerAuthExpired: "The user authorization has expired. Authorize again.",
     listenerCleanupFailed: "The listener was tested, but the temporary record could not be removed. Check the board.",
     listenerConnectionFailed: "TeamFlow could not connect to or verify the Lark event channel.",
     listenerScopeSetup: "Enable the API permissions shown above first.",
+    listenerBotDualScope: "Feishu/Lark requires an app-identity listener to enable the Bitable read, comment, edit, and manage permission (bitable:app) for both app and user identities under Permission management. This does not mean adding the events again under User subscription.",
+    openUserEventPermission: "Check user permission",
     listenerGuideContext: "Complete these steps for {mode} in {app}.",
     listenerGuideStep1: "Open Development configuration > Events & callbacks, set the subscription method to long connection, then click Add event.",
     listenerGuideStep2: "Search for drive.file.bitable, switch to {mode}, select Bitable field changed and Bitable record changed, then click Add.",
@@ -376,6 +388,10 @@ const text = {
     healthIdleHint: "This Codex session is loaded and idle.",
     healthNotLoaded: "Not loaded",
     healthNotLoadedHint: "This Codex session is not loaded by a client, but remains available.",
+    healthChecking: "Checking",
+    healthCheckingHint: "Confirming this session's live state with the Codex client.",
+    healthUnconfirmed: "Unknown",
+    healthUnconfirmedHint: "The Codex client did not return a live state. TeamFlow will not infer whether this session is loaded.",
     healthArchived: "Archived",
     healthArchivedHint: "This Codex session is archived. It will recover automatically after unarchiving.",
     healthDeleted: "Deleted",
@@ -394,6 +410,8 @@ const text = {
     defaultValue: "Default",
     sessionSettingsUnavailable: "Settings not loaded",
     agentBusyActionHint: "This agent is working. Wait until it finishes before switching or removing it.",
+    agentCheckingActionHint: "Wait until TeamFlow confirms the agent's live state before switching or removing it.",
+    agentUnconfirmedActionHint: "The agent's live state is unconfirmed. It cannot be switched or removed yet.",
     changeWorkflow: "Change in Lark setup",
     registeredCount: "{count} registered",
     singleAgentRole: "This role allows one agent. Switch its session from the registered-agent list.",
@@ -952,6 +970,7 @@ function BoardStep({ actions, board, boardAccess, boardName, boardUrlDraft, canC
   const savedUrl = configured && boardUrl.trim() === board.base_url;
   const verifiedCount = accessRows.filter((row) => row.status === "verified").length;
   const boardUnavailable = boardStatus === "unavailable";
+  const boardAccessFailed = boardStatus === "failed" || boardUnavailable;
   const urlVerified = savedUrl && !boardUnavailable && verifiedCount > 0;
   const accessLabel = verificationRunning
     ? t.boardAccessChecking
@@ -959,7 +978,7 @@ function BoardStep({ actions, board, boardAccess, boardName, boardUrlDraft, canC
       ? t.boardAccessVerified
       : verifiedCount
         ? t.boardAccessPartial
-        : boardStatus === "unavailable"
+        : boardAccessFailed
           ? t.boardAccessFailed
           : t.boardAccessPending;
   const identityKey = identities.map((identity) => identity.id).join(",");
@@ -1091,7 +1110,7 @@ function BoardStep({ actions, board, boardAccess, boardName, boardUrlDraft, canC
         {savedUrl && !boardUnavailable ? (
           <>
             <div className="boardUrlActions">
-            <span className={`statusBadge compact ${urlVerified ? "saved" : boardStatus === "unavailable" ? "error" : ""}`}>
+            <span className={`statusBadge compact ${urlVerified ? "saved" : boardAccessFailed ? "error" : ""}`}>
               {accessLabel}
             </span>
               <a href={board.base_url} rel="noreferrer" target="_blank">{t.openBoard} ↗</a>
@@ -1200,6 +1219,10 @@ function BoardListener({ board, identities, larkDomain, rows, t }) {
   const repairUrl = listenerRepairUrl(failureKind, selectedIdentity, board, larkDomain);
   const appRoot = larkDomain === "larksuite" ? LARK_APP_URL : FEISHU_APP_URL;
   const appSettingsUrl = selectedIdentity?.app_id ? `${appRoot}/${encodeURIComponent(selectedIdentity.app_id)}` : "";
+  const botListener = selectedIdentity?.auth_mode === "bot";
+  const userEventPermissionUrl = botListener && selectedIdentity?.app_id
+    ? `${appSettingsUrl}/auth?q=${BITABLE_EVENT_USER_SCOPE}&op_from=openapi&token_type=user`
+    : "";
   const identityName = selectedIdentity?.auth_mode === "user"
     ? selectedIdentity.user_name || selectedIdentity.app_name || selectedIdentity.app_id
     : selectedIdentity?.app_name || selectedIdentity?.app_id;
@@ -1299,11 +1322,16 @@ function BoardListener({ board, identities, larkDomain, rows, t }) {
               <strong>{listenerFailureMessage(failureKind, t)}</strong>
               {failureKind === "missing_scope" ? <span>{t.listenerScopeSetup}</span> : null}
               {failureKind === "event_not_received" ? (
-                <span>{t.listenerGuideContext.replace("{app}", listenerAppName).replace("{mode}", subscriptionMode)}</span>
+                <>
+                  {botListener ? <span>{t.listenerBotDualScope}</span> : null}
+                  <span>{t.listenerGuideContext.replace("{app}", listenerAppName).replace("{mode}", subscriptionMode)}</span>
+                </>
               ) : null}
             </div>
             {failureKind === "event_not_received" && appSettingsUrl ? (
-              <a className="secondary mini" href={appSettingsUrl} rel="noreferrer" target="_blank">{t.openAppSettings}</a>
+              <a className="secondary mini" href={userEventPermissionUrl || appSettingsUrl} rel="noreferrer" target="_blank">
+                {userEventPermissionUrl ? t.openUserEventPermission : t.openAppSettings}
+              </a>
             ) : repairUrl ? (
               <a className="secondary mini" href={repairUrl} rel="noreferrer" target="_blank">
                 {failureKind === "not_manager" || failureKind === "cleanup_failed" ? t.openBoard : t.openPermission}
@@ -1361,7 +1389,6 @@ function BoardListener({ board, identities, larkDomain, rows, t }) {
 function BoardAccessMatrix({ actions, board, identities, lang, onVerify, rows, running, t }) {
   const verified = rows.filter((row) => row.status === "verified").length;
   const hasChecked = rows.some((row) => row.last_verified_at);
-  const canGrant = rows.some((row) => row.status === "verified");
   const labels = [t.accessAuth, t.accessApi, t.accessCollaborator, t.accessRead, t.accessWrite, t.accessCleanup];
   return (
     <section className="accessMatrixSection">
@@ -1384,7 +1411,6 @@ function BoardAccessMatrix({ actions, board, identities, lang, onVerify, rows, r
           <BoardAccessRow
             actions={actions}
             board={board}
-            canGrant={canGrant}
             key={row.id}
             lang={lang}
             onVerify={onVerify}
@@ -1398,7 +1424,7 @@ function BoardAccessMatrix({ actions, board, identities, lang, onVerify, rows, r
   );
 }
 
-function BoardAccessRow({ actions, board, canGrant, lang, onVerify, row, running, t }) {
+function BoardAccessRow({ actions, board, lang, onVerify, row, running, t }) {
   const [expanded, setExpanded] = useState(false);
   const checks = ["auth", "api", "collaborator", "read", "write", "cleanup"];
   const labels = {
@@ -1457,7 +1483,7 @@ function BoardAccessRow({ actions, board, canGrant, lang, onVerify, row, running
                 <PendingSubmitButton className="secondary mini" label={t.reauthorize} />
               </form>
             ) : null}
-            {row.failure_kind === "not_collaborator" && canGrant ? (
+            {row.failure_kind === "not_collaborator" ? (
               <form action={actions.grantLarkBoardAccess}>
                 <input name="identity_id" type="hidden" value={row.id} suppressHydrationWarning />
                 <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
@@ -1612,6 +1638,16 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
               const runtime = runtimeBySession[agent.session_id];
               const runtimeStatus = runtime?.status || agent.health?.runtime_status;
               const active = runtimeStatus === "active";
+              const checking = runtimeStatus === "checking";
+              const unconfirmed = runtimeStatus === "unconfirmed";
+              const mutationBlocked = active || checking || unconfirmed;
+              const actionHint = active
+                ? t.agentBusyActionHint
+                : checking
+                  ? t.agentCheckingActionHint
+                  : unconfirmed
+                    ? t.agentUnconfirmedActionHint
+                    : undefined;
               const health = agentHealth(agent, t, runtime, lifecycleBySession[agent.session_id]);
               const assignedRole = roleName(currentRoles, agent.role_key);
               const sessionName = runtime?.title || agent.health?.session_name || t.unnamedSession;
@@ -1638,9 +1674,9 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
                     <div className="agentHealth">
                       <span className={`statusBadge compact ${health.className}`} title={health.title}>{health.label}</span>
                     </div>
-                    <div className="agentActions" title={active ? t.agentBusyActionHint : undefined}>
+                    <div className="agentActions" title={actionHint}>
                       <button className="secondary mini" type="button" onClick={() => setEditingAgentId("")}>{t.cancel}</button>
-                      <PendingSubmitButton className="primary mini" disabled={active} label={t.save} title={active ? t.agentBusyActionHint : undefined} />
+                      <PendingSubmitButton className="primary mini" disabled={mutationBlocked} label={t.save} title={actionHint} />
                     </div>
                   </form>
                 );
@@ -1659,8 +1695,8 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
                   <div className="agentHealth">
                     <span className={`statusBadge compact ${health.className}`} title={health.title}>{health.label}</span>
                   </div>
-                  <div className="agentActions" title={active ? t.agentBusyActionHint : undefined}>
-                    <button className="secondary mini" disabled={active} type="button" onClick={() => { setAgentFormOpen(false); setEditingAgentId(agent.id); }}>
+                  <div className="agentActions" title={actionHint}>
+                    <button className="secondary mini" disabled={mutationBlocked} type="button" onClick={() => { setAgentFormOpen(false); setEditingAgentId(agent.id); }}>
                       {t.switchSession}
                     </button>
                     <form action={actions.unregisterAgent}>
@@ -1668,7 +1704,7 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
                       <input name="agent_id" type="hidden" value={agent.id} suppressHydrationWarning />
                       <input name="current_session_id" type="hidden" value={agent.session_id} suppressHydrationWarning />
                       <input name="runtime_status" type="hidden" value={runtimeStatus || ""} suppressHydrationWarning />
-                      <button className="ghost mini" disabled={active} type="submit">{t.remove}</button>
+                      <button className="ghost mini" disabled={mutationBlocked} type="submit">{t.remove}</button>
                     </form>
                   </div>
                 </div>
@@ -1909,6 +1945,8 @@ function agentHealth(agent, t, runtime, lifecycle) {
     unverified: { className: "", label: t.healthUnverified }
   };
   const runtimeStatuses = {
+    checking: { className: "", label: t.healthChecking, title: t.healthCheckingHint },
+    unconfirmed: { className: "warning", label: t.healthUnconfirmed, title: t.healthUnconfirmedHint },
     active: { className: "active", label: t.healthActive, title: t.healthActiveHint },
     idle: { className: "saved", label: t.healthIdle, title: t.healthIdleHint },
     notLoaded: { className: "", label: t.healthNotLoaded, title: t.healthNotLoadedHint },
@@ -1926,9 +1964,6 @@ function agentHealth(agent, t, runtime, lifecycle) {
   }
   if (runtimeStatuses[runtimeStatus]) {
     return runtimeStatuses[runtimeStatus];
-  }
-  if (lifecycle === "unarchived") {
-    return runtimeStatuses.notLoaded;
   }
   const health = statuses[healthStatus] || statuses.unverified;
   const title = checkedHealth?.error || (checkedHealth?.checked_at ? `${t.healthCheckedAt}: ${shortDate(checkedHealth.checked_at)}` : health.label);
@@ -2118,7 +2153,7 @@ function listenerRepairUrl(kind, identity, board, larkDomain) {
   }
   if (kind === "missing_scope") {
     const tokenType = identity.auth_mode === "user" ? "user" : "tenant";
-    return `${origin}/app/${encodeURIComponent(identity.app_id)}/auth?q=bitable:app,docs:event:subscribe,drive:drive.metadata:readonly&op_from=openapi&token_type=${tokenType}`;
+    return `${origin}/app/${encodeURIComponent(identity.app_id)}/auth?q=${TEAMFLOW_APP_SCOPES}&op_from=openapi&token_type=${tokenType}`;
   }
   return "";
 }

@@ -6,6 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlparse
 
 from core.config import default_task_prefix, normalize_task_prefix, parse_lark_bitable_url, resolve_workspace_paths
 from core.db import (
@@ -87,6 +88,7 @@ class FakeBoardClient:
         self.fail_record_read = False
         self.record_not_found_attempts = 0
         self.grouped_views = 0
+        self.group_not_found_attempts = 0
         self.permission_allowed = True
         self.write_error = None
         self.granted_open_ids = []
@@ -174,6 +176,9 @@ class FakeBoardClient:
         return dict(view)
 
     def set_view_group(self, table_id, view_id, field_id):
+        if self.group_not_found_attempts:
+            self.group_not_found_attempts -= 1
+            raise ValueError("not_found")
         self.grouped_views += 1
 
     def list_records(self, table_id, *, view_id=None, limit=100, offset=0):
@@ -313,6 +318,20 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(self.client.deleted_records, 0)
         self.assertEqual(self.client.table["table_name"], "TeamFlow 任务表")
 
+    def test_new_board_view_retries_until_lark_can_find_it(self):
+        verify_lark_board(self.workspace)
+        self.client.group_not_found_attempts = 1
+        progress = []
+
+        with patch("core.lark_board.time.sleep") as sleep:
+            initialized = initialize_lark_board(self.workspace, emit=progress.append)
+
+        self.assertTrue(initialized["ok"])
+        self.assertEqual(self.client.grouped_views, 1)
+        sleep.assert_called_once_with(0.5)
+        self.assertIn("看板视图尚未就绪，正在重试...", progress)
+        self.assertEqual(progress[-1], "多维表格初始化完成")
+
     def test_workflow_projection_is_loaded_on_startup(self):
         state = inspect_workspace(self.workspace)
         workflow = next(item for item in state["workflows"] if item["key"] == "software-development")
@@ -346,7 +365,7 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(verification["identities"][0]["checks"]["cleanup"], "passed")
         self.assertEqual(len(self.client.records), 5)
         self.assertEqual(self.client.deleted_records, 1)
-        self.assertEqual(inspect_workspace(self.workspace)["lark_board"]["access_status"], "unavailable")
+        self.assertEqual(inspect_workspace(self.workspace)["lark_board"]["access_status"], "failed")
 
     def test_verification_retries_new_record_visibility(self):
         self.client.record_not_found_attempts = 2
@@ -356,6 +375,18 @@ class LarkBoardTest(unittest.TestCase):
         self.assertTrue(verification["ok"])
         self.assertEqual(verification["identities"][0]["checks"]["write"], "passed")
         self.assertEqual(self.client.deleted_records, 1)
+
+    def test_task_creation_retries_new_record_visibility(self):
+        verify_lark_board(self.workspace)
+        initialize_lark_board(self.workspace)
+        self.client.record_not_found_attempts = 2
+
+        with patch("core.lark_board.time.sleep") as sleep:
+            created = upsert_lark_task(self.workspace, task={"title": "Eventually visible", "status": "backlog"})
+
+        self.assertTrue(created["created"])
+        self.assertEqual(created["task"]["title"], "Eventually visible")
+        self.assertEqual(sleep.call_count, 2)
 
     def test_multiple_identity_write_probes_are_serialized(self):
         with patch("core.db.fetch_lark_app_info", return_value=("Second app", None, None)):
@@ -405,6 +436,8 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(result["checks"]["read"], "passed")
         self.assertEqual(result["checks"]["write"], "failed")
         self.assertEqual(self.client.deleted_records, 0)
+        self.assertEqual(verification["summary"]["status"], "failed")
+        self.assertEqual(inspect_workspace(self.workspace)["lark_board"]["access_status"], "failed")
 
     def test_permission_probe_does_not_block_effective_read_write(self):
         self.client.permission_allowed = False
@@ -443,7 +476,14 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(result["failure_kind"], "missing_scope")
         self.assertEqual(result["checks"]["api"], "failed")
         self.assertEqual(result["checks"]["collaborator"], "blocked")
-        self.assertEqual(result["missing_scopes"], ["bitable:app"])
+        self.assertEqual(result["missing_scopes"], [
+            "bitable:app",
+            "docs:event:subscribe",
+            "docs:permission.member:auth",
+            "docs:permission.member:create",
+            "drive:drive.metadata:readonly",
+        ])
+        self.assertEqual(parse_qs(urlparse(result["repair_url"]).query)["q"][0].split(","), result["missing_scopes"])
 
     def test_board_access_does_not_fall_back_from_the_primary_identity(self):
         verify_lark_board(self.workspace)
@@ -490,6 +530,15 @@ class LarkBoardTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["grantor_identity_id"], user_id)
+        self.assertEqual(self.client.granted_open_ids, ["ou_bot"])
+
+    def test_current_lark_user_can_grant_bot_board_access(self):
+        bot_id = inspect_workspace(self.workspace)["lark_identities"][0]["id"]
+
+        result = grant_lark_board_access(self.workspace, identity_id=bot_id)
+
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["grantor_identity_id"])
         self.assertEqual(self.client.granted_open_ids, ["ou_bot"])
 
     def test_verified_bot_can_grant_user_board_access(self):

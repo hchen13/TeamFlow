@@ -62,3 +62,60 @@ test("extracts snapshot and patch runtime metadata", async () => {
     }
   }).error, "context window exceeded");
 });
+
+test("registers as a follower after IPC initialization", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  const followed = [];
+  bridge.initializeRequestId = "initialize-1";
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.requestFollow = (threadId, targetClientIds) => followed.push({ threadId, targetClientIds });
+
+  bridge.onMessage({
+    type: "response",
+    requestId: "initialize-1",
+    resultType: "success",
+    result: { clientId: "teamflow-client" }
+  });
+
+  assert.equal(bridge.clientId, "teamflow-client");
+  assert.deepEqual(followed, [{ threadId: "thread-1", targetClientIds: undefined }]);
+});
+
+test("re-announces a tracked follower when a Codex owner appears", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  const followed = [];
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.requestFollow = (threadId, targetClientIds) => followed.push({ threadId, targetClientIds });
+
+  bridge.onMessage({
+    type: "broadcast",
+    method: "thread-stream-following-status-requested",
+    version: 1,
+    sourceClientId: "codex-owner",
+    params: { conversationId: "thread-1", hostId: "local" }
+  });
+
+  assert.deepEqual(followed, [{ threadId: "thread-1", targetClientIds: ["codex-owner"] }]);
+});
+
+test("reports a pending follower as checking rather than not loaded", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.runtimeBySource = new Map();
+  bridge.pendingThreads = new Set(["thread-1"]);
+  bridge.unconfirmedThreads = new Set();
+
+  assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "checking" }]);
+});
+
+test("does not infer not loaded when Codex returns no snapshot", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.runtimeBySource = new Map();
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set(["thread-1"]);
+
+  assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "unconfirmed" }]);
+});

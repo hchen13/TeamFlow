@@ -39,7 +39,13 @@ LEGACY_TASK_TABLE_NAME = "TeamFlow Tasks"
 LEGACY_TASK_VIEW_NAME = "TeamFlow Board"
 TASK_KEYS = TASK_FIELD_KEYS
 ACCESS_CHECKS = ("auth", "api", "collaborator", "read", "write", "cleanup")
-BOARD_REQUIRED_SCOPES = ("bitable:app", "docs:permission.member:auth")
+TEAMFLOW_APP_SCOPES = (
+    "bitable:app",
+    "docs:event:subscribe",
+    "docs:permission.member:auth",
+    "docs:permission.member:create",
+    "drive:drive.metadata:readonly",
+)
 
 
 class LarkRequestError(ValueError):
@@ -469,9 +475,6 @@ def grant_lark_board_access(workspace: str | None, *, identity_id: str) -> dict[
         raise ValueError("configure a Lark Bitable before granting access")
     if identity_row is None:
         raise ValueError("lark identity not found")
-    if not grantor_rows:
-        raise ValueError("a verified identity is required to grant document access")
-
     board = dict(board_row)
     identity = dict(identity_row)
     if identity["auth_mode"] == "user":
@@ -483,8 +486,9 @@ def grant_lark_board_access(workspace: str | None, *, identity_id: str) -> dict[
         raise ValueError("the identity does not have an Open ID that can be added as a collaborator")
 
     last_error = None
-    for grantor_row in grantor_rows:
-        grantor = dict(grantor_row)
+    grantors = [dict(row) for row in grantor_rows]
+    grantors.append({"id": None, "auth_mode": "user"})
+    for grantor in grantors:
         try:
             LarkBoardClient(grantor, board).add_collaborator(open_id)
         except Exception as error:
@@ -493,10 +497,10 @@ def grant_lark_board_access(workspace: str | None, *, identity_id: str) -> dict[
         return {
             "ok": True,
             "identity_id": identity_id,
-            "grantor_identity_id": grantor["id"],
+            "grantor_identity_id": grantor.get("id"),
             "verification": verify_lark_board(workspace, identity_id=identity_id),
         }
-    raise ValueError(str(last_error or "no verified identity can grant document access"))
+    raise ValueError(str(last_error or "no available identity can grant document access"))
 
 
 def _board_verification_context(
@@ -602,7 +606,7 @@ def _verify_lark_identity(
                 record_id = str(created.get("record_id") or created.get("id") or "")
                 if not record_id:
                     raise ValueError("Lark did not return the verification record ID")
-                record = _read_verification_record(client, metadata["probe_table_id"], record_id)
+                record = _read_new_record(client, metadata["probe_table_id"], record_id)
                 if str(record.get("record_id") or record.get("id") or "") != record_id:
                     raise ValueError("Lark did not return the verification record")
                 mark("write", "passed")
@@ -693,7 +697,7 @@ def _read_board_access(
     }
 
 
-def _read_verification_record(client: LarkBoardClient, table_id: str, record_id: str) -> dict[str, Any]:
+def _read_new_record(client: LarkBoardClient, table_id: str, record_id: str) -> dict[str, Any]:
     for attempt in range(4):
         try:
             return client.get_record(table_id, record_id)
@@ -779,7 +783,7 @@ def _update_board_access_summary(
         elif verified:
             status = "partial"
         elif total and failed == total:
-            status = "unavailable"
+            status = "failed"
         else:
             status = "unverified"
         error = next((row["last_error"] for row in rows if row["last_error"]), None)
@@ -864,10 +868,11 @@ def _access_error_details(
         failure_kind = "auth_expired"
     else:
         failure_kind = f"{stage}_failed"
-    if not repair_url:
-        if failure_kind == "missing_scope":
-            repair_url = _permission_url(identity, board, scopes or list(BOARD_REQUIRED_SCOPES))
-        elif failure_kind == "not_collaborator":
+    if failure_kind == "missing_scope":
+        scopes = sorted(set(scopes).union(TEAMFLOW_APP_SCOPES))
+        repair_url = _permission_url(identity, board, scopes)
+    elif not repair_url:
+        if failure_kind == "not_collaborator":
             repair_url = str(board.get("base_url") or "")
     return {
         "failure_kind": failure_kind,
@@ -923,7 +928,16 @@ def _lark_request_error(payload: dict[str, Any], message: str) -> LarkRequestErr
     )
 
 
-def initialize_lark_board(workspace: str | None, *, task_prefix: str | None = None) -> dict[str, Any]:
+def initialize_lark_board(
+    workspace: str | None,
+    *,
+    task_prefix: str | None = None,
+    emit: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    def send(message: str) -> None:
+        if emit:
+            emit(message)
+
     paths, board, identity = _board_context(workspace)
     workflow_key = str(board["_workflow_key"])
     definition = load_workflow_definition(workflow_key)
@@ -935,10 +949,12 @@ def initialize_lark_board(workspace: str | None, *, task_prefix: str | None = No
     field_specs = task_field_specs(definition, locale, task_prefix=prefix)
     field_aliases = task_field_aliases()
     try:
+        send("正在读取飞书多维表格与数据表结构...")
         client = LarkBoardClient(identity, board)
         base = client.get_base()
         tables = client.list_tables()
         names = _task_names(board)
+        send("正在选择可复用的数据表...")
         table, bundle, empty_records, created = _initialization_table(
             client,
             board,
@@ -948,15 +964,25 @@ def initialize_lark_board(workspace: str | None, *, task_prefix: str | None = No
             field_aliases,
         )
         adopted_empty_table = empty_records is not None
+        if created:
+            send(f"已创建数据表：{names['table']}")
+        elif adopted_empty_table:
+            send(f"正在使用空白数据表：{table.get('table_name') or table['table_id']}")
+        else:
+            send(f"正在使用已有数据表：{table.get('table_name') or table['table_id']}")
         if adopted_empty_table:
+            if empty_records:
+                send(f"正在删除 {len(empty_records)} 条默认空记录...")
             for record in empty_records:
                 client.delete_record(table["table_id"], record["record_id"])
             if bundle["table"].get("table_name") != names["table"]:
                 client.update_table(table["table_id"], names["table"])
+                send(f"已将数据表命名为：{names['table']}")
                 table["table_name"] = names["table"]
                 bundle["table"]["table_name"] = names["table"]
         elif bundle["table"].get("table_name") == LEGACY_TASK_TABLE_NAME:
             client.update_table(table["table_id"], names["table"])
+            send(f"已将数据表命名为：{names['table']}")
             table["table_name"] = names["table"]
             bundle["table"]["table_name"] = names["table"]
 
@@ -965,8 +991,17 @@ def initialize_lark_board(workspace: str | None, *, task_prefix: str | None = No
             updated = client.update_field(table["table_id"], primary["field_id"], {"name": names["primary"], "type": "text"})
             primary.update(updated or {"field_name": names["primary"], "type": "text"})
             primary["field_name"] = names["primary"]
+            send(f"已将主字段命名为：{names['primary']}")
 
-        task_fields = _ensure_task_fields(client, table["table_id"], bundle, field_specs, field_aliases)
+        send("正在配置任务字段...")
+        task_fields = _ensure_task_fields(
+            client,
+            table["table_id"],
+            bundle,
+            field_specs,
+            field_aliases,
+            emit=send,
+        )
         configured_prefix = _task_prefix(task_fields["task_id"])
         if task_prefix is not None and configured_prefix and configured_prefix != prefix:
             raise ValueError(f"task prefix is already {configured_prefix}; TeamFlow will not change it automatically")
@@ -974,13 +1009,25 @@ def initialize_lark_board(workspace: str | None, *, task_prefix: str | None = No
 
         views = bundle["views"] or client.list_views(table["table_id"])
         view = next((item for item in views if _is_task_view(item)), None)
+        created_view = view is None
         if view is None:
             view = client.create_view(table["table_id"], names["view"])
+            send(f"已创建看板视图：{names['view']}")
         elif view["view_name"] != names["view"]:
             renamed = client.rename_view(table["table_id"], view["view_id"], names["view"])
             view.update(renamed or {"view_name": names["view"]})
             view["view_name"] = names["view"]
-        client.set_view_group(table["table_id"], view["view_id"], task_fields["status"]["field_id"])
+            send(f"已将看板视图命名为：{names['view']}")
+        for attempt in range(3 if created_view else 1):
+            try:
+                client.set_view_group(table["table_id"], view["view_id"], task_fields["status"]["field_id"])
+                break
+            except ValueError as error:
+                if attempt == 2 or not created_view or "not_found" not in str(error).lower():
+                    raise
+                send("看板视图尚未就绪，正在重试...")
+                time.sleep(0.5 * (attempt + 1))
+        send("已按状态配置看板分组")
         base_url = _board_url(str(board.get("base_url") or base.get("url") or ""), table["table_id"], view["view_id"])
         _save_board_success(
             paths,
@@ -989,7 +1036,7 @@ def initialize_lark_board(workspace: str | None, *, task_prefix: str | None = No
             view_id=view["view_id"],
             base_url=base_url,
         )
-        client.list_records(table["table_id"], view_id=view["view_id"], limit=1)
+        send("多维表格初始化完成")
         return {
             "ok": True,
             "access_status": "verified",
@@ -1061,7 +1108,7 @@ def upsert_lark_task(workspace: str | None, *, task: dict[str, Any], record_id: 
         saved_id = str(result.get("record_id") or result.get("id") or record_id or "")
         if not saved_id:
             raise ValueError("Lark did not return the task record ID")
-        record = client.get_record(board["table_id"], saved_id)
+        record = _read_new_record(client, board["table_id"], saved_id)
         _save_board_success(paths, board["id"], table_id=board["table_id"], view_id=board.get("view_id"))
         return {"ok": True, "created": record_id is None, "task": _task(record, fields, option_aliases)}
     except Exception as error:
@@ -1176,6 +1223,7 @@ def _ensure_task_fields(
     bundle: dict[str, Any],
     field_specs: dict[str, dict[str, Any]],
     field_aliases: dict[str, tuple[str, ...]],
+    emit: Callable[[str], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     resolved = {}
     for key, spec in field_specs.items():
@@ -1183,6 +1231,8 @@ def _ensure_task_fields(
         if field is None:
             field = client.create_field(table_id, spec)
             bundle["fields"].append(field)
+            if emit:
+                emit(f"已创建字段：{spec['name']}")
         elif spec["type"] == "select" and field["field_name"] == spec["name"]:
             if not field.get("options"):
                 field.update(client.get_field(table_id, field["field_id"]))
@@ -1191,6 +1241,8 @@ def _ensure_task_fields(
                 updated = client.update_field(table_id, field["field_id"], {**spec, "options": options})
                 field.update(updated)
                 field["options"] = options
+                if emit:
+                    emit(f"已补充字段选项：{spec['name']}")
         resolved[key] = field
     return resolved
 
@@ -1467,6 +1519,7 @@ def _table(item: dict[str, Any]) -> dict[str, Any]:
         "table_id": item.get("table_id") or item.get("id"),
         "table_name": item.get("table_name") or item.get("name") or "",
         "primary_field": item.get("primary_field"),
+        "revision": item.get("revision"),
     }
 
 
