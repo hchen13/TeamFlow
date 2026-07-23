@@ -1491,6 +1491,9 @@ def _single_record(data: dict[str, Any], record_id: str | None = None) -> dict[s
         records = _record_page(data)["records"]
         if records:
             return records[0]
+        record_ids = data["record_id_list"]
+        if record_ids:
+            return {"record_id": str(record_ids[0]), "fields": {}}
     if isinstance(data.get("fields"), dict):
         record = dict(data)
         if record_id:

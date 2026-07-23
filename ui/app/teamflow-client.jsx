@@ -489,6 +489,16 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
         setRuntimeBySession(sessionMap(event.sessions || []));
       } else if (event.type === "runtime") {
         setRuntimeBySession((current) => updateRuntime(current, event));
+        if (event.title) {
+          setLiveAgents((current) => current.map((agent) => (
+            agent.session_id === event.threadId
+              ? { ...agent, health: { ...(agent.health || {}), session_name: event.title } }
+              : agent
+          )));
+          setLiveCodexSessions((current) => current.map((session) => (
+            session.session_id === event.threadId ? { ...session, name: event.title } : session
+          )));
+        }
         if (event.status === "systemError") {
           refreshCodexState();
         }
@@ -1635,8 +1645,9 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
         <div className="agentTable">
           {agents.length ? (
             agents.map((agent) => {
-              const runtime = runtimeBySession[agent.session_id];
-              const runtimeStatus = runtime?.status || agent.health?.runtime_status;
+              const liveRuntime = runtimeBySession[agent.session_id];
+              const runtime = resolvedAgentRuntime(agent.health, liveRuntime);
+              const runtimeStatus = runtime?.status;
               const active = runtimeStatus === "active";
               const checking = runtimeStatus === "checking";
               const unconfirmed = runtimeStatus === "unconfirmed";
@@ -1650,7 +1661,7 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
                     : undefined;
               const health = agentHealth(agent, t, runtime, lifecycleBySession[agent.session_id]);
               const assignedRole = roleName(currentRoles, agent.role_key);
-              const sessionName = runtime?.title || agent.health?.session_name || t.unnamedSession;
+              const sessionName = agent.health?.session_name || runtime?.title || t.unnamedSession;
               if (editingAgentId === agent.id) {
                 return (
                   <form action={actions.updateAgent} className="agentRow agentRowEditing" key={agent.id}>
@@ -1882,6 +1893,27 @@ function roleName(roles, key) {
 
 function harnessName(harnessType) {
   return { codex: "Codex" }[harnessType] || harnessType;
+}
+
+function resolvedAgentRuntime(health, runtime) {
+  const fallback = {};
+  if (health?.runtime_status) {
+    fallback.status = health.runtime_status;
+  }
+  if (health?.model) {
+    fallback.model = health.model;
+  }
+  if (health?.effort) {
+    fallback.effort = health.effort;
+  }
+  if (health?.service_tier) {
+    fallback.serviceTier = health.service_tier;
+  }
+  const merged = { ...fallback, ...(runtime || {}) };
+  if (runtime?.status === "unconfirmed" && fallback.status) {
+    merged.status = fallback.status;
+  }
+  return Object.keys(merged).length ? merged : undefined;
 }
 
 function SessionMetadata({ runtime, t }) {

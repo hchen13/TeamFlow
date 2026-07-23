@@ -18,6 +18,8 @@ MIGRATION_MODULES = (
     "015_lark_primary_identity",
     "016_lark_board_listener",
     "017_lark_task_events",
+    "018_agent_delivery_runtime",
+    "019_delivery_assignment_revision",
 )
 
 MIGRATIONS = [import_module(f"{__name__}.{name}") for name in MIGRATION_MODULES]

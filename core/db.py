@@ -14,8 +14,10 @@ from typing import Any, Iterator
 from urllib.parse import urlencode, urlparse
 
 from .codex import (
+    codex_thread_is_permanently_unavailable,
     codex_thread_error,
     codex_thread_name,
+    codex_thread_settings,
     list_codex_threads,
     read_codex_thread,
 )
@@ -35,9 +37,12 @@ def now() -> str:
 
 @contextmanager
 def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     try:
         with conn:
             yield conn
@@ -507,7 +512,41 @@ def register_agent(
         workspace_id = workspace_id_for_root(conn, paths.root)
         workflow_key = normalize_key(workflow or current_workflow_key(conn, workspace_id), "workflow")
         role_row = role_for_key(conn, workflow_key, role_key)
+        existing_session = conn.execute(
+            """
+            SELECT id, role_key FROM agents
+            WHERE workspace_id = ? AND harness_type = ? AND session_id = ? AND role_id != ?
+            LIMIT 1
+            """,
+            (workspace_id, harness, session, role_row["id"]),
+        ).fetchone()
+        if existing_session:
+            raise ValueError(
+                f"this session is already registered as {existing_session['role_key']} in the workspace"
+            )
         if replace_role:
+            active_role = conn.execute(
+                """
+                SELECT 1 FROM task_event_deliveries
+                WHERE agent_id IN (
+                  SELECT id FROM agents WHERE workspace_id = ? AND role_id = ?
+                ) AND status = 'processing'
+                LIMIT 1
+                """,
+                (workspace_id, role_row["id"]),
+            ).fetchone()
+            if active_role:
+                raise ValueError("an agent in this role is currently processing a TeamFlow delivery")
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET status = 'canceled', completed_at = ?, last_error = 'agent role was replaced'
+                WHERE agent_id IN (
+                  SELECT id FROM agents WHERE workspace_id = ? AND role_id = ?
+                ) AND status IN ('pending', 'retry')
+                """,
+                (now(), workspace_id, role_row["id"]),
+            )
             conn.execute("DELETE FROM agents WHERE workspace_id = ? AND role_id = ?", (workspace_id, role_row["id"]))
         elif not role_row["allow_multiple"]:
             assert_single_agent_role_available(conn, workspace_id, role_row, harness, session)
@@ -592,7 +631,15 @@ def verify_agents(workspace: str | None, *, agent_id: str | None = None) -> dict
         if thread is None:
             try:
                 thread = read_codex_thread(agent["session_id"])
-            except ValueError:
+            except ValueError as lookup_error:
+                if not codex_thread_is_permanently_unavailable(lookup_error):
+                    results.append(agent_health_result(
+                        agent,
+                        status="unavailable",
+                        checked_at=checked_at,
+                        error=str(lookup_error),
+                    ))
+                    continue
                 results.append(agent_health_result(
                     agent,
                     status="deleted",
@@ -622,14 +669,19 @@ def verify_agents(workspace: str | None, *, agent_id: str | None = None) -> dict
         else:
             status = "healthy"
             error = None
+        settings = codex_thread_settings(thread)
         results.append(agent_health_result(
             agent,
             status=status,
             checked_at=checked_at,
             session_name=codex_thread_name(thread),
             error=error,
+            runtime_status=thread_status,
             thread_cwd=thread_cwd,
             thread_archived=thread_archived,
+            model=settings.get("model"),
+            effort=settings.get("effort"),
+            service_tier=settings.get("service_tier"),
         ))
 
     return {
@@ -665,20 +717,38 @@ def update_agent(workspace: str | None, *, agent_id: str, session_id: str) -> di
         duplicate = conn.execute(
             """
             SELECT id FROM agents
-            WHERE workspace_id = ? AND role_id = ? AND harness_type = ? AND session_id = ? AND id != ?
+            WHERE workspace_id = ? AND harness_type = ? AND session_id = ? AND id != ?
             """,
-            (workspace_id, agent["role_id"], agent["harness_type"], session, agent_id),
+            (workspace_id, agent["harness_type"], session, agent_id),
         ).fetchone()
         if duplicate:
-            raise ValueError("this session is already registered for the role")
+            raise ValueError("this session is already registered in the workspace")
+        active = conn.execute(
+            "SELECT 1 FROM task_event_deliveries WHERE agent_id = ? AND status = 'processing' LIMIT 1",
+            (agent_id,),
+        ).fetchone()
+        if active:
+            raise ValueError("the agent is currently processing a TeamFlow delivery")
         timestamp = now()
+        previous_revision = int(agent["assignment_revision"])
         conn.execute(
             """
             UPDATE agents
-            SET session_id = ?, updated_at = ?
+            SET session_id = ?, assignment_revision = assignment_revision + 1,
+                context_applied_revision = 0, context_applied_at = NULL, updated_at = ?
             WHERE id = ?
             """,
             (session, timestamp, agent_id),
+        )
+        conn.execute(
+            """
+            UPDATE task_event_deliveries
+            SET status = 'canceled', completed_at = ?,
+                last_error = 'agent session was replaced'
+            WHERE agent_id = ? AND assignment_revision = ?
+              AND status IN ('pending', 'retry')
+            """,
+            (timestamp, agent_id, previous_revision),
         )
 
     return {
@@ -713,6 +783,9 @@ def agent_health_result(
     runtime_status: str | None = None,
     thread_cwd: str | None = None,
     thread_archived: bool | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    service_tier: str | None = None,
 ) -> dict[str, Any]:
     return {
         "ok": status == "healthy",
@@ -724,6 +797,9 @@ def agent_health_result(
         "runtime_status": runtime_status,
         "thread_cwd": thread_cwd,
         "thread_archived": thread_archived,
+        "model": model,
+        "effort": effort,
+        "service_tier": service_tier,
         "checked_at": checked_at,
         "error": error,
     }
@@ -746,12 +822,50 @@ def unregister_agent(
         bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
         if agent_id:
+            active = conn.execute(
+                "SELECT 1 FROM task_event_deliveries WHERE agent_id = ? AND status = 'processing' LIMIT 1",
+                (agent_id,),
+            ).fetchone()
+            if active:
+                raise ValueError("the agent is currently processing a TeamFlow delivery")
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET status = 'canceled', completed_at = ?, last_error = 'agent was removed'
+                WHERE agent_id = ? AND status IN ('pending', 'retry')
+                """,
+                (now(), agent_id),
+            )
             cursor = conn.execute("DELETE FROM agents WHERE workspace_id = ? AND id = ?", (workspace_id, agent_id))
         else:
             if not (role and harness_type and session_id):
                 raise ValueError("agent_id or role+harness_type+session_id is required")
             workflow_key = normalize_key(workflow or current_workflow_key(conn, workspace_id), "workflow")
             role_row = role_for_key(conn, workflow_key, normalize_key(role, "role"))
+            matching = conn.execute(
+                """
+                SELECT id FROM agents
+                WHERE workspace_id = ? AND role_id = ? AND harness_type = ? AND session_id = ?
+                """,
+                (workspace_id, role_row["id"], normalize_key(harness_type, "harness_type"), session_id.strip()),
+            ).fetchall()
+            if any(
+                conn.execute(
+                    "SELECT 1 FROM task_event_deliveries WHERE agent_id = ? AND status = 'processing' LIMIT 1",
+                    (item["id"],),
+                ).fetchone()
+                for item in matching
+            ):
+                raise ValueError("the agent is currently processing a TeamFlow delivery")
+            for item in matching:
+                conn.execute(
+                    """
+                    UPDATE task_event_deliveries
+                    SET status = 'canceled', completed_at = ?, last_error = 'agent was removed'
+                    WHERE agent_id = ? AND status IN ('pending', 'retry')
+                    """,
+                    (now(), item["id"]),
+                )
             cursor = conn.execute(
                 "DELETE FROM agents WHERE workspace_id = ? AND role_id = ? AND harness_type = ? AND session_id = ?",
                 (workspace_id, role_row["id"], normalize_key(harness_type, "harness_type"), session_id.strip()),

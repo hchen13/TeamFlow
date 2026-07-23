@@ -1,0 +1,30 @@
+{
+  "description": "Inject TeamFlow assignments and authorize TeamFlow MCP calls by Codex session.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"${PLUGIN_ROOT}\" --locked python \"${PLUGIN_ROOT}/hooks/user_prompt_submit.py\"",
+            "timeout": 5,
+            "statusMessage": "Loading TeamFlow assignment"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__teamflow__(get_assignment|list_available_tasks|get_task|claim_task)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"${PLUGIN_ROOT}\" --locked python \"${PLUGIN_ROOT}/hooks/pre_tool_use.py\"",
+            "timeout": 5,
+            "statusMessage": "Authorizing TeamFlow action"
+          }
+        ]
+      }
+    ]
+  }
+}

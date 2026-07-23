@@ -12,7 +12,7 @@ const UNARCHIVED_VERSION = 1;
 const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"]);
 const LOCAL_HOST_ID = "local";
 const FOLLOW_TIMEOUT_MS = 30000;
-const BRIDGE_VERSION = 8;
+const BRIDGE_VERSION = 9;
 const globalKey = Symbol.for("teamflow.codexBridge");
 
 export class CodexBridge extends EventEmitter {
@@ -227,6 +227,10 @@ export class CodexBridge extends EventEmitter {
       this.lifecycle("unarchived", params);
       return;
     }
+    if (method === "query-cache-invalidate") {
+      this.scheduleCatalogRefresh();
+      return;
+    }
     if (method === "client-status-changed") {
       this.updateClientStatus(params);
     }
@@ -425,9 +429,7 @@ export class CodexBridge extends EventEmitter {
           if (eventType !== "rename") {
             return;
           }
-          clearTimeout(this.catalogTimer);
-          this.catalogTimer = setTimeout(() => this.emit("event", { type: "catalog" }), 300);
-          this.catalogTimer.unref?.();
+          this.scheduleCatalogRefresh();
         });
         watcher.unref?.();
         this.watchers.push(watcher);
@@ -435,6 +437,12 @@ export class CodexBridge extends EventEmitter {
         // Dropdown-open refresh remains available where recursive watch is unsupported.
       }
     }
+  }
+
+  scheduleCatalogRefresh() {
+    clearTimeout(this.catalogTimer);
+    this.catalogTimer = setTimeout(() => this.emit("event", { type: "catalog" }), 300);
+    this.catalogTimer.unref?.();
   }
 }
 

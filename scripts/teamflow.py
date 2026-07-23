@@ -217,6 +217,9 @@ def main() -> int:
     daemon_parser.add_argument("--identity-id", help="Owner or manager identity used when synchronizing a workspace.")
     daemon_parser.set_defaults(func=cmd_daemon)
 
+    mcp_parser = subparsers.add_parser("mcp-server", help="Run the TeamFlow MCP server over stdio.")
+    mcp_parser.set_defaults(func=cmd_mcp_server)
+
     check_parser = subparsers.add_parser("self-check", help="Run the local SQLite configuration self-check.")
     check_parser.set_defaults(func=cmd_self_check)
 
@@ -373,6 +376,7 @@ def cmd_register_agent(args: argparse.Namespace) -> int:
         display_name=args.display_name,
         replace_role=args.replace_role,
     )
+    result["daemon_sync"] = sync_agent_change(args.workspace)
     print_json(result)
     return 0
 
@@ -386,13 +390,25 @@ def cmd_unregister_agent(args: argparse.Namespace) -> int:
         harness_type=args.harness_type,
         session_id=args.session_id,
     )
+    result["daemon_sync"] = sync_agent_change(args.workspace)
     print_json(result)
     return 0
 
 
 def cmd_update_agent(args: argparse.Namespace) -> int:
-    print_json(update_agent(args.workspace, agent_id=args.agent_id, session_id=args.session_id))
+    result = update_agent(args.workspace, agent_id=args.agent_id, session_id=args.session_id)
+    result["daemon_sync"] = sync_agent_change(args.workspace)
+    print_json(result)
     return 0
+
+
+def sync_agent_change(workspace: str | None) -> dict[str, Any] | None:
+    if not daemon_status()["running"] or not workspace_enabled(workspace):
+        return None
+    try:
+        return sync_daemon_workspace(workspace)
+    except Exception as error:
+        return {"ok": False, "error": str(error)}
 
 
 def cmd_verify_agent(args: argparse.Namespace) -> int:
@@ -472,6 +488,13 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         print_json(disable_daemon_workspace(args.workspace))
         return 0
     print_json(sync_daemon_workspace(args.workspace, identity_id=args.identity_id))
+    return 0
+
+
+def cmd_mcp_server(args: argparse.Namespace) -> int:
+    from core.mcp_server import run_mcp_server
+
+    run_mcp_server()
     return 0
 
 
@@ -582,7 +605,7 @@ def cmd_self_check(args: argparse.Namespace) -> int:
 
         def read_check_thread(thread_id: str, *, include_turns: bool = False) -> dict[str, object]:
             if thread_id == "thread_design_1":
-                raise ValueError(f"thread not loaded: {thread_id}")
+                raise ValueError(f"no rollout found for thread id {thread_id}")
             thread: dict[str, object] = {
                 "id": thread_id,
                 "name": f"Session {thread_id}",
@@ -663,7 +686,7 @@ def cmd_self_check(args: argparse.Namespace) -> int:
     user_identity = next(identity for identity in result["lark_identities"] if identity["auth_mode"] == "user")
     board = result["lark_board"]
     assert result["initialized"] is True
-    assert result["schema_version"] == "017_lark_task_events"
+    assert result["schema_version"] == "019_delivery_assignment_revision"
     assert {workflow["key"] for workflow in result["workflows"]} == {DEFAULT_WORKFLOW_KEY, "general-task"}
     assert all(workflow["short_description"] for workflow in result["workflows"])
     assert result["current_workflow"]["key"] == DEFAULT_WORKFLOW_KEY

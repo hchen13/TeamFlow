@@ -6,6 +6,7 @@
     "name": "Local developer"
   },
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "TeamFlow 同舟",
     "shortDescription": "Coordinate PM, TL, QA, and developer agents through shared workflows.",

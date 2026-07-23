@@ -587,6 +587,10 @@ class LarkBoardTest(unittest.TestCase):
             {"record_id": "recCreated", "fields": {}},
         )
         self.assertEqual(
+            _single_record({"record_id_list": ["recCreated"]}),
+            {"record_id": "recCreated", "fields": {}},
+        )
+        self.assertEqual(
             _single_record({"任务": None, "Status": None}, "recRead"),
             {"record_id": "recRead", "fields": {"任务": None, "Status": None}},
         )

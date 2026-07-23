@@ -119,3 +119,20 @@ test("does not infer not loaded when Codex returns no snapshot", async () => {
 
   assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "unconfirmed" }]);
 });
+
+test("refreshes the session catalog when Codex invalidates its task cache", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  let refreshes = 0;
+  bridge.scheduleCatalogRefresh = () => {
+    refreshes += 1;
+  };
+
+  bridge.onMessage({
+    type: "broadcast",
+    method: "query-cache-invalidate",
+    params: { queryKey: ["tasks"] }
+  });
+
+  assert.equal(refreshes, 1);
+});

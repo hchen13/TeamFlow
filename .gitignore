@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+.DS_Store
+play.py
 .pytest_cache/
 .venv/
 node_modules/

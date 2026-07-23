@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import multiprocessing
 import os
 import queue
+import secrets
 import socket
 import socketserver
 import subprocess
@@ -17,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from .agent_runtime import find_agent_assignment
+from .codex import codex_thread_is_permanently_unavailable, codex_turn, read_codex_thread, run_codex_turn
 from .config import resolve_workspace_paths
 from .db import now
 from .global_db import (
@@ -58,10 +62,15 @@ from .lark_events import (
 )
 from .task_dispatch import (
     claim_task_deliveries,
+    defer_task_delivery_reconciliation,
+    due_processing_task_deliveries,
     finish_task_delivery,
+    mark_task_delivery_turn_started,
+    prepare_agent_catchup_deliveries,
     prepare_task_deliveries,
     recover_task_deliveries,
 )
+from .teamflow_tools import claim_task, get_task, list_available_tasks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +143,11 @@ def daemon_socket_path() -> Path:
     return teamflow_home() / "daemon.sock"
 
 
+def _tool_input_hash(value: Any) -> str:
+    payload = json.dumps(value if isinstance(value, dict) else {}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 class TeamFlowDaemon:
     def __init__(self) -> None:
         self.mp = multiprocessing.get_context("spawn")
@@ -148,9 +162,16 @@ class TeamFlowDaemon:
         self.sync_lock = threading.RLock()
         self.stopping = threading.Event()
         self.routes_ready = threading.Event()
+        self.delivery_wakeup = threading.Event()
+        self.active_sessions: set[str] = set()
+        self.delivery_workers: dict[str, threading.Thread] = {}
+        self.tool_grants: dict[str, dict[str, Any]] = {}
+        self.claim_locks: dict[str, threading.Lock] = {}
         self.last_cleanup = 0.0
         self.event_thread = threading.Thread(target=self._consume_events, name="teamflow-lark-events", daemon=True)
+        self.delivery_thread = threading.Thread(target=self._consume_deliveries, name="teamflow-deliveries", daemon=True)
         self.event_thread.start()
+        self.delivery_thread.start()
 
     @staticmethod
     def app_key(context: LarkEventContext) -> str:
@@ -247,6 +268,7 @@ class TeamFlowDaemon:
     def finish_startup(self) -> None:
         _emit_log("DAEMON LISTENING", fields={"apps": len(self.workers), "workspaces": len(self.routes)})
         self.routes_ready.set()
+        self.delivery_wakeup.set()
 
     def release_ephemeral_workspace(self, workspace: str | None) -> None:
         root = str(resolve_workspace_paths(workspace).root)
@@ -410,10 +432,91 @@ class TeamFlowDaemon:
             "apps": apps,
             "workspaces": routes,
             "inbox": lark_event_counts(),
+            "active_sessions": sorted(self.active_sessions),
         }
+
+    def assignment_context(self, *, session_id: str, cwd: str | None, consume: bool) -> dict[str, Any]:
+        with self.sync_lock:
+            workspaces = [
+                root
+                for root in self.routes
+                if workspace_enabled(root)
+            ]
+        result = find_agent_assignment(
+            workspaces,
+            session_id=session_id,
+            cwd=cwd,
+            consume=consume,
+        )
+        return result or {"assignment": None, "additional_context": None}
+
+    def authorize_tool(
+        self,
+        *,
+        session_id: str,
+        cwd: str | None,
+        turn_id: str | None,
+        tool_name: str,
+        tool_input: Any,
+    ) -> dict[str, Any]:
+        short_name = tool_name.rsplit("__", 1)[-1]
+        if short_name not in {"get_assignment", "list_available_tasks", "get_task", "claim_task"}:
+            raise ValueError(f"unsupported TeamFlow tool: {short_name}")
+        context = self.assignment_context(session_id=session_id, cwd=cwd, consume=False)
+        assignment = context.get("assignment")
+        if not assignment:
+            raise ValueError("this Codex session is not a registered agent in an enabled TeamFlow workspace")
+        token = secrets.token_urlsafe(32)
+        timestamp = time.monotonic()
+        with self.sync_lock:
+            self.tool_grants = {
+                key: value
+                for key, value in self.tool_grants.items()
+                if float(value["expires_at"]) > timestamp
+            }
+            self.tool_grants[token] = {
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "tool_name": short_name,
+                "input_hash": _tool_input_hash(tool_input),
+                "assignment": assignment,
+                "expires_at": timestamp + 60,
+            }
+        return {"grant": token, "expires_in": 60}
+
+    def invoke_tool(self, *, grant: str, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        with self.sync_lock:
+            authorized = self.tool_grants.pop(grant, None)
+        if not authorized or float(authorized["expires_at"]) <= time.monotonic():
+            raise ValueError("TeamFlow tool authorization is missing or expired")
+        if authorized["tool_name"] != tool_name:
+            raise ValueError("TeamFlow tool authorization does not match this tool")
+        if authorized["input_hash"] != _tool_input_hash(arguments):
+            raise ValueError("TeamFlow tool arguments changed after authorization")
+        assignment = authorized["assignment"]
+        current = find_agent_assignment(
+            [assignment["workspace_root"]],
+            session_id=str(authorized["session_id"]),
+        )
+        if not current or current["assignment"]["agent_id"] != assignment["agent_id"]:
+            raise ValueError("the TeamFlow agent assignment changed before the tool ran")
+        if tool_name == "get_assignment":
+            return {"ok": True, "assignment": current["assignment"]}
+        if tool_name == "list_available_tasks":
+            return list_available_tasks(current["assignment"])
+        if tool_name == "get_task":
+            return get_task(current["assignment"], record_id=str(arguments.get("record_id") or ""))
+        if tool_name == "claim_task":
+            workspace_root = str(current["assignment"]["workspace_root"])
+            with self.sync_lock:
+                claim_lock = self.claim_locks.setdefault(workspace_root, threading.Lock())
+            with claim_lock:
+                return claim_task(current["assignment"], record_id=str(arguments.get("record_id") or ""))
+        raise ValueError(f"unsupported TeamFlow tool: {tool_name}")
 
     def close(self) -> None:
         self.stopping.set()
+        self.delivery_wakeup.set()
         with self.condition:
             self.condition.notify_all()
         with self.sync_lock:
@@ -422,6 +525,9 @@ class TeamFlowDaemon:
             self.workers.clear()
         self.event_queue.put(None)
         self.event_thread.join(timeout=2)
+        self.delivery_thread.join(timeout=2)
+        for worker in list(self.delivery_workers.values()):
+            worker.join(timeout=2)
         self.event_queue.close()
 
     def _ensure_app(self, context: LarkEventContext) -> None:
@@ -497,6 +603,225 @@ class TeamFlowDaemon:
             if time.monotonic() - self.last_cleanup >= 86400:
                 cleanup_lark_events()
                 self.last_cleanup = time.monotonic()
+
+    def _consume_deliveries(self) -> None:
+        while not self.stopping.is_set():
+            if not self.routes_ready.wait(0.5):
+                continue
+            with self.sync_lock:
+                contexts = [
+                    context
+                    for context in self.routes.values()
+                    if workspace_enabled(context.workspace_root)
+                ]
+            for context in contexts:
+                if self.stopping.is_set():
+                    return
+                try:
+                    self._reconcile_task_deliveries(context)
+                    self._schedule_task_deliveries(context)
+                except Exception as error:
+                    self._log_dispatch(context, "failed", event_id=None, task={}, reason=str(error))
+            self.delivery_wakeup.wait(0.5)
+            self.delivery_wakeup.clear()
+
+    def _schedule_task_deliveries(self, context: LarkEventContext) -> None:
+        with self.sync_lock:
+            deliveries = claim_task_deliveries(
+                context,
+                exclude_session_ids=set(self.active_sessions),
+            )
+            for delivery in deliveries:
+                session_id = str(delivery["session_id"])
+                self.active_sessions.add(session_id)
+                worker = threading.Thread(
+                    target=self._execute_task_delivery,
+                    args=(context, delivery),
+                    name=f"teamflow-delivery-{session_id[:8]}",
+                    daemon=True,
+                )
+                self.delivery_workers[session_id] = worker
+                worker.start()
+
+    def _execute_task_delivery(self, context: LarkEventContext, delivery: dict[str, Any]) -> None:
+        session_id = str(delivery["session_id"])
+        turn_started = False
+        started_turn_id = None
+
+        def save_turn(turn_id: str) -> None:
+            nonlocal started_turn_id, turn_started
+            mark_task_delivery_turn_started(
+                context,
+                delivery_id=int(delivery["id"]),
+                turn_id=turn_id,
+            )
+            turn_started = True
+            started_turn_id = turn_id
+            task = json.loads(delivery["after_json"] or delivery["before_json"] or "{}")
+            self._log_dispatch(
+                context,
+                "started",
+                event_id=delivery["source_event_id"],
+                task=task,
+                record_id=delivery["record_id"],
+                target=str(delivery["role_key"]),
+                agent=str(delivery["display_name"] or delivery["agent_id"]),
+                session=session_id,
+                turn=turn_id,
+            )
+
+        result = None
+        error = None
+        retry = False
+        try:
+            if delivery["harness_type"] != "codex":
+                raise ValueError(f"unsupported task delivery harness: {delivery['harness_type']}")
+            result = run_codex_turn(
+                session_id,
+                str(delivery["prompt"]),
+                on_started=save_turn,
+                stop_event=self.stopping,
+            )
+            if not isinstance(result, dict):
+                raise ValueError("Codex delivery returned an invalid result")
+        except Exception as caught:
+            error = caught
+            retry = (
+                not turn_started
+                and delivery["harness_type"] == "codex"
+                and not codex_thread_is_permanently_unavailable(caught)
+            )
+        finally:
+            if turn_started and error:
+                defer_task_delivery_reconciliation(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    error=error,
+                )
+            else:
+                finish_task_delivery(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    result=result,
+                    error=error,
+                    retry=retry,
+                )
+            task = json.loads(delivery["after_json"] or delivery["before_json"] or "{}")
+            if turn_started and error:
+                log_result = "reconciling"
+            elif retry:
+                log_result = "retry"
+            else:
+                log_result = "succeeded" if (result or {}).get("ok") else "failed"
+            self._log_dispatch(
+                context,
+                log_result,
+                event_id=delivery["source_event_id"],
+                task=task,
+                record_id=delivery["record_id"],
+                target=str(delivery["role_key"]),
+                agent=str(delivery["display_name"] or delivery["agent_id"]),
+                session=session_id,
+                turn=(result or {}).get("turn_id") or started_turn_id,
+                transport=(result or {}).get("transport"),
+                reason=str(error) if error else (result or {}).get("error"),
+                attempt=int(delivery["attempts"]) if int(delivery["attempts"]) > 1 or log_result != "succeeded" else None,
+            )
+            with self.sync_lock:
+                self.active_sessions.discard(session_id)
+                self.delivery_workers.pop(session_id, None)
+            self.delivery_wakeup.set()
+
+    def _reconcile_task_deliveries(self, context: LarkEventContext) -> None:
+        for delivery in due_processing_task_deliveries(context):
+            session_id = str(delivery["session_id"])
+            task = json.loads(delivery["after_json"] or delivery["before_json"] or "{}")
+            target = str(delivery.get("role_key") or task.get("role") or "")
+            agent = str(delivery.get("display_name") or delivery["agent_id"])
+            with self.sync_lock:
+                if session_id in self.active_sessions:
+                    continue
+            try:
+                thread = read_codex_thread(session_id, include_turns=True)
+                turn = codex_turn(thread, str(delivery["turn_id"]))
+            except Exception as error:
+                if codex_thread_is_permanently_unavailable(error):
+                    finish_task_delivery(
+                        context,
+                        delivery_id=int(delivery["id"]),
+                        error=error,
+                    )
+                    self._log_dispatch(
+                        context,
+                        "failed",
+                        event_id=delivery["source_event_id"],
+                        task=task,
+                        record_id=delivery["record_id"],
+                        target=target,
+                        agent=agent,
+                        session=session_id,
+                        turn=str(delivery["turn_id"]),
+                        reason=str(error),
+                    )
+                else:
+                    defer_task_delivery_reconciliation(
+                        context,
+                        delivery_id=int(delivery["id"]),
+                        error=error,
+                    )
+                continue
+            if turn is None:
+                defer_task_delivery_reconciliation(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    error=ValueError("Codex turn is not visible yet"),
+                )
+                continue
+            status_value = turn.get("status")
+            status = str(status_value.get("type") if isinstance(status_value, dict) else status_value or "")
+            if status in {"completed", "success"}:
+                finish_task_delivery(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    result={"ok": True, "status": status},
+                )
+                self._log_dispatch(
+                    context,
+                    "recovered",
+                    event_id=delivery["source_event_id"],
+                    task=task,
+                    record_id=delivery["record_id"],
+                    target=target,
+                    agent=agent,
+                    session=session_id,
+                    turn=str(delivery["turn_id"]),
+                )
+            elif status in {"failed", "cancelled", "canceled", "interrupted"}:
+                error_data = turn.get("error") or {}
+                error = ValueError(str(error_data.get("message") or error_data.get("additionalDetails") or status))
+                finish_task_delivery(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    result={"ok": False, "status": status},
+                    error=error,
+                )
+                self._log_dispatch(
+                    context,
+                    "failed",
+                    event_id=delivery["source_event_id"],
+                    task=task,
+                    record_id=delivery["record_id"],
+                    target=target,
+                    agent=agent,
+                    session=session_id,
+                    turn=str(delivery["turn_id"]),
+                    reason=str(error),
+                )
+            else:
+                defer_task_delivery_reconciliation(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                )
 
     def _process_event(self, event_id: str) -> None:
         item = claim_lark_event(event_id)
@@ -622,11 +947,16 @@ class TeamFlowDaemon:
         session: str | None = None,
         reason: str | None = None,
         attempt: int | None = None,
+        turn: str | None = None,
+        transport: str | None = None,
     ) -> None:
         styles = {
             "not-required": "2",
             "waiting": "1;33",
-            "dry-run": "1;34",
+            "started": "1;34",
+            "retry": "1;33",
+            "reconciling": "1;33",
+            "recovered": "1;32",
             "succeeded": "1;32",
             "failed": "1;31",
         }
@@ -641,6 +971,8 @@ class TeamFlowDaemon:
                 "target": target,
                 "agent": agent,
                 "session": session,
+                "turn": turn,
+                "transport": transport,
                 "attempt": attempt,
                 "reason": reason,
             },
@@ -793,35 +1125,9 @@ class TeamFlowDaemon:
                     reason=reason,
                 )
 
-        previewed = failed = 0
-        for delivery in claim_task_deliveries(context):
-            error = None
-            try:
-                _preview_task_delivery(context, delivery)
-                previewed += 1
-            except Exception as caught:
-                error = caught
-                failed += 1
-            finish_task_delivery(
-                context,
-                event_key=str(delivery["event_key"]),
-                agent_id=str(delivery["agent_id"]),
-                error=error,
-            )
-            task = json.loads(delivery["after_json"] or delivery["before_json"] or "{}")
-            self._log_dispatch(
-                context,
-                "failed" if error else "dry-run",
-                event_id=delivery["source_event_id"],
-                task=task,
-                record_id=delivery["record_id"],
-                target=str(delivery["role_key"]),
-                agent=str(delivery["display_name"] or delivery["agent_id"]),
-                session=str(delivery["session_id"]),
-                reason=str(error) if error else None,
-                attempt=int(delivery["attempts"]) + 1 if error else None,
-            )
-        return {**result, "previewed": previewed, "failed": failed}
+        catchup = prepare_agent_catchup_deliveries(context)
+        self.delivery_wakeup.set()
+        return {**result, "catchup_deliveries": catchup}
 
 
 def _lark_app_worker(context: LarkEventContext, app_key: str, events: Any, ready: Any, errors: Any) -> None:
@@ -852,24 +1158,6 @@ def _lark_app_worker(context: LarkEventContext, app_key: str, events: Any, ready
     except Exception as error:
         errors.put(str(error))
         ready.set()
-
-
-def _preview_task_delivery(context: LarkEventContext, delivery: dict[str, Any]) -> None:
-    if delivery["harness_type"] != "codex":
-        raise ValueError(f"unsupported task delivery harness: {delivery['harness_type']}")
-    print(
-        "\n".join((
-            "[TeamFlow dry-run injection]",
-            f"workspace: {context.workspace_root}",
-            f"agent: {delivery['display_name'] or delivery['agent_id']} ({delivery['role_key']})",
-            f"session: {delivery['session_id']}",
-            f"event: {delivery['event_type']}",
-            "prompt:",
-            str(delivery["prompt"]),
-            "[/TeamFlow dry-run injection]",
-        )),
-        flush=True,
-    )
 
 
 class DaemonServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -904,6 +1192,26 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 result = self.server.runtime.sync_workspace(request.get("workspace"), identity_id=request.get("identity_id"))
             elif action == "verify_listener":
                 result = self.server.runtime.verify_workspace(request.get("workspace"), identity_id=request.get("identity_id"))
+            elif action == "assignment_context":
+                result = self.server.runtime.assignment_context(
+                    session_id=str(request.get("session_id") or ""),
+                    cwd=request.get("cwd"),
+                    consume=bool(request.get("consume")),
+                )
+            elif action == "authorize_tool":
+                result = self.server.runtime.authorize_tool(
+                    session_id=str(request.get("session_id") or ""),
+                    cwd=request.get("cwd"),
+                    turn_id=request.get("turn_id"),
+                    tool_name=str(request.get("tool_name") or ""),
+                    tool_input=request.get("tool_input"),
+                )
+            elif action == "invoke_tool":
+                result = self.server.runtime.invoke_tool(
+                    grant=str(request.get("grant") or ""),
+                    tool_name=str(request.get("tool_name") or ""),
+                    arguments=request.get("arguments") if isinstance(request.get("arguments"), dict) else {},
+                )
             elif action == "shutdown":
                 result = {"stopping": True, **self.server.runtime.status()}
                 self._write({"ok": True, "result": result})
