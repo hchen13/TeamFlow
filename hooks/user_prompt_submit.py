@@ -9,8 +9,17 @@ def main() -> None:
     if not session_id:
         return
     hook_event_name = str(hook.get("hook_event_name") or "UserPromptSubmit")
-    refresh = hook_event_name == "SessionStart" and hook.get("source") == "compact"
-    if hook_event_name != "UserPromptSubmit" and not refresh:
+    if hook_event_name == "PostCompact":
+        try:
+            daemon_request({
+                "action": "compact_assignment_context",
+                "session_id": session_id,
+                "cwd": hook.get("cwd"),
+            })
+        except (OSError, TimeoutError, ValueError):
+            pass
+        return
+    if hook_event_name != "UserPromptSubmit":
         return
     try:
         result = daemon_request({
@@ -18,7 +27,7 @@ def main() -> None:
             "session_id": session_id,
             "cwd": hook.get("cwd"),
             "consume": True,
-            "refresh": refresh,
+            "refresh": False,
         })
     except (OSError, TimeoutError, ValueError):
         return

@@ -77,7 +77,7 @@ export class CodexBridge extends EventEmitter {
       return;
     }
     for (const threadId of next) {
-      if (!previous.has(threadId) || this.unconfirmedThreads.has(threadId)) {
+      if (!previous.has(threadId)) {
         this.requestFollow(threadId);
       }
     }
@@ -150,7 +150,7 @@ export class CodexBridge extends EventEmitter {
       clearTimeout(timer);
     }
     this.followTimers.clear();
-    this.emit("event", { type: "bridge", connected: false });
+    this.emit("event", { type: "bridge", connected: false, sessions: this.snapshot().sessions });
     this.scheduleReconnect();
   }
 
@@ -394,6 +394,13 @@ export class CodexBridge extends EventEmitter {
     for (const threadId of this.unconfirmedThreads) {
       if (!byThread.has(threadId)) {
         byThread.set(threadId, { threadId, status: "unconfirmed" });
+      }
+    }
+    if (!this.connected) {
+      for (const threadId of this.knownThreads) {
+        if (!byThread.has(threadId)) {
+          byThread.set(threadId, { threadId, status: "unconfirmed" });
+        }
       }
     }
     return byThread;

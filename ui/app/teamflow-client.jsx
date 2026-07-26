@@ -9,8 +9,9 @@ const FEISHU_CREATE_APP_URL = "https://open.feishu.cn/page/launcher?from=backend
 const LARK_APP_URL = "https://open.larksuite.com/app";
 const LARK_CREATE_APP_URL = "https://open.larksuite.com/page/launcher?from=backend_oneclick";
 const LISTENER_GUIDE_IMAGES = [1, 2, 3, 4].map((step) => `/listener-guide/listen-lark-event-0${step}.png`);
-const TEAMFLOW_APP_SCOPES = "bitable:app,docs:event:subscribe,docs:permission.member:auth,docs:permission.member:create,drive:drive.metadata:readonly";
+const TEAMFLOW_APP_SCOPES = "bitable:app,base:app:read,base:table:read,base:table:create,base:table:update,base:field:read,base:field:create,base:field:update,base:view:read,base:view:write_only,base:record:read,base:record:retrieve,base:record:create,base:record:update,base:record:delete,docs:event:subscribe,docs:permission.member:auth,docs:permission.member:create,drive:drive.metadata:readonly";
 const BITABLE_EVENT_USER_SCOPE = "bitable:app";
+const ONBOARDING_REFRESH_STATUSES = new Set(["active", "idle"]);
 
 const text = {
   zh: {
@@ -211,8 +212,10 @@ const text = {
     agentCheckingActionHint: "正在确认 Agent 的实时状态，确认完成后才能切换或移除。",
     agentUnconfirmedActionHint: "Agent 的实时状态尚未确认，暂时不能切换或移除。",
     onboardingPending: "待入职",
+    onboardingRecoveryPending: "待恢复",
     onboardingInjected: "已入职",
     onboardingPendingHint: "下一次向此 Session 发送消息时，TeamFlow 会在后台注入职责与协作规则。点击查看将要注入的内容。",
+    onboardingRecoveryPendingHint: "此 Session 已发生上下文压缩；下一条消息会在后台恢复职责与协作规则。",
     onboardingInjectedHint: "TeamFlow 已将职责与协作规则注入此 Session。点击查看具体内容。",
     onboardingTitle: "Agent 入职",
     onboardingContext: "入职内容",
@@ -420,8 +423,10 @@ const text = {
     agentCheckingActionHint: "Wait until TeamFlow confirms the agent's live state before switching or removing it.",
     agentUnconfirmedActionHint: "The agent's live state is unconfirmed. It cannot be switched or removed yet.",
     onboardingPending: "Pending onboarding",
+    onboardingRecoveryPending: "Recovery pending",
     onboardingInjected: "Onboarded",
     onboardingPendingHint: "TeamFlow will inject the role and collaboration rules in the background when the next message enters this session. Click to preview them.",
+    onboardingRecoveryPendingHint: "This session was compacted. TeamFlow will restore its role and collaboration rules with the next message.",
     onboardingInjectedHint: "TeamFlow has injected the role and collaboration rules into this session. Click to inspect them.",
     onboardingTitle: "Agent onboarding",
     onboardingContext: "Onboarding context",
@@ -511,7 +516,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
         setRuntimeBySession(sessionMap(event.sessions || []));
       } else if (event.type === "runtime") {
         setRuntimeBySession((current) => updateRuntime(current, event));
-        if (pendingOnboardingSessions.current.has(event.threadId)) {
+        if (pendingOnboardingSessions.current.has(event.threadId) && ONBOARDING_REFRESH_STATUSES.has(event.status)) {
           refreshCodexState();
         }
         if (event.title) {
@@ -533,7 +538,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
       } else if (event.type === "catalog") {
         refreshCodexState();
       } else if (event.type === "bridge" && !event.connected) {
-        setRuntimeBySession({});
+        setRuntimeBySession(sessionMap(event.sessions || []));
       }
     };
     return () => source.close();
@@ -1808,9 +1813,13 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
 }
 
 function AgentOnboardingBadge({ agent, onOpen, t }) {
-  const injected = agent.onboarding?.status === "injected";
-  const label = injected ? t.onboardingInjected : t.onboardingPending;
-  const className = `agentOnboardingBadge ${injected ? "injected" : "pending"}`;
+  const status = agent.onboarding?.status || "pending";
+  const label = status === "injected"
+    ? t.onboardingInjected
+    : status === "recovery_pending"
+      ? t.onboardingRecoveryPending
+      : t.onboardingPending;
+  const className = `agentOnboardingBadge ${status}`;
   if (!onOpen) {
     return <span className={className}>{label}</span>;
   }
@@ -1828,7 +1837,13 @@ function AgentOnboardingBadge({ agent, onOpen, t }) {
 }
 
 function onboardingHint(agent, t) {
-  return agent.onboarding?.status === "injected" ? t.onboardingInjectedHint : t.onboardingPendingHint;
+  if (agent.onboarding?.status === "injected") {
+    return t.onboardingInjectedHint;
+  }
+  if (agent.onboarding?.status === "recovery_pending") {
+    return t.onboardingRecoveryPendingHint;
+  }
+  return t.onboardingPendingHint;
 }
 
 function SessionField({ error, initialValue = "", onRefresh, sessions, t }) {
@@ -2008,9 +2023,6 @@ function resolvedAgentRuntime(health, runtime) {
     fallback.serviceTier = health.service_tier;
   }
   const merged = { ...fallback, ...(runtime || {}) };
-  if (runtime?.status === "unconfirmed" && fallback.status) {
-    merged.status = fallback.status;
-  }
   return Object.keys(merged).length ? merged : undefined;
 }
 

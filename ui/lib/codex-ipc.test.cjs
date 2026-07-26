@@ -103,6 +103,7 @@ test("re-announces a tracked follower when a Codex owner appears", async () => {
 test("reports a pending follower as checking rather than not loaded", async () => {
   const { CodexBridge } = await modulePromise;
   const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = true;
   bridge.runtimeBySource = new Map();
   bridge.pendingThreads = new Set(["thread-1"]);
   bridge.unconfirmedThreads = new Set();
@@ -113,9 +114,37 @@ test("reports a pending follower as checking rather than not loaded", async () =
 test("does not infer not loaded when Codex returns no snapshot", async () => {
   const { CodexBridge } = await modulePromise;
   const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = true;
   bridge.runtimeBySource = new Map();
   bridge.pendingThreads = new Set();
   bridge.unconfirmedThreads = new Set(["thread-1"]);
+
+  assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "unconfirmed" }]);
+});
+
+test("does not restart an unconfirmed follow check when POST tracks the same thread", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  const followed = [];
+  bridge.clientId = "teamflow-client";
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.unconfirmedThreads = new Set(["thread-1"]);
+  bridge.requestFollow = (threadId) => followed.push(threadId);
+
+  bridge.track(["thread-1"]);
+
+  assert.deepEqual(followed, []);
+  assert.deepEqual(bridge.knownThreads, new Set(["thread-1"]));
+});
+
+test("reports tracked threads as unconfirmed while the IPC bridge is disconnected", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = false;
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map();
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
 
   assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "unconfirmed" }]);
 });

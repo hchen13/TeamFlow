@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -11,15 +14,32 @@ from core.codex import (
     _CodexIpcUnavailable,
     _CodexThreadStream,
     _notify_codex_clients_thread_changed,
+    codex_developer_context_evidence,
     codex_thread_is_permanently_unavailable,
     codex_thread_settings,
     codex_turn,
+    codex_turn_unresolved_teamflow_mcp_failures,
     read_codex_thread,
     run_codex_turn,
+    stop_codex_turn,
+    _run_codex_app_server_turn,
+    _stop_app_server,
 )
 
 
 class CodexTurnTest(unittest.TestCase):
+    def test_stopping_app_server_closes_all_process_pipes(self):
+        process = Mock()
+        process.poll.return_value = None
+
+        _stop_app_server(process)
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=2)
+        process.stdin.close.assert_called_once_with()
+        process.stdout.close.assert_called_once_with()
+        process.stderr.close.assert_called_once_with()
+
     def test_stale_ipc_socket_falls_back_instead_of_leaking_connection_refused(self):
         metadata = Mock(st_mode=0, st_uid=1000)
         client_socket = Mock()
@@ -54,6 +74,130 @@ class CodexTurnTest(unittest.TestCase):
             send.call_args_list[0].args[0]["method"],
             "thread-stream-following-status-requested",
         )
+
+    def test_interrupts_a_turn_through_the_codex_owner_client(self):
+        connection = _CodexIpcConnection(Mock(), "teamflow-client")
+        connection.followers["thread_1"] = {"desktop-client"}
+        with (
+            patch.object(connection, "_send") as send,
+            patch.object(connection, "_collect_followers"),
+            patch.object(connection, "_wait_for_response", return_value={
+                "resultType": "success",
+                "handledByClientId": "desktop-client",
+                "result": {
+                    "result": {
+                        "ok": True,
+                        "interruptedTurnId": "turn_1",
+                    }
+                },
+            }),
+        ):
+            result = connection.interrupt_turn("thread_1")
+
+        request = send.call_args_list[1].args[0]
+        self.assertEqual(request["method"], "thread-follower-interrupt-turn")
+        self.assertEqual(request["version"], 3)
+        self.assertEqual(
+            request["params"],
+            {"conversationId": "thread_1", "mode": "user"},
+        )
+        self.assertEqual(result["turn_id"], "turn_1")
+        self.assertEqual(result["status"], "interrupted")
+
+    def test_stops_the_registered_app_server_turn(self):
+        process = object()
+        started = threading.Event()
+        calls = {"read": 0}
+        result_holder = {}
+
+        def call(process_value, request_id, method, params, *, pending=None):
+            if method == "thread/resume":
+                return {"thread": {"status": {"type": "idle"}}}
+            if method == "turn/start":
+                return {"turn": {"id": "turn_app"}}
+            raise AssertionError(method)
+
+        def read_turn(process_value, stop_event, *, wake_event=None):
+            if calls["read"] == 0:
+                started.set()
+                self.assertTrue(wake_event.wait(timeout=2))
+                calls["read"] += 1
+                return {}
+            if calls["read"] == 1:
+                calls["read"] += 1
+                return {"id": 4, "result": {}}
+            return {
+                "method": "turn/completed",
+                "params": {
+                    "turn": {
+                        "id": "turn_app",
+                        "status": "interrupted",
+                    }
+                },
+            }
+
+        def run_turn():
+            result_holder["turn"] = _run_codex_app_server_turn(
+                "thread_app",
+                "work",
+                on_started=None,
+                stop_event=threading.Event(),
+            )
+
+        with (
+            patch("core.codex._start_app_server", return_value=process),
+            patch("core.codex._stop_app_server"),
+            patch("core.codex._call", side_effect=call),
+            patch("core.codex._read_turn_payload", side_effect=read_turn),
+            patch("core.codex._send") as send,
+            patch("core.codex._notify_codex_clients_thread_changed"),
+        ):
+            worker = threading.Thread(target=run_turn)
+            worker.start()
+            self.assertTrue(started.wait(timeout=2))
+            stopped = stop_codex_turn(
+                "thread_app",
+                expected_turn_id="turn_app",
+            )
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(stopped["turn_id"], "turn_app")
+        self.assertEqual(stopped["status"], "interrupted")
+        self.assertEqual(result_holder["turn"]["status"], "interrupted")
+        interrupt = next(
+            call.args[1]
+            for call in send.call_args_list
+            if call.args[1].get("method") == "turn/interrupt"
+        )
+        self.assertEqual(
+            interrupt["params"],
+            {"threadId": "thread_app", "turnId": "turn_app"},
+        )
+
+    def test_refuses_to_stop_a_different_registered_app_server_turn(self):
+        from core.codex import _ACTIVE_APP_SERVER_TURNS, _ACTIVE_APP_SERVER_TURNS_LOCK
+
+        active = {
+            "turn_id": "turn_other",
+            "interrupt_requested": threading.Event(),
+            "completed": threading.Event(),
+            "result": None,
+            "error": None,
+        }
+        with _ACTIVE_APP_SERVER_TURNS_LOCK:
+            _ACTIVE_APP_SERVER_TURNS["thread_app"] = active
+        try:
+            with self.assertRaisesRegex(ValueError, "not TeamFlow task turn turn_expected"):
+                stop_codex_turn(
+                    "thread_app",
+                    expected_turn_id="turn_expected",
+                )
+        finally:
+            with _ACTIVE_APP_SERVER_TURNS_LOCK:
+                _ACTIVE_APP_SERVER_TURNS.pop("thread_app", None)
+
+        self.assertFalse(active["interrupt_requested"].is_set())
 
     def test_background_turn_notifies_connected_codex_clients(self):
         connection = Mock()
@@ -200,6 +344,50 @@ class CodexTurnTest(unittest.TestCase):
             "service_tier": "priority",
         })
 
+    def test_verifies_developer_context_in_the_persisted_codex_rollout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            codex_home = Path(directory)
+            rollout = codex_home / "sessions" / "rollout-thread_context.jsonl"
+            rollout.parent.mkdir()
+            rollout.write_text(json.dumps({
+                "timestamp": "2026-07-26T06:47:50.132Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "TeamFlow onboarding context",
+                    }],
+                    "internal_chat_message_metadata_passthrough": {
+                        "turn_id": "turn_context",
+                    },
+                },
+            }))
+            database = codex_home / "state_5.sqlite"
+            with sqlite3.connect(database) as conn:
+                conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)")
+                conn.execute(
+                    "INSERT INTO threads (id, rollout_path) VALUES (?, ?)",
+                    ("thread_context", str(rollout)),
+                )
+
+            with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                evidence = codex_developer_context_evidence(
+                    "thread_context",
+                    {
+                        "onboarding": "TeamFlow onboarding context",
+                        "recovery": "TeamFlow recovery context",
+                    },
+                    injected_at="2026-07-26T06:47:50.116557+00:00",
+                )
+
+        self.assertEqual(evidence["status"], "verified")
+        self.assertEqual(evidence["context_kind"], "onboarding")
+        self.assertEqual(evidence["turn_id"], "turn_context")
+        self.assertEqual(evidence["timestamp"], "2026-07-26T06:47:50.132Z")
+        self.assertEqual(evidence["rollout_path"], str(rollout))
+
     def test_extracts_completion_and_response_from_ipc_stream_patches(self):
         stream = _CodexThreadStream()
         key = "tail:0:local:test"
@@ -241,8 +429,53 @@ class CodexTurnTest(unittest.TestCase):
         self.assertTrue(codex_thread_is_permanently_unavailable(
             ValueError("no rollout found for thread id thread_1")
         ))
-        self.assertTrue(codex_thread_is_permanently_unavailable(ValueError("thread is archived")))
+        self.assertFalse(codex_thread_is_permanently_unavailable(ValueError("thread is archived")))
         self.assertFalse(codex_thread_is_permanently_unavailable(ValueError("Codex app-server timed out")))
+
+    def test_finds_only_unresolved_teamflow_daemon_failures_in_a_turn(self):
+        failed = {
+            "type": "mcpToolCall",
+            "server": "teamflow",
+            "tool": "get_task",
+            "status": "failed",
+            "arguments": {"record_id": "rec_1"},
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": "Error executing tool get_task: [Errno 2] No such file or directory",
+                }]
+            },
+        }
+        business_failure = {
+            "type": "mcpToolCall",
+            "server": "teamflow",
+            "tool": "claim_task",
+            "status": "failed",
+            "arguments": {"record_id": "rec_2"},
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": "task TF-0002 is in_progress, not ready",
+                }]
+            },
+        }
+        turn = {"items": [failed, business_failure]}
+
+        self.assertEqual(
+            codex_turn_unresolved_teamflow_mcp_failures(turn),
+            [{
+                "tool": "get_task",
+                "arguments": {"record_id": "rec_1"},
+                "error": "Error executing tool get_task: [Errno 2] No such file or directory",
+            }],
+        )
+
+        turn["items"].append({
+            **failed,
+            "status": "completed",
+            "result": {"structuredContent": {"ok": True}},
+        })
+        self.assertEqual(codex_turn_unresolved_teamflow_mcp_failures(turn), [])
 
 
 if __name__ == "__main__":

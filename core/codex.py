@@ -4,12 +4,14 @@ import json
 import os
 import select
 import socket
+import sqlite3
 import stat
 import struct
 import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -19,8 +21,11 @@ _CODEX_IPC_STREAM_VERSION = 11
 _CODEX_IPC_FOLLOWING_VERSION = 1
 _CODEX_IPC_FOLLOWING_STATUS_VERSION = 1
 _CODEX_IPC_START_TURN_VERSION = 1
+_CODEX_IPC_INTERRUPT_TURN_VERSION = 3
 _CODEX_IPC_READ_STATE_VERSION = 2
-_TERMINAL_TURN_STATUSES = {"completed", "failed", "interrupted", "cancelled", "canceled"}
+_TERMINAL_TURN_STATUSES = {"completed", "success", "failed", "interrupted", "cancelled", "canceled"}
+_ACTIVE_APP_SERVER_TURNS_LOCK = threading.Lock()
+_ACTIVE_APP_SERVER_TURNS: dict[str, dict[str, Any]] = {}
 
 
 def read_codex_thread(thread_id: str, *, include_turns: bool = False) -> dict[str, Any]:
@@ -127,6 +132,62 @@ def codex_thread_settings(thread: dict[str, Any]) -> dict[str, str]:
     return fallback
 
 
+def codex_developer_context_evidence(
+    thread_id: str,
+    expected_contexts: dict[str, str],
+    *,
+    injected_at: str | None = None,
+) -> dict[str, Any]:
+    rollout_path = _codex_rollout_path(thread_id)
+    if rollout_path is None:
+        return {"status": "unavailable"}
+    threshold = _parse_timestamp(injected_at)
+    if threshold is not None:
+        threshold -= timedelta(seconds=5)
+    try:
+        for raw_line in _reverse_lines(rollout_path):
+            if b"developer" not in raw_line:
+                continue
+            try:
+                record = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            timestamp = _parse_timestamp(record.get("timestamp"))
+            if threshold is not None and timestamp is not None and timestamp < threshold:
+                break
+            payload = record.get("payload")
+            if record.get("type") != "response_item" or not isinstance(payload, dict):
+                continue
+            if payload.get("type") != "message" or payload.get("role") != "developer":
+                continue
+            text = "\n".join(
+                str(item.get("text") or "")
+                for item in payload.get("content") or []
+                if isinstance(item, dict) and item.get("type") == "input_text"
+            )
+            context_kind = next(
+                (kind for kind, expected in expected_contexts.items() if text == expected),
+                None,
+            )
+            if context_kind is None:
+                continue
+            metadata = payload.get("internal_chat_message_metadata_passthrough")
+            turn_id = metadata.get("turn_id") if isinstance(metadata, dict) else None
+            return {
+                "status": "verified",
+                "context_kind": context_kind,
+                "turn_id": str(turn_id) if turn_id else None,
+                "timestamp": record.get("timestamp"),
+                "rollout_path": str(rollout_path),
+            }
+    except OSError:
+        return {"status": "unavailable"}
+    return {
+        "status": "missing",
+        "rollout_path": str(rollout_path),
+    }
+
+
 def _reverse_lines(path: Path, *, chunk_size: int = 65536) -> Iterator[bytes]:
     with path.open("rb") as stream:
         stream.seek(0, os.SEEK_END)
@@ -143,6 +204,49 @@ def _reverse_lines(path: Path, *, chunk_size: int = 65536) -> Iterator[bytes]:
                     yield line.rstrip(b"\r")
         if remainder:
             yield remainder.rstrip(b"\r")
+
+
+def _codex_rollout_path(thread_id: str) -> Path | None:
+    codex_home = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
+    state_databases = sorted(
+        codex_home.glob("state_*.sqlite"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for database in state_databases:
+        try:
+            with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as conn:
+                row = conn.execute(
+                    "SELECT rollout_path FROM threads WHERE id = ?",
+                    (thread_id,),
+                ).fetchone()
+        except (OSError, sqlite3.Error):
+            continue
+        if row and row[0]:
+            path = Path(str(row[0])).expanduser()
+            if path.is_file():
+                return path
+    for directory_name in ("sessions", "archived_sessions"):
+        directory = codex_home / directory_name
+        if not directory.is_dir():
+            continue
+        match = next(directory.rglob(f"*{thread_id}.jsonl"), None)
+        if match is not None:
+            return match
+    return None
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def codex_thread_error(thread: dict[str, Any]) -> str | None:
@@ -165,7 +269,6 @@ def codex_thread_is_permanently_unavailable(error: Exception) -> bool:
         "no rollout found for thread id",
         "thread not found",
         "thread has been deleted",
-        "thread is archived",
     ))
 
 
@@ -199,6 +302,46 @@ def run_codex_turn(
         )
 
 
+def stop_codex_turn(thread_id: str, *, expected_turn_id: str) -> dict[str, Any]:
+    thread = thread_id.strip()
+    expected_turn = expected_turn_id.strip()
+    if not thread:
+        raise ValueError("thread_id is required")
+    if not expected_turn:
+        raise ValueError("expected_turn_id is required")
+
+    with _ACTIVE_APP_SERVER_TURNS_LOCK:
+        active = _ACTIVE_APP_SERVER_TURNS.get(thread)
+    if active:
+        active_turn = str(active.get("turn_id") or "")
+        if active_turn != expected_turn:
+            raise ValueError(
+                f"Codex session is running turn {active_turn or 'unknown'}, "
+                f"not TeamFlow task turn {expected_turn}"
+            )
+        active["interrupt_requested"].set()
+        if not active["completed"].wait(timeout=20):
+            raise ValueError("Codex turn did not stop within 20 seconds")
+        if active.get("error"):
+            raise ValueError(str(active["error"]))
+        result = active.get("result")
+        if not isinstance(result, dict):
+            raise ValueError("Codex app-server did not confirm the stopped turn")
+        return {
+            "ok": True,
+            "thread_id": thread,
+            "turn_id": result.get("turn_id"),
+            "status": result.get("status"),
+            "already_stopped": result.get("status") != "interrupted",
+            "transport": "app-server",
+        }
+
+    return _interrupt_codex_app_server_turn(
+        thread,
+        expected_turn_id=expected_turn,
+    )
+
+
 def _run_codex_app_server_turn(
     thread: str,
     prompt: str,
@@ -209,6 +352,7 @@ def _run_codex_app_server_turn(
 
     process = _start_app_server()
     pending: list[dict[str, Any]] = []
+    control: dict[str, Any] | None = None
     try:
         resumed = _call(process, 2, "thread/resume", {"threadId": thread}, pending=pending)
         runtime_status = ((resumed.get("thread") or {}).get("status") or {}).get("type")
@@ -229,16 +373,49 @@ def _run_codex_app_server_turn(
         if not isinstance(turn, dict) or not turn.get("id"):
             raise ValueError("Codex turn/start did not return a turn")
         turn_id = str(turn["id"])
+        control = {
+            "turn_id": turn_id,
+            "interrupt_requested": threading.Event(),
+            "completed": threading.Event(),
+            "result": None,
+            "error": None,
+        }
+        with _ACTIVE_APP_SERVER_TURNS_LOCK:
+            _ACTIVE_APP_SERVER_TURNS[thread] = control
         if on_started:
             on_started(turn_id)
         _notify_codex_clients_thread_changed(thread)
         final_message = None
         last_message = None
         declined_requests: list[str] = []
+        interrupt_sent = False
 
         while True:
-            payload = pending.pop(0) if pending else _read_turn_payload(process, stop_event)
+            if control["interrupt_requested"].is_set() and not interrupt_sent:
+                _send(process, {
+                    "id": 4,
+                    "method": "turn/interrupt",
+                    "params": {"threadId": thread, "turnId": turn_id},
+                })
+                interrupt_sent = True
+            payload = (
+                pending.pop(0)
+                if pending
+                else _read_turn_payload(
+                    process,
+                    stop_event,
+                    wake_event=control["interrupt_requested"],
+                )
+            )
             method = payload.get("method")
+            if payload.get("id") == 4 and not method:
+                if payload.get("error"):
+                    control["error"] = (
+                        payload["error"].get("message")
+                        or "Codex turn/interrupt failed"
+                    )
+                    control["completed"].set()
+                continue
             if payload.get("id") is not None and method:
                 declined_requests.append(str(method))
                 if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
@@ -267,7 +444,7 @@ def _run_codex_app_server_turn(
             error = completed.get("error") or {}
             error_message = str(error.get("message") or error.get("additionalDetails") or "").strip() or None
             _notify_codex_clients_thread_changed(thread)
-            return {
+            result = {
                 "ok": status == "completed",
                 "thread_id": thread,
                 "turn_id": turn_id,
@@ -277,8 +454,130 @@ def _run_codex_app_server_turn(
                 "error": error_message,
                 "transport": "app-server",
             }
+            control["result"] = result
+            control["completed"].set()
+            return result
+    except Exception as error:
+        if control is not None:
+            control["error"] = error
+            control["completed"].set()
+        raise
+    finally:
+        if control is not None:
+            with _ACTIVE_APP_SERVER_TURNS_LOCK:
+                if _ACTIVE_APP_SERVER_TURNS.get(thread) is control:
+                    _ACTIVE_APP_SERVER_TURNS.pop(thread, None)
+        _stop_app_server(process)
+
+
+def _interrupt_codex_app_server_turn(
+    thread: str,
+    *,
+    expected_turn_id: str,
+) -> dict[str, Any]:
+    process = _start_app_server()
+    pending: list[dict[str, Any]] = []
+    try:
+        resumed = _call(process, 2, "thread/resume", {"threadId": thread}, pending=pending)
+        thread_state = resumed.get("thread")
+        if not isinstance(thread_state, dict):
+            raise ValueError("Codex app-server did not return a thread")
+        if not thread_state.get("turns"):
+            read = _call(
+                process,
+                3,
+                "thread/read",
+                {"threadId": thread, "includeTurns": True},
+                pending=pending,
+            )
+            thread_state = read.get("thread")
+            if not isinstance(thread_state, dict):
+                raise ValueError("Codex app-server did not return a thread")
+        turns = [
+            turn for turn in thread_state.get("turns") or []
+            if isinstance(turn, dict) and turn.get("id")
+        ]
+        expected = next(
+            (
+                turn
+                for turn in reversed(turns)
+                if str(turn.get("id") or "") == expected_turn_id
+            ),
+            None,
+        )
+        if expected is None:
+            raise ValueError(
+                f"Codex task turn {expected_turn_id} is not visible in session {thread}"
+            )
+        expected_status = _turn_status(expected)
+        if expected_status in _TERMINAL_TURN_STATUSES:
+            return {
+                "ok": True,
+                "thread_id": thread,
+                "turn_id": expected_turn_id,
+                "status": expected_status,
+                "already_stopped": True,
+                "transport": "app-server",
+            }
+        active = next(
+            (
+                turn for turn in reversed(turns)
+                if _turn_status(turn) not in _TERMINAL_TURN_STATUSES
+            ),
+            None,
+        )
+        if active is None:
+            raise ValueError(
+                f"Codex task turn {expected_turn_id} is not terminal, "
+                "but the session has no active turn"
+            )
+        turn_id = str(active["id"])
+        if turn_id != expected_turn_id:
+            raise ValueError(
+                f"Codex session is running turn {turn_id}, "
+                f"not TeamFlow task turn {expected_turn_id}"
+            )
+        _call(
+            process,
+            4,
+            "turn/interrupt",
+            {"threadId": thread, "turnId": turn_id},
+            pending=pending,
+        )
+        deadline = time.monotonic() + 20
+        while True:
+            payload = (
+                pending.pop(0)
+                if pending
+                else _read_payload(
+                    process,
+                    deadline,
+                    "Codex turn did not stop within 20 seconds",
+                )
+            )
+            if payload.get("method") != "turn/completed":
+                continue
+            completed = (payload.get("params") or {}).get("turn") or {}
+            if str(completed.get("id") or "") != turn_id:
+                continue
+            _notify_codex_clients_thread_changed(thread)
+            return {
+                "ok": True,
+                "thread_id": thread,
+                "turn_id": turn_id,
+                "status": str(completed.get("status") or "interrupted"),
+                "already_stopped": False,
+                "transport": "app-server",
+            }
     finally:
         _stop_app_server(process)
+
+
+def _turn_status(turn: dict[str, Any]) -> str:
+    status = turn.get("status")
+    if isinstance(status, dict):
+        return str(status.get("type") or "")
+    return str(status or "")
 
 
 def _run_codex_ipc_turn(
@@ -529,6 +828,52 @@ class _CodexIpcConnection:
             raise ValueError("Codex owner client did not return a turn")
         return str(turn["id"])
 
+    def interrupt_turn(self, thread_id: str) -> dict[str, Any]:
+        self.request_following_status(thread_id)
+        self._collect_followers(thread_id, stop_event=None)
+        if not self.followers.get(thread_id):
+            raise _CodexIpcUnavailable("No Codex client is currently viewing this session")
+        request_id = str(uuid.uuid4())
+        self._send({
+            "type": "request",
+            "requestId": request_id,
+            "sourceClientId": self.client_id,
+            "version": _CODEX_IPC_INTERRUPT_TURN_VERSION,
+            "method": "thread-follower-interrupt-turn",
+            "params": {
+                "conversationId": thread_id,
+                "mode": "user",
+            },
+            "timeoutMs": 15000,
+        })
+        response = self._wait_for_response(
+            request_id,
+            timeout=16,
+            stop_event=None,
+        )
+        if response.get("resultType") != "success":
+            message = str(response.get("error") or "Codex owner client rejected the interrupt")
+            if message == "no-client-found":
+                raise _CodexIpcUnavailable("No Codex client currently owns this session")
+            raise ValueError(message)
+        payload = response.get("result")
+        while (
+            isinstance(payload, dict)
+            and "interruptedTurnId" not in payload
+            and isinstance(payload.get("result"), dict)
+        ):
+            payload = payload["result"]
+        if not isinstance(payload, dict) or payload.get("ok") is False:
+            raise ValueError("Codex owner client did not confirm the interrupt")
+        return {
+            "ok": True,
+            "thread_id": thread_id,
+            "turn_id": payload.get("interruptedTurnId"),
+            "status": "interrupted",
+            "already_stopped": not bool(payload.get("interruptedTurnId")),
+            "transport": "codex-ipc",
+        }
+
     def request_following_status(self, thread_id: str) -> None:
         self._send({
             "type": "broadcast",
@@ -772,13 +1117,18 @@ def _codex_executable() -> str:
 
 
 def _stop_app_server(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+    try:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+    finally:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
 
 
 def _call(
@@ -851,13 +1201,17 @@ def _read_payload(process: subprocess.Popen[bytes], deadline: float | None, time
 def _read_turn_payload(
     process: subprocess.Popen[bytes],
     stop_event: threading.Event | None,
+    *,
+    wake_event: threading.Event | None = None,
 ) -> dict[str, Any]:
-    if stop_event is None:
+    if stop_event is None and wake_event is None:
         return _read_payload(process, None, "Codex app-server connection ended unexpectedly")
-    while not stop_event.is_set():
+    while stop_event is None or not stop_event.is_set():
         try:
             return _read_payload(process, time.monotonic() + 0.5, "Codex turn is still running")
         except TimeoutError:
+            if wake_event is not None and wake_event.is_set():
+                return {}
             continue
     raise InterruptedError("TeamFlow daemon stopped while the Codex turn was running")
 
@@ -867,3 +1221,56 @@ def codex_turn(thread: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
         if isinstance(item, dict) and str(item.get("id") or "") == turn_id:
             return item
     return None
+
+
+def codex_turn_unresolved_teamflow_mcp_failures(turn: dict[str, Any]) -> list[dict[str, Any]]:
+    unresolved: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in turn.get("items") or []:
+        if not isinstance(item, dict) or item.get("type") != "mcpToolCall":
+            continue
+        if item.get("server") != "teamflow" and item.get("pluginId") != "teamflow@teamflow":
+            continue
+        tool = str(item.get("tool") or "")
+        arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+        signature = (
+            tool,
+            json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+        status = str(item.get("status") or "")
+        if status in {"completed", "success"}:
+            unresolved.pop(signature, None)
+            continue
+        error = _mcp_tool_call_error(item)
+        if status == "failed" and _is_daemon_connection_error(error):
+            unresolved[signature] = {
+                "tool": tool,
+                "arguments": arguments,
+                "error": error,
+            }
+    return list(unresolved.values())
+
+
+def _mcp_tool_call_error(item: dict[str, Any]) -> str:
+    parts: list[str] = []
+    error = item.get("error")
+    if isinstance(error, dict):
+        parts.extend(str(error.get(key) or "") for key in ("message", "additionalDetails"))
+    elif error:
+        parts.append(str(error))
+    result = item.get("result")
+    if isinstance(result, dict):
+        for content in result.get("content") or []:
+            if isinstance(content, dict) and content.get("type") == "text" and content.get("text"):
+                parts.append(str(content["text"]))
+    return " ".join(part.strip() for part in parts if part and part.strip())
+
+
+def _is_daemon_connection_error(error: str) -> bool:
+    message = error.lower()
+    return any(fragment in message for fragment in (
+        "closed the connection without a response",
+        "authorization is missing or expired",
+        "connection refused",
+        "daemon.sock",
+        "no such file or directory",
+    ))

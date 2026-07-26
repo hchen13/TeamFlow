@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from copy import deepcopy
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -25,6 +26,7 @@ from core.agent_runtime import (
     agent_context,
     confirm_agent_context,
     inspect_agent_contexts,
+    mark_agent_context_recovery_pending,
 )
 from core.config import resolve_workspace_paths
 from core.daemon import (
@@ -67,7 +69,11 @@ from core.task_dispatch import (
     mark_task_delivery_turn_started,
     prepare_agent_catchup_deliveries,
     prepare_task_deliveries,
+    render_task_prompt,
+    task_delivery_is_current,
 )
+from core.teamflow_tools import list_available_tasks
+from core.workflow import load_workflow_definition, validate_workflow_definition
 from scripts.teamflow import (
     cmd_inspect_agent_context,
     cmd_serve_ui,
@@ -77,6 +83,27 @@ from scripts.teamflow import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def renamed_workflow_state(source: str, target: str) -> dict:
+    definition = deepcopy(load_workflow_definition("software-development"))
+    for state in definition["lifecycle"]["states"]:
+        if state["key"] == source:
+            state["key"] = target
+    for action in definition["lifecycle"]["actions"].values():
+        for rule in action["rules"]:
+            rule["from"] = [
+                target if state == source else state
+                for state in rule.get("from", [])
+            ]
+            if rule.get("to") == source:
+                rule["to"] = target
+    for action in definition.get("runtime_actions", {}).values():
+        action["states"] = [
+            target if state == source else state
+            for state in action["states"]
+        ]
+    return definition
 
 
 class LarkEventsTest(unittest.TestCase):
@@ -480,6 +507,113 @@ class LarkEventsTest(unittest.TestCase):
         self.assertIn("blocked_left", event_types)
         self.assertEqual((state["status"], state["source_revision"]), ("blocked", "4"))
 
+    def test_claimable_queue_and_dispatch_prompt_use_workflow_state_definition(self):
+        definition = renamed_workflow_state("ready", "queued")
+        queued = next(
+            state
+            for state in definition["lifecycle"]["states"]
+            if state["key"] == "queued"
+        )
+        queued["dispatch_instructions"]["zh-CN"] = "按自定义队列规则处理。"
+        validate_workflow_definition(
+            definition,
+            Path("/tmp/software-development/workflow.json"),
+        )
+        task = {
+            "record_id": "recQueued",
+            "task_id": "TF-QUEUE",
+            "title": "Custom queue",
+            "status": "queued",
+            "role": "tl",
+        }
+        save_task_snapshot(
+            self.context(),
+            record_id="recQueued",
+            task=task,
+            source_event_id="evtQueued",
+            source_revision="1",
+        )
+        caller = {
+            "agent_id": "agent_queue",
+            "agent_name": "Queue TL",
+            "workspace_root": self.workspace,
+            "workflow_key": "software-development",
+            "role_key": "tl",
+        }
+
+        with (
+            patch("core.teamflow_tools._definition", return_value=definition),
+            patch("core.task_dispatch.load_workflow_definition", return_value=definition),
+        ):
+            available = list_available_tasks(caller)
+            prompt = render_task_prompt(
+                self.context(),
+                event_type="queued_entered",
+                event_key="evtQueued",
+                workflow_key="software-development",
+                role_name="技术负责人",
+                task=task,
+            )
+
+        self.assertEqual(available["count"], 1)
+        self.assertEqual(available["tasks"][0]["record_id"], "recQueued")
+        self.assertTrue(prompt.endswith("按自定义队列规则处理。"))
+
+    def test_execution_control_state_is_loaded_from_the_workflow(self):
+        definition = renamed_workflow_state("in_progress", "working")
+        caller = {
+            "agent_id": "agent_working",
+            "agent_name": "Working TL",
+            "workspace_root": self.workspace,
+            "workflow_key": "software-development",
+            "role_key": "tl",
+        }
+        runtime = TeamFlowDaemon()
+        try:
+            with patch("core.daemon.load_workflow_definition", return_value=definition):
+                runtime._sync_task_execution_activity(
+                    caller,
+                    tool_name="get_task",
+                    result={
+                        "ok": True,
+                        "task": {
+                            "record_id": "recWorking",
+                            "status": "working",
+                            "agent_id": "agent_working",
+                        },
+                    },
+                    session_id="session_working",
+                    turn_id="turn_working",
+                )
+                with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+                    execution = conn.execute(
+                        "SELECT * FROM task_executions WHERE record_id = 'recWorking'"
+                    ).fetchone()
+                runtime._sync_task_execution_activity(
+                    caller,
+                    tool_name="get_task",
+                    result={
+                        "ok": True,
+                        "task": {
+                            "record_id": "recWorking",
+                            "status": "done",
+                            "agent_id": "agent_working",
+                        },
+                    },
+                    session_id="session_working",
+                    turn_id="turn_working",
+                )
+        finally:
+            runtime.close()
+
+        self.assertEqual(execution["state"], "active")
+        self.assertEqual(execution["turn_id"], "turn_working")
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            cleared = conn.execute(
+                "SELECT * FROM task_executions WHERE record_id = 'recWorking'"
+            ).fetchone()
+        self.assertIsNone(cleared)
+
     def test_ready_event_creates_one_durable_codex_delivery(self):
         context = self.context()
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
@@ -690,6 +824,262 @@ class LarkEventsTest(unittest.TestCase):
         self.assertEqual(stale["routing_status"], "ignored")
         self.assertEqual(stale["routing_note"], "task is no longer ready")
 
+    def test_only_the_latest_reentry_event_is_delivered(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_reentry', ?, ?, ?, 'tl', 'codex',
+                          'session_reentry', 'Reentry TL', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+        task = {
+            "record_id": "recReentry",
+            "task_id": "TF-0030",
+            "title": "Deliver only the current entry",
+            "role": "tl",
+        }
+        save_task_snapshot(
+            context,
+            record_id="recReentry",
+            task={**task, "status": "ready"},
+            source_event_id="evtReentryOne",
+            source_revision="50",
+        )
+        save_task_snapshot(
+            context,
+            record_id="recReentry",
+            task={**task, "status": "in_progress"},
+            source_event_id="evtReentryClaim",
+            source_revision="51",
+        )
+        save_task_snapshot(
+            context,
+            record_id="recReentry",
+            task={**task, "status": "ready"},
+            source_event_id="evtReentryTwo",
+            source_revision="52",
+        )
+
+        prepare_task_deliveries(context)
+        deliveries = claim_task_deliveries(context)
+
+        self.assertEqual(len(deliveries), 1)
+        self.assertIn(":52:recReentry:ready_entered", deliveries[0]["event_key"])
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            old_entry = conn.execute(
+                """
+                SELECT routing_status, routing_note
+                FROM task_events
+                WHERE event_key LIKE '%:50:recReentry:ready_entered'
+                """
+            ).fetchone()
+        self.assertEqual(old_entry["routing_status"], "ignored")
+        self.assertEqual(old_entry["routing_note"], "task has a newer ready dispatch event")
+
+    def test_processing_delivery_is_stale_after_same_role_state_transition(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'pm'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_generation', ?, ?, ?, 'pm', 'codex',
+                          'session_generation', 'Generation PM', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+        task = {
+            "record_id": "recGeneration",
+            "task_id": "TF-0032",
+            "title": "Do not deliver an old generation",
+            "status": "review",
+            "role": "tl",
+        }
+        save_task_snapshot(
+            context,
+            record_id="recGeneration",
+            task=task,
+            source_event_id="evtGenerationReview",
+            source_revision="60",
+        )
+        prepare_task_deliveries(context)
+        old_delivery = claim_task_deliveries(context)[0]
+        save_task_snapshot(
+            context,
+            record_id="recGeneration",
+            task={
+                **task,
+                "status": "blocked",
+                "blocked_reason": "等待范围确认",
+                "waiting_on": "stakeholder",
+                "next_action": "PM 与项目决策人确认",
+            },
+            source_event_id="evtGenerationBlocked",
+            source_revision="61",
+        )
+        prepare_task_deliveries(context)
+
+        self.assertFalse(
+            task_delivery_is_current(
+                context,
+                delivery_id=old_delivery["id"],
+            )
+        )
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            pending = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM task_event_deliveries AS delivery
+                JOIN task_events AS event ON event.event_key = delivery.event_key
+                WHERE event.record_id = 'recGeneration'
+                  AND event.event_type = 'blocked_entered'
+                  AND delivery.status = 'pending'
+                """
+            ).fetchone()[0]
+        self.assertEqual(pending, 1)
+
+    def test_pending_delivery_renders_the_latest_task_snapshot(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_snapshot', ?, ?, ?, 'tl', 'codex',
+                          'session_snapshot', 'Snapshot TL', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+        initial = {
+            "record_id": "recSnapshot",
+            "task_id": "TF-0031",
+            "title": "Old title",
+            "status": "ready",
+            "role": "tl",
+            "description": "Old description",
+        }
+        save_task_snapshot(
+            context,
+            record_id="recSnapshot",
+            task=initial,
+            source_event_id="evtSnapshotOne",
+            source_revision="60",
+        )
+        prepare_task_deliveries(context)
+        save_task_snapshot(
+            context,
+            record_id="recSnapshot",
+            task={
+                **initial,
+                "title": "Current title",
+                "description": "Current description",
+            },
+            source_event_id="evtSnapshotTwo",
+            source_revision="61",
+        )
+        prepare_task_deliveries(context)
+
+        deliveries = claim_task_deliveries(context)
+
+        self.assertEqual(len(deliveries), 1)
+        self.assertIn("任务：TF-0031 Current title", deliveries[0]["prompt"])
+        self.assertIn("任务描述：Current description", deliveries[0]["prompt"])
+        self.assertNotIn("Old description", deliveries[0]["prompt"])
+
+    def test_ready_role_change_cancels_the_old_target_and_routes_the_new_one(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            roles = {
+                row["role_key"]: row
+                for row in conn.execute(
+                    "SELECT * FROM roles WHERE workflow_id = ? AND role_key IN ('tl', 'qa')",
+                    (workspace["current_workflow_id"],),
+                )
+            }
+            for role_key in ("tl", "qa"):
+                conn.execute(
+                    """
+                    INSERT INTO agents (
+                      id, workspace_id, workflow_id, role_id, role_key,
+                      harness_type, session_id, display_name, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'codex', ?, ?, ?, ?)
+                    """,
+                    (
+                        f"agent_role_{role_key}",
+                        workspace["id"],
+                        workspace["current_workflow_id"],
+                        roles[role_key]["id"],
+                        role_key,
+                        f"session_role_{role_key}",
+                        f"Role {role_key.upper()}",
+                        now(),
+                        now(),
+                    ),
+                )
+        task = {
+            "record_id": "recRoleChange",
+            "task_id": "TF-0032",
+            "title": "Route the current owner",
+            "status": "ready",
+            "role": "tl",
+        }
+        save_task_snapshot(
+            context,
+            record_id="recRoleChange",
+            task=task,
+            source_event_id="evtRoleTl",
+            source_revision="70",
+        )
+        prepare_task_deliveries(context)
+        save_task_snapshot(
+            context,
+            record_id="recRoleChange",
+            task={**task, "role": "qa"},
+            source_event_id="evtRoleQa",
+            source_revision="71",
+        )
+        prepare_task_deliveries(context)
+
+        deliveries = claim_task_deliveries(context)
+
+        self.assertEqual(len(deliveries), 1)
+        self.assertEqual(deliveries[0]["agent_id"], "agent_role_qa")
+        self.assertEqual(deliveries[0]["role_key"], "qa")
+        self.assertIn("当前负责人：qa", deliveries[0]["prompt"])
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            old_delivery = conn.execute(
+                """
+                SELECT status, last_error
+                FROM task_event_deliveries
+                WHERE agent_id = 'agent_role_tl'
+                """
+            ).fetchone()
+        self.assertEqual(old_delivery["status"], "canceled")
+        self.assertEqual(old_delivery["last_error"], "task has a newer ready dispatch event")
+
     def test_replacing_an_agent_session_redelivers_current_ready_tasks(self):
         context = self.context()
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
@@ -829,11 +1219,16 @@ class LarkEventsTest(unittest.TestCase):
             session_id="session_context",
             consume=True,
         )
+        recovery_mark = mark_agent_context_recovery_pending(
+            self.workspace,
+            agent_id=first["assignment"]["agent_id"],
+            session_id="session_context",
+            assignment_revision=first["assignment"]["assignment_revision"],
+        )
         recovered = agent_context(
             self.workspace,
             session_id="session_context",
             consume=True,
-            refresh=True,
         )
         recovery_confirmation = confirm_agent_context(
             self.workspace,
@@ -851,6 +1246,8 @@ class LarkEventsTest(unittest.TestCase):
         self.assertIn("技术负责人", first["additional_context"])
         self.assertTrue(confirmed["confirmed"])
         self.assertIsNone(after_confirmation["additional_context"])
+        self.assertTrue(recovery_mark["marked"])
+        self.assertEqual(recovered["context_status"], "recovery_pending")
         self.assertIn("会话压缩后恢复", recovered["additional_context"])
         self.assertIn("技术负责人", recovered["additional_context"])
         self.assertTrue(recovery_confirmation["confirmed"])
@@ -1021,6 +1418,7 @@ class LarkEventsTest(unittest.TestCase):
         runtime.routes[self.workspace] = self.context()
         try:
             authorized = runtime.authorize_tool(
+                invocation_id="invocation_assignment",
                 session_id="session_grant",
                 cwd=self.workspace,
                 turn_id="turn_grant",
@@ -1028,6 +1426,7 @@ class LarkEventsTest(unittest.TestCase):
                 tool_input={},
             )
             result = runtime.invoke_tool(
+                invocation_id="invocation_assignment",
                 grant=authorized["grant"],
                 tool_name="get_assignment",
                 arguments={},
@@ -1035,11 +1434,13 @@ class LarkEventsTest(unittest.TestCase):
             self.assertEqual(result["assignment"]["agent_id"], "agent_grant")
             with self.assertRaisesRegex(ValueError, "missing or expired"):
                 runtime.invoke_tool(
+                    invocation_id="invocation_assignment",
                     grant=authorized["grant"],
                     tool_name="get_assignment",
                     arguments={},
                 )
             authorized = runtime.authorize_tool(
+                invocation_id="invocation_get_task",
                 session_id="session_grant",
                 cwd=self.workspace,
                 turn_id="turn_grant",
@@ -1051,6 +1452,7 @@ class LarkEventsTest(unittest.TestCase):
                 "task": {"record_id": "recGrant", "title": "Full task"},
             }) as read_task:
                 result = runtime.invoke_tool(
+                    invocation_id="invocation_get_task",
                     grant=authorized["grant"],
                     tool_name="get_task",
                     arguments={"record_id": "recGrant"},
@@ -1059,6 +1461,469 @@ class LarkEventsTest(unittest.TestCase):
             read_task.assert_called_once()
         finally:
             runtime.close()
+
+    def test_retried_invocation_reuses_the_cached_mutation_result(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_cached', ?, ?, ?, 'tl', 'codex',
+                          'session_cached', 'Cached TL', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+        register_workspace(self.workspace, enabled=True)
+        runtime = TeamFlowDaemon()
+        runtime.routes[self.workspace] = self.context()
+        arguments = {"record_id": "recCached"}
+        try:
+            with patch(
+                "core.daemon.claim_task",
+                return_value={
+                    "ok": True,
+                    "task": {
+                        "record_id": "recCached",
+                        "status": "in_progress",
+                        "agent_id": "agent_cached",
+                    },
+                },
+            ) as mutation:
+                first_grant = runtime.authorize_tool(
+                    invocation_id="invocation_cached",
+                    session_id="session_cached",
+                    cwd=self.workspace,
+                    turn_id="turn_cached",
+                    tool_name="mcp__teamflow__claim_task",
+                    tool_input=arguments,
+                )
+                first = runtime.invoke_tool(
+                    invocation_id="invocation_cached",
+                    grant=first_grant["grant"],
+                    tool_name="claim_task",
+                    arguments=arguments,
+                )
+                second_grant = runtime.authorize_tool(
+                    invocation_id="invocation_cached",
+                    session_id="session_cached",
+                    cwd=self.workspace,
+                    turn_id="turn_cached",
+                    tool_name="mcp__teamflow__claim_task",
+                    tool_input=arguments,
+                )
+                second = runtime.invoke_tool(
+                    invocation_id="invocation_cached",
+                    grant=second_grant["grant"],
+                    tool_name="claim_task",
+                    arguments=arguments,
+                )
+
+            self.assertEqual(first, second)
+            mutation.assert_called_once()
+            with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+                execution = conn.execute(
+                    "SELECT * FROM task_executions WHERE record_id = 'recCached'"
+                ).fetchone()
+            self.assertEqual(execution["agent_id"], "agent_cached")
+            self.assertEqual(execution["session_id"], "session_cached")
+            self.assertEqual(execution["turn_id"], "turn_cached")
+            self.assertEqual(execution["state"], "active")
+        finally:
+            runtime.close()
+
+    def test_concurrent_retried_invocation_executes_one_mutation(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_concurrent', ?, ?, ?, 'tl', 'codex',
+                          'session_concurrent', 'Concurrent TL', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+        register_workspace(self.workspace, enabled=True)
+        runtime = TeamFlowDaemon()
+        runtime.routes[self.workspace] = self.context()
+        arguments = {"record_id": "recConcurrent"}
+        grants = [
+            runtime.authorize_tool(
+                invocation_id="invocation_concurrent",
+                session_id="session_concurrent",
+                cwd=self.workspace,
+                turn_id="turn_concurrent",
+                tool_name="mcp__teamflow__claim_task",
+                tool_input=arguments,
+            )
+            for _ in range(2)
+        ]
+        results = []
+        try:
+            with patch(
+                "core.daemon.claim_task",
+                return_value={"ok": True, "task": {"record_id": "recConcurrent"}},
+            ) as mutation:
+                threads = [
+                    threading.Thread(
+                        target=lambda grant=grant: results.append(runtime.invoke_tool(
+                            invocation_id="invocation_concurrent",
+                            grant=grant["grant"],
+                            tool_name="claim_task",
+                            arguments=arguments,
+                        ))
+                    )
+                    for grant in grants
+                ]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=2)
+
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0], results[1])
+            mutation.assert_called_once()
+        finally:
+            runtime.close()
+
+    def test_stop_execution_does_not_hold_the_workspace_mutation_lock(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            roles = {
+                row["role_key"]: row
+                for row in conn.execute(
+                    "SELECT * FROM roles WHERE workflow_id = ? AND role_key IN ('pm', 'tl')",
+                    (workspace["current_workflow_id"],),
+                )
+            }
+            timestamp = now()
+            for agent_id, role_key, session_id in (
+                ("agent_lock_pm", "pm", "session_lock_pm"),
+                ("agent_lock_tl", "tl", "session_lock_tl"),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO agents (
+                      id, workspace_id, workflow_id, role_id, role_key,
+                      harness_type, session_id, display_name, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'codex', ?, ?, ?, ?)
+                    """,
+                    (
+                        agent_id,
+                        workspace["id"],
+                        workspace["current_workflow_id"],
+                        roles[role_key]["id"],
+                        role_key,
+                        session_id,
+                        agent_id,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+        register_workspace(self.workspace, enabled=True)
+        runtime = TeamFlowDaemon()
+        runtime.routes[self.workspace] = self.context()
+        stop_arguments = {
+            "record_id": "recLock",
+            "reason": "停止测试",
+            "confirmed": True,
+        }
+        update_arguments = {
+            "record_id": "recLock",
+            "fields": {"progress": "仍可写入"},
+        }
+        stop_grant = runtime.authorize_tool(
+            invocation_id="invocation_stop_lock",
+            session_id="session_lock_pm",
+            cwd=self.workspace,
+            turn_id="turn_lock_pm",
+            tool_name="mcp__teamflow__stop_task_execution",
+            tool_input=stop_arguments,
+        )
+        update_grant = runtime.authorize_tool(
+            invocation_id="invocation_update_lock",
+            session_id="session_lock_tl",
+            cwd=self.workspace,
+            turn_id="turn_lock_tl",
+            tool_name="mcp__teamflow__update_task",
+            tool_input=update_arguments,
+        )
+        stop_started = threading.Event()
+        update_finished = threading.Event()
+        results = []
+
+        def invoke(assignment, tool_name, arguments, *, invocation_id):
+            if tool_name == "stop_task_execution":
+                stop_started.set()
+                if not update_finished.wait(timeout=2):
+                    raise AssertionError("update_task was blocked by stop_task_execution")
+            elif tool_name == "update_task":
+                update_finished.set()
+            return {"ok": True}
+
+        try:
+            with patch.object(runtime, "_invoke_teamflow_tool", side_effect=invoke):
+                stop_worker = threading.Thread(
+                    target=lambda: results.append(runtime.invoke_tool(
+                        invocation_id="invocation_stop_lock",
+                        grant=stop_grant["grant"],
+                        tool_name="stop_task_execution",
+                        arguments=stop_arguments,
+                    ))
+                )
+                update_worker = threading.Thread(
+                    target=lambda: results.append(runtime.invoke_tool(
+                        invocation_id="invocation_update_lock",
+                        grant=update_grant["grant"],
+                        tool_name="update_task",
+                        arguments=update_arguments,
+                    ))
+                )
+                stop_worker.start()
+                self.assertTrue(stop_started.wait(timeout=2))
+                update_worker.start()
+                stop_worker.join(timeout=3)
+                update_worker.join(timeout=3)
+        finally:
+            runtime.close()
+
+        self.assertFalse(stop_worker.is_alive())
+        self.assertFalse(update_worker.is_alive())
+        self.assertEqual(results, [{"ok": True}, {"ok": True}])
+
+    def test_stop_execution_records_a_project_scoped_receipt(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            roles = {
+                row["role_key"]: row
+                for row in conn.execute(
+                    "SELECT * FROM roles WHERE workflow_id = ? AND role_key IN ('pm', 'tl')",
+                    (workspace["current_workflow_id"],),
+                )
+            }
+            timestamp = now()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_stop_pm', ?, ?, ?, 'pm', 'codex',
+                          'session_stop_pm', 'Stop PM', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    roles["pm"]["id"],
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO task_executions (
+                  record_id, agent_id, session_id, turn_id, state, updated_at
+                ) VALUES (
+                  'recStop', 'agent_stop_tl', 'session_stop_tl',
+                  'turn_stop', 'active', ?
+                )
+                """,
+                (timestamp,),
+            )
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_stop_tl', ?, ?, ?, 'tl', 'codex',
+                          'session_stop_tl', 'Stop TL', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    roles["tl"]["id"],
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        pm = agent_context(self.workspace, session_id="session_stop_pm")["assignment"]
+        task = {
+            "record_id": "recStop",
+            "task_id": "TF-STOP",
+            "title": "Stop work",
+            "status": "in_progress",
+            "type": "development",
+            "priority": "P1",
+            "role": "tl",
+            "description": "Work",
+            "acceptance_criteria": "Stopped",
+            "agent": "Stop TL",
+            "agent_id": "agent_stop_tl",
+        }
+        runtime = TeamFlowDaemon()
+        try:
+            with (
+                patch(
+                    "core.daemon.get_lark_task",
+                    return_value={"ok": True, "task": task},
+                ),
+                patch(
+                    "core.daemon.stop_codex_turn",
+                    return_value={
+                        "ok": True,
+                        "thread_id": "session_stop_tl",
+                        "turn_id": "turn_stop",
+                        "status": "interrupted",
+                        "already_stopped": False,
+                        "transport": "codex-ipc",
+                    },
+                ) as stop_turn,
+            ):
+                result = runtime._invoke_teamflow_tool(
+                    pm,
+                    "stop_task_execution",
+                    {
+                        "record_id": "recStop",
+                        "reason": "需求撤销",
+                        "confirmed": True,
+                    },
+                    invocation_id="invocation_stop",
+                )
+                facts = runtime._task_runtime_facts(pm, task)
+                repeated = runtime._invoke_teamflow_tool(
+                    pm,
+                    "stop_task_execution",
+                    {
+                        "record_id": "recStop",
+                        "reason": "需求撤销",
+                        "confirmed": True,
+                    },
+                    invocation_id="invocation_stop_repeated",
+                )
+                with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+                    stopped_receipt = dict(conn.execute(
+                        "SELECT * FROM task_executions WHERE record_id = 'recStop'"
+                    ).fetchone())
+                tl = agent_context(
+                    self.workspace,
+                    session_id="session_stop_tl",
+                )["assignment"]
+                runtime._sync_task_execution_activity(
+                    tl,
+                    tool_name="get_task",
+                    result={"ok": True, "task": task},
+                    session_id="session_stop_tl",
+                    turn_id="turn_stop_new",
+                )
+                refreshed_facts = runtime._task_runtime_facts(pm, task)
+        finally:
+            runtime.close()
+
+        self.assertTrue(result["ok"])
+        self.assertIn("execution_stopped", facts)
+        self.assertTrue(repeated["already_applied"])
+        self.assertNotIn("execution_stopped", refreshed_facts)
+        self.assertEqual(stopped_receipt["turn_id"], "turn_stop")
+        self.assertEqual(stopped_receipt["state"], "stopped")
+        self.assertEqual(stopped_receipt["stopped_by_agent_id"], "agent_stop_pm")
+        stop_turn.assert_called_once_with(
+            "session_stop_tl",
+            expected_turn_id="turn_stop",
+        )
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            receipt = conn.execute(
+                "SELECT * FROM task_executions WHERE record_id = 'recStop'"
+            ).fetchone()
+        self.assertEqual(receipt["agent_id"], "agent_stop_tl")
+        self.assertEqual(receipt["session_id"], "session_stop_tl")
+        self.assertEqual(receipt["turn_id"], "turn_stop_new")
+        self.assertEqual(receipt["state"], "active")
+        self.assertIsNone(receipt["stopped_by_agent_id"])
+
+    def test_signed_grant_is_rejected_after_workspace_is_disabled(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_disabled', ?, ?, ?, 'tl', 'codex',
+                          'session_disabled', 'Disabled TL', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+        register_workspace(self.workspace, enabled=True)
+        runtime = TeamFlowDaemon()
+        runtime.routes[self.workspace] = self.context()
+        try:
+            authorized = runtime.authorize_tool(
+                invocation_id="invocation_disabled",
+                session_id="session_disabled",
+                cwd=self.workspace,
+                turn_id="turn_disabled",
+                tool_name="mcp__teamflow__get_assignment",
+                tool_input={},
+            )
+            runtime.disable_workspace(self.workspace)
+            with self.assertRaisesRegex(ValueError, "workspace was disabled"):
+                runtime.invoke_tool(
+                    invocation_id="invocation_disabled",
+                    grant=authorized["grant"],
+                    tool_name="get_assignment",
+                    arguments={},
+                )
+        finally:
+            runtime.close()
+
+    def test_create_task_retries_with_the_same_remote_idempotency_token(self):
+        context = Mock()
+        context.request_context.meta = RequestParams.Meta.model_validate(
+            {
+                "threadId": "session_create",
+                "x-codex-turn-metadata": json.dumps({
+                    "thread_id": "session_create",
+                    "turn_id": "turn_create",
+                }),
+            }
+        )
+        invocation_id = "11111111-1111-4111-8111-111111111111"
+        with (
+            patch("core.mcp_server.uuid.uuid4", return_value=invocation_id),
+            patch("core.mcp_server.time.sleep"),
+            patch(
+                "core.mcp_server._daemon_request",
+                side_effect=[
+                    {"grant": "grant_create", "expires_in": 60},
+                    ConnectionResetError("daemon restarted"),
+                    {"grant": "grant_create_retry", "expires_in": 60},
+                    {"ok": True, "task": {"record_id": "recCreated"}},
+                ],
+            ) as daemon_request,
+        ):
+            result = teamflow_mcp_server.create_task("Idempotent create", context)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["record_id"], "recCreated")
+        self.assertEqual(daemon_request.call_count, 4)
+        self.assertEqual(
+            {call.args[0]["invocation_id"] for call in daemon_request.call_args_list},
+            {invocation_id},
+        )
 
     def test_plugin_context_hook_and_mcp_metadata_resolve_the_registered_agent(self):
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
@@ -1115,21 +1980,43 @@ class LarkEventsTest(unittest.TestCase):
                     "session_id": "session_hook",
                     "cwd": self.workspace,
                     "turn_id": "turn_compact",
-                    "hook_event_name": "SessionStart",
-                    "source": "compact",
+                    "hook_event_name": "PostCompact",
+                    "trigger": "manual",
                 }),
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            compact_output = json.loads(compact_hook.stdout)
+            self.assertEqual(compact_hook.stdout, "")
+            compacted = agent_context(
+                self.workspace,
+                session_id="session_hook",
+                consume=False,
+            )
             self.assertEqual(
-                compact_output["hookSpecificOutput"]["hookEventName"],
-                "SessionStart",
+                compacted["context_status"],
+                "recovery_pending",
+            )
+            recovery_hook = subprocess.run(
+                ["python3", str(ROOT / "hooks" / "user_prompt_submit.py")],
+                input=json.dumps({
+                    "session_id": "session_hook",
+                    "cwd": self.workspace,
+                    "turn_id": "turn_after_compact",
+                    "hook_event_name": "UserPromptSubmit",
+                }),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            recovery_output = json.loads(recovery_hook.stdout)
+            self.assertEqual(
+                recovery_output["hookSpecificOutput"]["hookEventName"],
+                "UserPromptSubmit",
             )
             self.assertIn(
                 "会话压缩后恢复",
-                compact_output["hookSpecificOutput"]["additionalContext"],
+                recovery_output["hookSpecificOutput"]["additionalContext"],
             )
 
             async def call_assignment():
@@ -1182,6 +2069,35 @@ class LarkEventsTest(unittest.TestCase):
         self.assertEqual(tools["list_available_tasks"]["properties"], {})
         self.assertEqual(set(tools["get_task"]["properties"]), {"record_id"})
         self.assertEqual(set(tools["claim_task"]["properties"]), {"record_id"})
+        self.assertEqual(
+            set(tools),
+            {
+                "get_assignment",
+                "list_available_tasks",
+                "get_task",
+                "create_task",
+                "update_task",
+                "route_task",
+                "claim_task",
+                "submit_task",
+                "block_task",
+                "review_task",
+                "stop_task_execution",
+                "cancel_task",
+            },
+        )
+        self.assertEqual(
+            set(tools["stop_task_execution"]["properties"]),
+            {"record_id", "reason", "confirmed"},
+        )
+        self.assertEqual(
+            set(tools["submit_task"]["properties"]),
+            {"record_id", "outcome", "result_evidence", "progress", "next_action"},
+        )
+        self.assertEqual(
+            set(tools["review_task"]["properties"]),
+            {"record_id", "decision", "result_evidence", "role", "next_action"},
+        )
 
     def test_mcp_rejects_missing_or_inconsistent_codex_identity(self):
         missing = Mock()
@@ -1223,10 +2139,13 @@ class LarkEventsTest(unittest.TestCase):
             result = teamflow_mcp_server.get_task("recMetadata", context)
 
         self.assertEqual(result["task"]["record_id"], "recMetadata")
+        invocation_id = daemon_request.call_args_list[0].args[0]["invocation_id"]
+        self.assertTrue(invocation_id)
         self.assertEqual(
             daemon_request.call_args_list[0].args[0],
             {
                 "action": "authorize_tool",
+                "invocation_id": invocation_id,
                 "session_id": "session_metadata",
                 "turn_id": "turn_metadata",
                 "tool_name": "mcp__teamflow__get_task",
@@ -1237,10 +2156,48 @@ class LarkEventsTest(unittest.TestCase):
             daemon_request.call_args_list[1].args[0],
             {
                 "action": "invoke_tool",
+                "invocation_id": invocation_id,
                 "grant": "grant_metadata",
                 "tool_name": "get_task",
                 "arguments": {"record_id": "recMetadata"},
             },
+        )
+
+    def test_mcp_retries_the_same_invocation_while_daemon_restarts(self):
+        context = Mock()
+        context.request_context.meta = RequestParams.Meta.model_validate(
+            {
+                "threadId": "session_retry",
+                "x-codex-turn-metadata": json.dumps({
+                    "thread_id": "session_retry",
+                    "turn_id": "turn_retry",
+                }),
+            }
+        )
+        invocation_uuid = "22222222-2222-4222-8222-222222222222"
+        with (
+            patch("core.mcp_server.uuid.uuid4", return_value=invocation_uuid),
+            patch("core.mcp_server.time.sleep"),
+            patch(
+                "core.mcp_server._daemon_request",
+                side_effect=[
+                    FileNotFoundError("daemon.sock"),
+                    {"grant": "grant_retry", "expires_in": 60},
+                    {"ok": True, "assignment": {"agent_id": "agent_retry"}},
+                ],
+            ) as daemon_request,
+        ):
+            result = teamflow_mcp_server.get_assignment(context)
+
+        self.assertEqual(result["assignment"]["agent_id"], "agent_retry")
+        self.assertEqual(daemon_request.call_count, 3)
+        self.assertEqual(
+            daemon_request.call_args_list[1].args[0]["invocation_id"],
+            invocation_uuid,
+        )
+        self.assertEqual(
+            daemon_request.call_args_list[2].args[0]["invocation_id"],
+            invocation_uuid,
         )
 
     def test_codex_delivery_persists_turn_before_completion(self):
@@ -1269,6 +2226,7 @@ class LarkEventsTest(unittest.TestCase):
                 "title": "Persist the turn",
                 "status": "ready",
                 "role": "tl",
+                "description": "Old task snapshot",
             },
             source_event_id="evtTurn",
             source_revision="30",
@@ -1279,6 +2237,8 @@ class LarkEventsTest(unittest.TestCase):
         runtime.active_sessions.add("session_turn")
 
         def complete_turn(thread_id, prompt, *, on_started, stop_event):
+            self.assertIn("Latest task snapshot", prompt)
+            self.assertNotIn("Old task snapshot", prompt)
             on_started("turn_persisted")
             return {
                 "ok": True,
@@ -1293,6 +2253,12 @@ class LarkEventsTest(unittest.TestCase):
         try:
             output = io.StringIO()
             with (
+                patch("core.daemon.get_lark_task", return_value={
+                    "task": {
+                        **json.loads(delivery["after_json"]),
+                        "description": "Latest task snapshot",
+                    }
+                }),
                 patch("core.daemon.run_codex_turn", side_effect=complete_turn),
                 redirect_stdout(output),
             ):
@@ -1310,6 +2276,66 @@ class LarkEventsTest(unittest.TestCase):
         self.assertIsNotNone(saved["started_at"])
         self.assertIsNotNone(saved["completed_at"])
         self.assertIn("transport=codex-ipc", output.getvalue())
+
+    def test_daemon_cancels_delivery_when_live_task_no_longer_targets_the_agent(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_stale', ?, ?, ?, 'tl', 'codex',
+                          'session_stale', 'Stale TL', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+        save_task_snapshot(
+            context,
+            record_id="recStale",
+            task={
+                "record_id": "recStale",
+                "task_id": "TF-STALE",
+                "title": "Stale delivery",
+                "status": "ready",
+                "role": "tl",
+            },
+            source_event_id="evtStale",
+            source_revision="31",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        runtime = TeamFlowDaemon()
+        runtime.active_sessions.add("session_stale")
+        output = io.StringIO()
+        try:
+            with (
+                patch("core.daemon.get_lark_task", return_value={
+                    "task": {
+                        **json.loads(delivery["after_json"]),
+                        "status": "backlog",
+                    }
+                }),
+                patch("core.daemon.run_codex_turn") as run_turn,
+                redirect_stdout(output),
+            ):
+                runtime._execute_task_delivery(context, delivery)
+        finally:
+            runtime.close()
+
+        run_turn.assert_not_called()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, last_error FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(saved["status"], "canceled")
+        self.assertIn("更新的状态事件", saved["last_error"])
+        self.assertIn("DISPATCH NOT-REQUIRED", output.getvalue())
 
     def test_daemon_defers_started_turn_for_reconciliation_when_interrupted(self):
         context = self.context()
@@ -1354,6 +2380,9 @@ class LarkEventsTest(unittest.TestCase):
         try:
             output = io.StringIO()
             with (
+                patch("core.daemon.get_lark_task", return_value={
+                    "task": json.loads(delivery["after_json"])
+                }),
                 patch("core.daemon.run_codex_turn", side_effect=interrupt_turn),
                 redirect_stdout(output),
             ):
@@ -1441,6 +2470,87 @@ class LarkEventsTest(unittest.TestCase):
         self.assertIn("DISPATCH RECOVERED", output.getvalue())
         self.assertIn("turn=turn_restart", output.getvalue())
 
+    def test_daemon_retries_a_completed_turn_with_interrupted_mcp_calls(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_mcp_restart', ?, ?, ?, 'tl', 'codex',
+                          'session_mcp_restart', 'MCP Restart TL', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+        save_task_snapshot(
+            context,
+            record_id="recMcpRestart",
+            task={
+                "record_id": "recMcpRestart",
+                "task_id": "TF-0022",
+                "title": "Retry interrupted MCP work",
+                "status": "ready",
+                "role": "tl",
+            },
+            source_event_id="evtMcpRestart",
+            source_revision="51",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_turn_started(
+            context,
+            delivery_id=delivery["id"],
+            turn_id="turn_mcp_restart",
+        )
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute("UPDATE task_event_deliveries SET next_attempt_at = NULL")
+        runtime = TeamFlowDaemon()
+        try:
+            output = io.StringIO()
+            with (
+                patch("core.daemon.read_codex_thread", return_value={
+                    "turns": [{
+                        "id": "turn_mcp_restart",
+                        "status": "completed",
+                        "items": [{
+                            "type": "mcpToolCall",
+                            "server": "teamflow",
+                            "tool": "get_task",
+                            "status": "failed",
+                            "arguments": {"record_id": "recMcpRestart"},
+                            "result": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": "Error executing tool get_task: [Errno 2] No such file or directory",
+                                }]
+                            },
+                        }],
+                    }]
+                }),
+                redirect_stdout(output),
+            ):
+                runtime._reconcile_task_deliveries(context)
+        finally:
+            runtime.close()
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_id, turn_status, last_error FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (saved["status"], saved["turn_id"], saved["turn_status"]),
+            ("retry", "turn_mcp_restart", "completed"),
+        )
+        self.assertIn("get_task", saved["last_error"])
+        self.assertIn("DISPATCH RETRY", output.getvalue())
+        self.assertNotIn("DISPATCH RECOVERED", output.getvalue())
+
     def test_daemon_fails_a_delivery_when_the_codex_session_was_deleted(self):
         context = self.context()
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
@@ -1476,10 +2586,16 @@ class LarkEventsTest(unittest.TestCase):
         runtime = TeamFlowDaemon()
         runtime.active_sessions.add("session_deleted")
         try:
-            with patch(
-                "core.daemon.run_codex_turn",
-                side_effect=ValueError("no rollout found for thread id session_deleted"),
-            ), redirect_stdout(io.StringIO()):
+            with (
+                patch("core.daemon.get_lark_task", return_value={
+                    "task": json.loads(delivery["after_json"])
+                }),
+                patch(
+                    "core.daemon.run_codex_turn",
+                    side_effect=ValueError("no rollout found for thread id session_deleted"),
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
                 runtime._execute_task_delivery(context, delivery)
         finally:
             runtime.close()

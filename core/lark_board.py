@@ -41,6 +41,20 @@ TASK_KEYS = TASK_FIELD_KEYS
 ACCESS_CHECKS = ("auth", "api", "collaborator", "read", "write", "cleanup")
 TEAMFLOW_APP_SCOPES = (
     "bitable:app",
+    "base:app:read",
+    "base:table:read",
+    "base:table:create",
+    "base:table:update",
+    "base:field:read",
+    "base:field:create",
+    "base:field:update",
+    "base:view:read",
+    "base:view:write_only",
+    "base:record:read",
+    "base:record:retrieve",
+    "base:record:create",
+    "base:record:update",
+    "base:record:delete",
     "docs:event:subscribe",
     "docs:permission.member:auth",
     "docs:permission.member:create",
@@ -326,8 +340,31 @@ class LarkBoardClient:
             data = self._bot("GET", path)
         return _single_record(data.get("record") or data, record_id)
 
-    def upsert_record(self, table_id: str, fields: dict[str, Any], *, record_id: str | None = None) -> dict[str, Any]:
-        if self.user:
+    def upsert_record(
+        self,
+        table_id: str,
+        fields: dict[str, Any],
+        *,
+        record_id: str | None = None,
+        client_token: str | None = None,
+    ) -> dict[str, Any]:
+        if client_token:
+            path = (
+                f"/open-apis/bitable/v1/apps/{self._id(self.base_token)}"
+                f"/tables/{self._id(table_id)}/records"
+            )
+            method = "POST"
+            if record_id:
+                path += f"/{self._id(record_id)}"
+                method = "PUT"
+            request = self._user_api if self.user else self._bot
+            data = request(
+                method,
+                path,
+                query={"client_token": client_token},
+                body={"fields": fields},
+            )
+        elif self.user:
             args = ["--table-id", table_id, "--json", _json(fields)]
             if record_id:
                 args.extend(["--record-id", record_id])
@@ -1088,7 +1125,13 @@ def get_lark_task(workspace: str | None, *, record_id: str) -> dict[str, Any]:
         raise
 
 
-def upsert_lark_task(workspace: str | None, *, task: dict[str, Any], record_id: str | None = None) -> dict[str, Any]:
+def upsert_lark_task(
+    workspace: str | None,
+    *,
+    task: dict[str, Any],
+    record_id: str | None = None,
+    client_token: str | None = None,
+) -> dict[str, Any]:
     unknown = set(task) - TASK_KEYS
     if unknown:
         raise ValueError(f"unsupported task fields: {', '.join(sorted(unknown))}")
@@ -1104,7 +1147,12 @@ def upsert_lark_task(workspace: str | None, *, task: dict[str, Any], record_id: 
     for key, value in task.items():
         payload[fields[key]] = _task_write_value(key, value, option_maps, option_aliases)
     try:
-        result = client.upsert_record(board["table_id"], payload, record_id=record_id)
+        result = client.upsert_record(
+            board["table_id"],
+            payload,
+            record_id=record_id,
+            client_token=client_token,
+        )
         saved_id = str(result.get("record_id") or result.get("id") or record_id or "")
         if not saved_id:
             raise ValueError("Lark did not return the task record ID")

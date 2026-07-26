@@ -25,6 +25,7 @@ from core.db import (
 from core.lark_board import (
     LarkBoardClient,
     LarkRequestError,
+    TEAMFLOW_APP_SCOPES,
     _board_context,
     _ensure_task_fields,
     _items,
@@ -227,7 +228,7 @@ class FakeBoardClient:
             raise ValueError("record read failed")
         return dict(self.records[record_id])
 
-    def upsert_record(self, table_id, fields, *, record_id=None):
+    def upsert_record(self, table_id, fields, *, record_id=None, client_token=None):
         with self.write_counter_lock:
             self.active_writes += 1
             self.max_active_writes = max(self.max_active_writes, self.active_writes)
@@ -510,13 +511,8 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(result["failure_kind"], "missing_scope")
         self.assertEqual(result["checks"]["api"], "failed")
         self.assertEqual(result["checks"]["collaborator"], "blocked")
-        self.assertEqual(result["missing_scopes"], [
-            "bitable:app",
-            "docs:event:subscribe",
-            "docs:permission.member:auth",
-            "docs:permission.member:create",
-            "drive:drive.metadata:readonly",
-        ])
+        self.assertEqual(result["missing_scopes"], sorted(TEAMFLOW_APP_SCOPES))
+        self.assertIn("base:record:update", result["missing_scopes"])
         self.assertEqual(parse_qs(urlparse(result["repair_url"]).query)["q"][0].split(","), result["missing_scopes"])
 
     def test_board_access_does_not_fall_back_from_the_primary_identity(self):
@@ -691,6 +687,72 @@ class LarkBoardTest(unittest.TestCase):
             self.assertEqual(request.call_args_list[0].args[0].get_header("Authorization"), "Bearer tenant-token")
             self.assertEqual(request.call_args_list[1].args[0].get_method(), "POST")
             self.assertIn("/permissions/bascnBot/members?type=bitable", request.call_args_list[1].args[0].full_url)
+        finally:
+            self.client_patch.start()
+
+    def test_idempotent_record_writes_use_the_official_bitable_api(self):
+        board = {
+            "base_token": "bascnToken",
+            "base_url": "https://example.feishu.cn/base/bascnToken",
+        }
+        client_token = "44444444-4444-4444-8444-444444444444"
+        self.client_patch.stop()
+        try:
+            bot = LarkBoardClient(
+                {"auth_mode": "bot", "app_id": "cli_bot", "app_secret": "secret"},
+                board,
+            )
+            with patch.object(
+                bot,
+                "_bot",
+                return_value={"record": {"record_id": "recBot", "fields": {"任务": "Bot"}}},
+            ) as bot_request:
+                created = bot.upsert_record(
+                    "tblTask",
+                    {"任务": "Bot"},
+                    client_token=client_token,
+                )
+            self.assertEqual(created["record_id"], "recBot")
+            bot_request.assert_called_once_with(
+                "POST",
+                "/open-apis/bitable/v1/apps/bascnToken/tables/tblTask/records",
+                query={"client_token": client_token},
+                body={"fields": {"任务": "Bot"}},
+            )
+
+            status = {
+                "appId": "cli_user",
+                "identity": "user",
+                "tokenStatus": "valid",
+                "userOpenId": "ou_user",
+            }
+            with patch("core.lark_board.run_lark_cli_json", return_value=status):
+                user = LarkBoardClient(
+                    {
+                        "auth_mode": "user",
+                        "app_id": "cli_user",
+                        "user_open_id": "ou_user",
+                    },
+                    board,
+                )
+            with patch.object(
+                user,
+                "_user_api",
+                return_value={"record": {"record_id": "recUser", "fields": {"状态": "进行中"}}},
+            ) as user_request:
+                updated = user.upsert_record(
+                    "tblTask",
+                    {"状态": "进行中"},
+                    record_id="recUser",
+                    client_token=client_token,
+                )
+            self.assertEqual(updated["record_id"], "recUser")
+            user_request.assert_called_once_with(
+                "PUT",
+                "/open-apis/bitable/v1/apps/bascnToken/tables/tblTask/records/recUser",
+                query={"client_token": client_token},
+                body={"fields": {"状态": "进行中"}},
+            )
         finally:
             self.client_patch.start()
 

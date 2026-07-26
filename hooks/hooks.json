@@ -1,15 +1,15 @@
 {
   "description": "Inject TeamFlow assignments once and restore them after compaction.",
   "hooks": {
-    "SessionStart": [
+    "PostCompact": [
       {
-        "matcher": "compact",
+        "matcher": "manual|auto",
         "hooks": [
           {
             "type": "command",
             "command": "uv run --project \"${PLUGIN_ROOT}\" --locked python \"${PLUGIN_ROOT}/hooks/user_prompt_submit.py\"",
             "timeout": 60,
-            "statusMessage": "Restoring TeamFlow assignment"
+            "statusMessage": "Preparing TeamFlow context recovery"
           }
         ]
       }

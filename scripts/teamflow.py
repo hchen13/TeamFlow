@@ -31,6 +31,7 @@ from core.daemon import (
 from core.global_db import workspace_enabled
 from core.db import (
     DEFAULT_WORKFLOW_KEY,
+    SCHEMA_VERSION,
     SUPPORTED_HARNESS_TYPES,
     configure_lark_board,
     configure_lark_identity,
@@ -284,6 +285,7 @@ def cmd_inspect_agent_context(args: argparse.Namespace) -> int:
         agent_id=args.agent_id,
         role_key=args.role.strip().lower() if args.role else None,
         session_id=args.session_id,
+        include_evidence=True,
     )
     if args.json:
         print_json({"ok": True, "count": len(contexts), "agents": contexts})
@@ -300,6 +302,12 @@ def cmd_inspect_agent_context(args: argparse.Namespace) -> int:
         print(f"Onboarding: {context['status']}")
         print(f"Last injected: {context['injected_at'] or '-'}")
         print(f"Context fingerprint: {context['context_fingerprint']}")
+        evidence = context.get("evidence") or {}
+        print(f"Codex rollout evidence: {evidence.get('status') or 'not available'}")
+        if evidence.get("status") == "verified":
+            print(f"Evidence kind: {evidence.get('context_kind') or '-'}")
+            print(f"Evidence turn: {evidence.get('turn_id') or '-'}")
+            print(f"Evidence time: {evidence.get('timestamp') or '-'}")
         print("Context:")
         print(context["context"])
     return 0
@@ -735,7 +743,7 @@ def cmd_self_check(args: argparse.Namespace) -> int:
     user_identity = next(identity for identity in result["lark_identities"] if identity["auth_mode"] == "user")
     board = result["lark_board"]
     assert result["initialized"] is True
-    assert result["schema_version"] == "020_agent_context_fingerprint"
+    assert result["schema_version"] == SCHEMA_VERSION
     assert {workflow["key"] for workflow in result["workflows"]} == {DEFAULT_WORKFLOW_KEY, "general-task"}
     assert all(workflow["short_description"] for workflow in result["workflows"])
     assert result["current_workflow"]["key"] == DEFAULT_WORKFLOW_KEY

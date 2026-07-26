@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import time
+import uuid
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .daemon import _daemon_request
+from .daemon import _daemon_request, _tool_input_hash
 
 
 mcp = FastMCP("TeamFlow")
 CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata"
+DAEMON_RECOVERY_TIMEOUT = 60
+DAEMON_RETRY_INTERVAL = 0.25
 
 
 def _request_metadata(context: Context) -> dict[str, Any]:
@@ -55,25 +59,54 @@ def _invoke(
     context: Context,
 ) -> dict[str, Any]:
     caller = _codex_caller(context)
-    authorization = _daemon_request(
-        {
-            "action": "authorize_tool",
-            "session_id": caller["session_id"],
-            "turn_id": caller["turn_id"],
-            "tool_name": f"mcp__teamflow__{tool_name}",
-            "tool_input": arguments,
-        },
-        timeout=30,
-    )
-    return _daemon_request(
-        {
-            "action": "invoke_tool",
-            "grant": authorization["grant"],
-            "tool_name": tool_name,
-            "arguments": arguments,
-        },
-        timeout=30,
-    )
+    invocation_id = str(uuid.uuid4())
+    deadline = time.monotonic() + DAEMON_RECOVERY_TIMEOUT
+    while True:
+        try:
+            authorization = _daemon_request(
+                {
+                    "action": "authorize_tool",
+                    "invocation_id": invocation_id,
+                    "session_id": caller["session_id"],
+                    "turn_id": caller["turn_id"],
+                    "tool_name": f"mcp__teamflow__{tool_name}",
+                    "tool_input": arguments,
+                },
+                timeout=30,
+            )
+        except Exception as error:
+            if _daemon_unavailable(error) and time.monotonic() < deadline:
+                time.sleep(DAEMON_RETRY_INTERVAL)
+                continue
+            raise
+        try:
+            return _daemon_request(
+                {
+                    "action": "invoke_tool",
+                    "invocation_id": invocation_id,
+                    "grant": authorization["grant"],
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                },
+                timeout=30,
+            )
+        except Exception as error:
+            if _daemon_unavailable(error) and time.monotonic() < deadline:
+                time.sleep(DAEMON_RETRY_INTERVAL)
+                continue
+            raise
+
+
+def _daemon_unavailable(error: Exception) -> bool:
+    if isinstance(error, (OSError, TimeoutError)):
+        return True
+    message = str(error).lower()
+    return any(fragment in message for fragment in (
+        "closed the connection without a response",
+        "authorization is missing or expired",
+        "connection refused",
+        "no such file or directory",
+    ))
 
 
 @mcp.tool()
@@ -84,7 +117,7 @@ def get_assignment(context: Context) -> dict[str, Any]:
 
 @mcp.tool()
 def list_available_tasks(context: Context) -> dict[str, Any]:
-    """List Ready tasks that the caller's registered TeamFlow role is allowed to claim."""
+    """List tasks in workflow-defined states that the caller is currently allowed to claim."""
     return _invoke("list_available_tasks", {}, context)
 
 
@@ -96,8 +129,136 @@ def get_task(record_id: str, context: Context) -> dict[str, Any]:
 
 @mcp.tool()
 def claim_task(record_id: str, context: Context) -> dict[str, Any]:
-    """Atomically claim one Ready TeamFlow task for the caller and move it to In Progress."""
+    """Claim one task through the caller's workflow rules. The daemon verifies role, state, and executor identity."""
     return _invoke("claim_task", {"record_id": record_id}, context)
+
+
+@mcp.tool()
+def create_task(
+    title: str,
+    context: Context,
+    task_type: str = "",
+    priority: str = "",
+    role: str = "",
+    description: str = "",
+    additional_context: str = "",
+    acceptance_criteria: str = "",
+    dependencies: str = "",
+) -> dict[str, Any]:
+    """Create a workflow task. The workflow decides who may create it and its required initial state."""
+    return _invoke("create_task", {
+        "title": title,
+        "task_type": task_type,
+        "priority": priority,
+        "role": role,
+        "description": description,
+        "context": additional_context,
+        "acceptance_criteria": acceptance_criteria,
+        "dependencies": dependencies,
+    }, context)
+
+
+@mcp.tool()
+def update_task(
+    record_id: str,
+    fields: dict[str, Any],
+    context: Context,
+) -> dict[str, Any]:
+    """Update ordinary task fields allowed for the caller, current state, and workflow. Lifecycle fields are rejected."""
+    return _invoke("update_task", {"record_id": record_id, "fields": fields}, context)
+
+
+@mcp.tool()
+def route_task(record_id: str, role: str, context: Context) -> dict[str, Any]:
+    """Route a prepared, unblocked, or recoverable task to a role's claimable queue according to the workflow."""
+    return _invoke("route_task", {"record_id": record_id, "role": role}, context)
+
+
+@mcp.tool()
+def submit_task(
+    record_id: str,
+    outcome: str,
+    result_evidence: str,
+    context: Context,
+    progress: str = "",
+    next_action: str = "",
+) -> dict[str, Any]:
+    """Submit claimed work with a workflow-defined outcome and evidence for its next review stage."""
+    return _invoke("submit_task", {
+        "record_id": record_id,
+        "outcome": outcome,
+        "result_evidence": result_evidence,
+        "progress": progress,
+        "next_action": next_action,
+    }, context)
+
+
+@mcp.tool()
+def block_task(
+    record_id: str,
+    waiting_on: str,
+    blocked_reason: str,
+    next_action: str,
+    context: Context,
+    progress: str = "",
+) -> dict[str, Any]:
+    """Block a task with an explicit reason, waiting target, and concrete next action permitted by the workflow."""
+    return _invoke("block_task", {
+        "record_id": record_id,
+        "waiting_on": waiting_on,
+        "blocked_reason": blocked_reason,
+        "next_action": next_action,
+        "progress": progress,
+    }, context)
+
+
+@mcp.tool()
+def review_task(
+    record_id: str,
+    decision: str,
+    result_evidence: str,
+    context: Context,
+    role: str = "",
+    next_action: str = "",
+) -> dict[str, Any]:
+    """Apply a workflow-defined review decision such as approve, rework, or send_to_qa."""
+    return _invoke("review_task", {
+        "record_id": record_id,
+        "decision": decision,
+        "result_evidence": result_evidence,
+        "role": role,
+        "next_action": next_action,
+    }, context)
+
+
+@mcp.tool()
+def stop_task_execution(
+    record_id: str,
+    reason: str,
+    context: Context,
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """Stop the task's current executor turn after workflow authorization and explicit confirmation. This does not cancel the task."""
+    return _invoke("stop_task_execution", {
+        "record_id": record_id,
+        "reason": reason,
+        "confirmed": confirmed,
+    }, context)
+
+
+@mcp.tool()
+def cancel_task(
+    record_id: str,
+    result_evidence: str,
+    context: Context,
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """Cancel a task only after an explicit confirmation and the workflow's cancellation preconditions are satisfied."""
+    return _invoke("cancel_task", {
+        "record_id": record_id,
+        "result_evidence": result_evidence,
+        "confirmed": confirmed,
+    }, context)
 
 
 def run_mcp_server() -> None:

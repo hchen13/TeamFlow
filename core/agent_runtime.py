@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .codex import codex_developer_context_evidence
 from .config import resolve_workspace_paths
 from .db import bootstrap_workspace, connect, now, workspace_id_for_root
 
@@ -46,18 +47,29 @@ def agent_context(
         onboarding_context = render_agent_context(assignment, onboarding=True)
         fingerprint = agent_context_fingerprint(assignment, onboarding_context)
         should_inject = row["context_fingerprint"] != fingerprint
-        context_kind = "onboarding" if should_inject else "recovery" if refresh else None
+        recovery_pending = (
+            should_inject
+            and row["context_fingerprint"] is None
+            and bool(row["context_injected_at"])
+        )
+        context_kind = "recovery" if recovery_pending or refresh else "onboarding" if should_inject else None
         return {
             "assignment": assignment,
             "context_fingerprint": fingerprint,
             "context_kind": context_kind,
-            "context_status": "pending" if should_inject else "injected",
+            "context_status": (
+                "recovery_pending"
+                if recovery_pending
+                else "pending"
+                if should_inject
+                else "injected"
+            ),
             "context_injected_at": row["context_injected_at"],
             "additional_context": (
                 render_agent_context(
                     assignment,
-                    onboarding=should_inject,
-                    recovery=refresh and not should_inject,
+                    onboarding=context_kind == "onboarding",
+                    recovery=context_kind == "recovery",
                 )
                 if consume and (should_inject or refresh)
                 else None
@@ -123,6 +135,46 @@ def confirm_agent_context(
         }
 
 
+def mark_agent_context_recovery_pending(
+    workspace: str | None,
+    *,
+    agent_id: str,
+    session_id: str,
+    assignment_revision: int,
+) -> dict[str, Any]:
+    paths = resolve_workspace_paths(workspace)
+    if not paths.db_path.exists():
+        return {"marked": False}
+    with connect(paths.db_path) as conn:
+        bootstrap_workspace(conn)
+        workspace_id = workspace_id_for_root(conn, paths.root)
+        cursor = conn.execute(
+            """
+            UPDATE agents
+            SET context_fingerprint = NULL
+            WHERE id = ? AND workspace_id = ? AND harness_type = 'codex'
+              AND session_id = ? AND assignment_revision = ?
+              AND context_injected_at IS NOT NULL
+            """,
+            (
+                agent_id,
+                workspace_id,
+                session_id,
+                assignment_revision,
+            ),
+        )
+        if cursor.rowcount != 1:
+            return {"marked": False}
+        row = conn.execute(
+            f"{AGENT_CONTEXT_QUERY} WHERE agent.id = ?",
+            (agent_id,),
+        ).fetchone()
+        return {
+            "marked": True,
+            "assignment": assignment_from_row(row, paths.root),
+        }
+
+
 def find_agent_assignment(
     workspaces: list[str],
     *,
@@ -162,6 +214,7 @@ def inspect_agent_contexts(
     agent_id: str | None = None,
     role_key: str | None = None,
     session_id: str | None = None,
+    include_evidence: bool = False,
 ) -> list[dict[str, Any]]:
     paths = resolve_workspace_paths(workspace)
     if not paths.db_path.exists():
@@ -190,19 +243,40 @@ def inspect_agent_contexts(
         assignment = assignment_from_row(row, paths.root)
         context = render_agent_context(assignment, onboarding=True)
         fingerprint = agent_context_fingerprint(assignment, context)
-        contexts.append({
+        status = (
+            "injected"
+            if row["context_fingerprint"] == fingerprint
+            else "recovery_pending"
+            if row["context_fingerprint"] is None and row["context_injected_at"]
+            else "pending"
+        )
+        item = {
             "agent_id": assignment["agent_id"],
             "agent_name": assignment["agent_name"],
             "role_key": assignment["role_key"],
             "role_name": assignment["role_name"],
             "session_id": assignment["session_id"],
             "assignment_revision": assignment["assignment_revision"],
-            "status": "injected" if row["context_fingerprint"] == fingerprint else "pending",
+            "status": status,
             "context": context,
             "context_fingerprint": fingerprint,
             "injected_fingerprint": row["context_fingerprint"],
             "injected_at": row["context_injected_at"],
-        })
+        }
+        if include_evidence and row["context_injected_at"]:
+            item["evidence"] = codex_developer_context_evidence(
+                assignment["session_id"],
+                {
+                    "onboarding": context,
+                    "recovery": render_agent_context(
+                        assignment,
+                        onboarding=False,
+                        recovery=True,
+                    ),
+                },
+                injected_at=row["context_injected_at"],
+            )
+        contexts.append(item)
     return contexts
 
 

@@ -2117,7 +2117,8 @@ button.accessCheck.failed:focus-visible {
   line-height: 1.2;
 }
 
-.agentOnboardingBadge.pending {
+.agentOnboardingBadge.pending,
+.agentOnboardingBadge.recovery_pending {
   border-color: #d7b684;
   background: #fff8eb;
   color: #7f581f;

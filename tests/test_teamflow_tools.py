@@ -1,0 +1,579 @@
+from __future__ import annotations
+
+import unittest
+from copy import deepcopy
+from pathlib import Path
+from unittest.mock import patch
+
+from core.teamflow_tools import (
+    block_task,
+    cancel_task,
+    claim_task,
+    create_task,
+    prepare_runtime_action,
+    review_task,
+    route_task,
+    submit_task,
+    update_task,
+    workflow_contract,
+)
+from core.workflow import (
+    load_workflow_definition,
+    task_option_definitions,
+    validate_workflow_definition,
+)
+
+
+def assignment(role: str, agent: str) -> dict[str, object]:
+    return {
+        "agent_id": agent,
+        "agent_name": f"{role.upper()} Agent",
+        "workspace_root": "/workspace",
+        "workflow_key": "software-development",
+        "role_key": role,
+    }
+
+
+class FakeTaskBoard:
+    def __init__(self, task: dict[str, object] | None = None):
+        self.task = deepcopy(task) if task else None
+        self.client_tokens: list[str | None] = []
+
+    def read(self, workspace: str, *, record_id: str) -> dict[str, object]:
+        if self.task is None or self.task["record_id"] != record_id:
+            raise ValueError("task not found")
+        return {"ok": True, "task": deepcopy(self.task)}
+
+    def write(
+        self,
+        workspace: str,
+        *,
+        task: dict[str, object],
+        record_id: str | None = None,
+        client_token: str | None = None,
+    ) -> dict[str, object]:
+        self.client_tokens.append(client_token)
+        if record_id is None:
+            self.task = {
+                "record_id": "recFlow",
+                "task_id": "TF-0001",
+                "agent": None,
+                "agent_id": None,
+                "progress": None,
+                "next_action": None,
+                "result_evidence": None,
+                "blocked_reason": None,
+                "waiting_on": None,
+                **task,
+            }
+        else:
+            if self.task is None or self.task["record_id"] != record_id:
+                raise ValueError("task not found")
+            self.task.update(task)
+        return {"ok": True, "task": deepcopy(self.task)}
+
+    def patches(self):
+        return (
+            patch("core.teamflow_tools.get_lark_task", side_effect=self.read),
+            patch("core.teamflow_tools.upsert_lark_task", side_effect=self.write),
+        )
+
+
+class WorkflowActionTest(unittest.TestCase):
+    def setUp(self):
+        self.pm = assignment("pm", "agent_pm")
+        self.tl = assignment("tl", "agent_tl")
+        self.qa = assignment("qa", "agent_qa")
+
+    def test_definition_drives_statuses_dispatch_and_actions(self):
+        definition = load_workflow_definition("software-development")
+        statuses = {
+            item["key"]: item
+            for item in task_option_definitions(definition)["status"]
+        }
+
+        self.assertEqual(definition["schema_version"], 2)
+        self.assertEqual(
+            set(definition["lifecycle"]["actions"]),
+            {"create", "update", "route", "claim", "submit", "block", "review", "cancel"},
+        )
+        self.assertEqual(statuses["ready"]["labels"]["zh-CN"], "可执行")
+        states = {
+            state["key"]: state["dispatch"]
+            for state in definition["lifecycle"]["states"]
+        }
+        self.assertEqual(states["ready"], "task_role")
+        self.assertEqual(states["review"], "coordinator")
+        self.assertEqual(states["done"], "none")
+
+        tl_contract = workflow_contract(self.tl)
+        tl_actions = {
+            action["action"]: action
+            for action in tl_contract["actions"]
+        }
+        self.assertNotIn("create", tl_actions)
+        self.assertNotIn("route", tl_actions)
+        self.assertNotIn("review", tl_actions)
+        self.assertNotIn("cancel", tl_actions)
+        self.assertEqual(
+            tl_actions["submit"]["options"][0]["allowed_values"],
+            {},
+        )
+
+        pm_contract = workflow_contract(self.pm)
+        pm_actions = {
+            action["action"]: action
+            for action in pm_contract["actions"]
+        }
+        self.assertEqual(
+            pm_actions["route"]["options"][0]["allowed_values"]["role"],
+            ["pm", "tl", "qa", "design"],
+        )
+        self.assertTrue(
+            pm_actions["cancel"]["options"][0]["confirmation_required"]
+        )
+        self.assertEqual(
+            pm_contract["runtime_actions"],
+            [{
+                "action": "stop_execution",
+                "tool": "stop_task_execution",
+                "name": "停止执行",
+                "states": ["in_progress"],
+                "required_fields": ["reason"],
+                "required_task_fields": ["agent_id"],
+                "confirmation_required": True,
+                "runtime_facts": ["execution_stopped"],
+            }],
+        )
+        self.assertEqual(tl_contract["runtime_actions"], [])
+
+    def test_definition_rejects_terminal_sources_and_protected_defaults(self):
+        path = Path("/tmp/software-development/workflow.json")
+        terminal_source = deepcopy(load_workflow_definition("software-development"))
+        terminal_source["lifecycle"]["actions"]["route"]["rules"][0]["from"] = ["done"]
+        with self.assertRaisesRegex(ValueError, "cannot leave a terminal state"):
+            validate_workflow_definition(terminal_source, path)
+
+        protected_default = deepcopy(load_workflow_definition("software-development"))
+        protected_default["lifecycle"]["actions"]["create"]["rules"][0]["defaults"]["status"] = "backlog"
+        with self.assertRaisesRegex(ValueError, "contains a protected field"):
+            validate_workflow_definition(protected_default, path)
+
+        unsupported_runtime_input = deepcopy(
+            load_workflow_definition("software-development")
+        )
+        unsupported_runtime_input["runtime_actions"]["stop_execution"][
+            "required_inputs"
+        ].append("unsupported")
+        with self.assertRaisesRegex(ValueError, "required_inputs is invalid"):
+            validate_workflow_definition(unsupported_runtime_input, path)
+
+        missing_dispatch_instruction = deepcopy(
+            load_workflow_definition("software-development")
+        )
+        del next(
+            state
+            for state in missing_dispatch_instruction["lifecycle"]["states"]
+            if state["key"] == "ready"
+        )["dispatch_instructions"]
+        with self.assertRaisesRegex(ValueError, "dispatch_instructions"):
+            validate_workflow_definition(missing_dispatch_instruction, path)
+
+    def test_complete_software_delivery_flow(self):
+        board = FakeTaskBoard()
+        read, write = board.patches()
+        with read, write:
+            created = create_task(
+                self.pm,
+                title="实现排序算法",
+                task_type="development",
+                priority="P1",
+                description="在临时目录中实现排序算法。",
+                acceptance_criteria="测试覆盖空数组、重复值和逆序输入。",
+            )
+            self.assertTrue(created["ok"])
+            self.assertEqual(created["task"]["status"], "backlog")
+            self.assertEqual(created["task"]["role"], "tl")
+
+            routed = route_task(self.pm, record_id="recFlow", role="tl")
+            self.assertEqual(routed["transition"], {"from": "backlog", "to": "ready"})
+
+            claimed = claim_task(self.tl, record_id="recFlow")
+            self.assertEqual(claimed["transition"], {"from": "ready", "to": "in_progress"})
+            self.assertEqual(claimed["task"]["agent_id"], "agent_tl")
+
+            submitted = submit_task(
+                self.tl,
+                record_id="recFlow",
+                outcome="completed",
+                result_evidence="实现完成，单元测试通过。",
+            )
+            self.assertEqual(submitted["transition"], {"from": "in_progress", "to": "review"})
+
+            qa_routed = review_task(
+                self.pm,
+                record_id="recFlow",
+                decision="send_to_qa",
+                result_evidence="代码评审通过，转 QA 验证。",
+                next_action="执行验收测试。",
+            )
+            self.assertEqual(qa_routed["task"]["status"], "ready")
+            self.assertEqual(qa_routed["task"]["role"], "qa")
+            self.assertIsNone(qa_routed["task"]["agent_id"])
+
+            qa_claimed = claim_task(self.qa, record_id="recFlow")
+            self.assertEqual(qa_claimed["task"]["agent_id"], "agent_qa")
+
+            qa_submitted = submit_task(
+                self.qa,
+                record_id="recFlow",
+                outcome="passed",
+                result_evidence="验收用例全部通过。",
+            )
+            self.assertEqual(qa_submitted["task"]["status"], "review")
+
+            completed = review_task(
+                self.pm,
+                record_id="recFlow",
+                decision="approve",
+                result_evidence="PM 确认验收通过。",
+            )
+            self.assertEqual(completed["task"]["status"], "done")
+            self.assertEqual(completed["available_actions"], [])
+
+    def test_errors_are_structured_and_actionable(self):
+        board = FakeTaskBoard({
+            "record_id": "recRules",
+            "task_id": "TF-0002",
+            "title": "规则校验",
+            "status": "backlog",
+            "type": None,
+            "priority": "P2",
+            "role": "tl",
+            "description": None,
+            "acceptance_criteria": None,
+            "agent": None,
+            "agent_id": None,
+        })
+        read, write = board.patches()
+        with read, write:
+            denied = route_task(self.tl, record_id="recRules", role="tl")
+            self.assertFalse(denied["ok"])
+            self.assertEqual(denied["error"]["category"], "permission")
+            self.assertEqual(denied["error"]["code"], "permission_denied")
+
+            incomplete = route_task(self.pm, record_id="recRules", role="tl")
+            self.assertFalse(incomplete["ok"])
+            self.assertEqual(incomplete["error"]["code"], "task_not_ready")
+            self.assertEqual(
+                set(incomplete["error"]["details"]["missing_task_fields"]),
+                {"type", "description", "acceptance_criteria"},
+            )
+            self.assertFalse(incomplete["error"]["retryable"])
+            self.assertIn("update_task", incomplete["error"]["message"])
+
+    def test_claim_is_idempotent_and_role_is_enforced(self):
+        board = FakeTaskBoard(self._ready_task())
+        read, write = board.patches()
+        with read, write:
+            wrong_role = claim_task(self.qa, record_id="recReady")
+            self.assertEqual(wrong_role["error"]["code"], "permission_denied")
+
+            first = claim_task(self.tl, record_id="recReady")
+            second = claim_task(self.tl, record_id="recReady")
+            self.assertTrue(first["ok"])
+            self.assertTrue(second["ok"])
+            self.assertTrue(second["already_applied"])
+            self.assertEqual(second["task"]["agent_id"], "agent_tl")
+
+    def test_submit_outcomes_and_block_targets_follow_role_rules(self):
+        board = FakeTaskBoard({
+            **self._ready_task(),
+            "status": "in_progress",
+            "agent": "TL Agent",
+            "agent_id": "agent_tl",
+        })
+        read, write = board.patches()
+        with read, write:
+            wrong_outcome = submit_task(
+                self.tl,
+                record_id="recReady",
+                outcome="passed",
+                result_evidence="不应接受。",
+            )
+            self.assertEqual(wrong_outcome["error"]["code"], "permission_denied")
+
+            invalid_outcome = submit_task(
+                self.tl,
+                record_id="recReady",
+                outcome="unknown",
+                result_evidence="不应接受。",
+            )
+            self.assertEqual(invalid_outcome["error"]["code"], "invalid_option")
+            self.assertEqual(
+                invalid_outcome["error"]["details"]["allowed_options"],
+                ["completed"],
+            )
+
+            wrong_waiting_target = block_task(
+                self.tl,
+                record_id="recReady",
+                waiting_on="stakeholder",
+                blocked_reason="需求不明确。",
+                next_action="确认需求。",
+            )
+            self.assertEqual(wrong_waiting_target["error"]["code"], "invalid_value")
+            self.assertEqual(
+                wrong_waiting_target["error"]["details"]["allowed_values"],
+                {"waiting_on": ["pm"]},
+            )
+
+            blocked = block_task(
+                self.tl,
+                record_id="recReady",
+                waiting_on="pm",
+                blocked_reason="需求不明确。",
+                next_action="请 PM 明确边界。",
+            )
+            self.assertTrue(blocked["ok"])
+            self.assertEqual(blocked["task"]["status"], "blocked")
+
+    def test_qa_outcome_is_persisted_and_idempotent_without_cross_matching(self):
+        board = FakeTaskBoard({
+            **self._ready_task(),
+            "status": "in_progress",
+            "role": "qa",
+            "agent": "QA Agent",
+            "agent_id": "agent_qa",
+        })
+        read, write = board.patches()
+        with read, write:
+            passed = submit_task(
+                self.qa,
+                record_id="recReady",
+                outcome="passed",
+                result_evidence="全部验收用例通过。",
+            )
+            repeated = submit_task(
+                self.qa,
+                record_id="recReady",
+                outcome="passed",
+                result_evidence="全部验收用例通过。",
+            )
+            opposite = submit_task(
+                self.qa,
+                record_id="recReady",
+                outcome="failed",
+                result_evidence="全部验收用例通过。",
+            )
+
+        self.assertEqual(
+            passed["task"]["result_evidence"],
+            "QA 结论：通过（Passed）\n全部验收用例通过。",
+        )
+        self.assertTrue(repeated["already_applied"])
+        self.assertEqual(opposite["error"]["code"], "invalid_state")
+
+    def test_whitespace_only_required_input_is_rejected(self):
+        board = FakeTaskBoard()
+        read, write = board.patches()
+        with read, write:
+            result = create_task(self.pm, title="   ")
+
+        self.assertEqual(result["error"]["code"], "missing_fields")
+        self.assertEqual(result["error"]["details"]["missing_fields"], ["title"])
+
+    def test_stop_execution_rule_requires_pm_confirmation_and_in_progress_task(self):
+        task = {
+            **self._ready_task(),
+            "status": "in_progress",
+            "agent": "TL Agent",
+            "agent_id": "agent_tl",
+        }
+        unconfirmed = prepare_runtime_action(
+            self.pm,
+            action_key="stop_execution",
+            task=task,
+            payload={"reason": "需求撤销"},
+            confirmed=False,
+        )
+        wrong_role = prepare_runtime_action(
+            self.tl,
+            action_key="stop_execution",
+            task=task,
+            payload={"reason": "需求撤销"},
+            confirmed=True,
+        )
+        allowed = prepare_runtime_action(
+            self.pm,
+            action_key="stop_execution",
+            task=task,
+            payload={"reason": "需求撤销"},
+            confirmed=True,
+        )
+
+        self.assertEqual(unconfirmed["error"]["code"], "confirmation_required")
+        self.assertEqual(wrong_role["error"]["code"], "permission_denied")
+        self.assertTrue(allowed["ok"])
+        self.assertEqual(allowed["runtime_facts"], ["execution_stopped"])
+
+    def test_lifecycle_fields_and_terminal_states_cannot_be_bypassed(self):
+        board = FakeTaskBoard(self._ready_task())
+        read, write = board.patches()
+        with read, write:
+            bypass = update_task(
+                self.pm,
+                record_id="recReady",
+                fields={"status": "done", "agent_id": "forged"},
+            )
+            self.assertEqual(bypass["error"]["code"], "invalid_fields")
+            self.assertEqual(
+                set(bypass["error"]["details"]["invalid_fields"]),
+                {"status", "agent_id"},
+            )
+            invalid_current_state_field = update_task(
+                self.pm,
+                record_id="recReady",
+                fields={"waiting_on": "stakeholder"},
+            )
+            self.assertEqual(invalid_current_state_field["error"]["code"], "invalid_fields")
+
+            board.task["status"] = "done"
+            reopen = route_task(self.pm, record_id="recReady", role="tl")
+            self.assertEqual(reopen["error"]["code"], "invalid_state")
+            self.assertEqual(reopen["error"]["available_actions"], [])
+
+    def test_cancel_requires_confirmation_and_stopped_execution(self):
+        board = FakeTaskBoard({
+            **self._ready_task(),
+            "status": "in_progress",
+            "agent": "TL Agent",
+            "agent_id": "agent_tl",
+        })
+        read, write = board.patches()
+        with read, write:
+            unconfirmed = cancel_task(
+                self.pm,
+                record_id="recReady",
+                result_evidence="需求撤销，已安排收尾。",
+                confirmed=False,
+            )
+            self.assertEqual(unconfirmed["error"]["code"], "confirmation_required")
+
+            active = cancel_task(
+                self.pm,
+                record_id="recReady",
+                result_evidence="需求撤销，已安排收尾。",
+                confirmed=True,
+            )
+            self.assertEqual(active["error"]["code"], "precondition_failed")
+            self.assertEqual(
+                active["error"]["details"]["missing_preconditions"],
+                ["execution_stopped"],
+            )
+
+            stopped = cancel_task(
+                self.pm,
+                record_id="recReady",
+                result_evidence="需求撤销，已安排收尾。",
+                confirmed=True,
+                runtime_facts={"execution_stopped"},
+            )
+            self.assertTrue(stopped["ok"])
+            self.assertEqual(stopped["task"]["status"], "canceled")
+
+    def test_update_preserves_current_state_invariants(self):
+        board = FakeTaskBoard(self._ready_task())
+        read, write = board.patches()
+        with read, write:
+            incomplete_ready = update_task(
+                self.pm,
+                record_id="recReady",
+                fields={"acceptance_criteria": ""},
+            )
+            self.assertEqual(incomplete_ready["error"]["code"], "task_not_ready")
+            self.assertEqual(
+                incomplete_ready["error"]["details"]["missing_task_fields"],
+                ["acceptance_criteria"],
+            )
+
+            board.task.update({
+                "status": "blocked",
+                "blocked_reason": "等待决策",
+                "waiting_on": "stakeholder",
+                "next_action": "请项目决策人确认。",
+            })
+            incomplete_blocked = update_task(
+                self.pm,
+                record_id="recReady",
+                fields={"blocked_reason": ""},
+            )
+            self.assertEqual(incomplete_blocked["error"]["code"], "task_not_ready")
+            self.assertEqual(
+                incomplete_blocked["error"]["details"]["missing_task_fields"],
+                ["blocked_reason"],
+            )
+
+    def test_mutation_aborts_when_the_task_changes_before_write(self):
+        original = self._ready_task()
+        changed = {**original, "status": "done", "result_evidence": "由人工完成。"}
+        with (
+            patch(
+                "core.teamflow_tools.get_lark_task",
+                side_effect=[
+                    {"ok": True, "task": deepcopy(original)},
+                    {"ok": True, "task": deepcopy(changed)},
+                ],
+            ),
+            patch("core.teamflow_tools.upsert_lark_task") as write,
+        ):
+            result = claim_task(self.tl, record_id="recReady")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["category"], "conflict")
+        self.assertEqual(result["error"]["code"], "task_changed")
+        self.assertTrue(result["error"]["retryable"])
+        self.assertEqual(result["error"]["current_state"], "done")
+        self.assertIn("status", result["error"]["details"]["changed_fields"])
+        write.assert_not_called()
+
+    def test_mutation_forwards_the_invocation_as_lark_idempotency_token(self):
+        board = FakeTaskBoard(self._ready_task())
+        read, write = board.patches()
+        invocation_id = "33333333-3333-4333-8333-333333333333"
+        with read, write:
+            result = claim_task(
+                self.tl,
+                record_id="recReady",
+                invocation_id=invocation_id,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(board.client_tokens, [invocation_id])
+
+    @staticmethod
+    def _ready_task() -> dict[str, object]:
+        return {
+            "record_id": "recReady",
+            "task_id": "TF-0003",
+            "title": "可执行任务",
+            "status": "ready",
+            "type": "development",
+            "priority": "P1",
+            "role": "tl",
+            "description": "实现功能。",
+            "acceptance_criteria": "测试通过。",
+            "context": None,
+            "dependencies": None,
+            "progress": None,
+            "next_action": None,
+            "result_evidence": None,
+            "blocked_reason": None,
+            "waiting_on": None,
+            "agent": None,
+            "agent_id": None,
+        }
+
+
+if __name__ == "__main__":
+    unittest.main()

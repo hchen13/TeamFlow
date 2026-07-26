@@ -42,7 +42,7 @@
 | 负责人 | 当前阶段由哪一种职能负责，也是正常任务分派队列 | 是 |
 | 执行智能体 | 当前或最近执行该阶段的具体已注册智能体 | 是 |
 | 等待对象 | 任务已阻塞时，解除阻塞需要谁提供决定 | 仅阻塞时使用 |
-| 飞书身份 | 智能体操作飞书时使用的用户或应用身份 | 智能体配置，不是任务字段 |
+| 看板主身份 | TeamFlow 访问当前看板时统一使用的用户或应用身份 | 看板级配置 |
 
 ### 3.1 任务类型与负责人
 
@@ -337,13 +337,10 @@ PM 向项目决策人提问时，应给出：
 
 ## 10. 智能体与飞书身份
 
-- 每个智能体可以绑定一个 `lark_identity_id`。
-- 多个智能体可以共用同一个飞书身份。
-- 智能体有显式绑定时，使用绑定身份操作飞书。
-- 未绑定时，使用当前看板的主身份。
-- 新建看板时，创建身份自动成为主身份；使用已有看板时，优先识别并绑定所有者，无法识别时由用户明确选择具有管理权限的身份并完成看板监听验证。
-- 飞书身份不写入每张任务卡；真实操作者由飞书修改历史留痕。
-- 智能体绑定的身份必须已经通过当前看板的访问验证，否则系统不应开始执行写操作。
+- 每个看板只绑定一个已经通过访问和监听验证的主身份，所有 TeamFlow 飞书读写都使用该身份。
+- 新建看板时，创建身份自动成为主身份；使用已有看板时，优先识别所有者，无法识别时由用户明确选择具有管理权限的身份并完成看板监听验证。
+- Agent 不需要分别配置飞书身份。MCP 从可信调用上下文识别 `agent_id` 和 `session_id`，任务的执行智能体字段与飞书字段历史共同保留操作线索。
+- 当前不增加“最后操作 Agent”一类高频覆盖字段；需要更完整的动作审计时，应独立设计审计记录，而不是把 Agent 身份伪装成飞书协作者身份。
 
 ## 11. 协作模式包
 
@@ -366,8 +363,8 @@ core/
 
 | 层级 | 组成 | 职责 |
 | --- | --- | --- |
-| 定义源 | 通用核心 | 定义公共状态、优先级、基础字段和基础流转规则 |
-| 定义源 | `workflow.json` | 定义当前协作模式特有的负责人、任务类型、字段扩展、必填条件和机器策略 |
+| 定义源 | 通用核心 | 定义公共任务字段、业务动作类型、调用者身份语义和规则执行器 |
+| 定义源 | `workflow.json` | 定义当前协作模式的负责人、任务类型、状态、事件路由、动作规则、字段约束和机器策略 |
 | 定义源 | `SKILL.md` | 定义 PM、技术负责人、QA、设计如何工作和交付 |
 | 项目投影 | SQLite | 保存插件定义在当前项目中的查询投影，以及当前选择、智能体注册和身份绑定等实例状态 |
 | 任务事实源 | 飞书多维表格 | 保存具体任务、业务状态、进展和证据 |
@@ -379,71 +376,57 @@ SQLite 和飞书多维表格都不是协作模式定义源。一个协作模式�
 
 不建立 `BaseWorkflow -> SoftwareDevelopmentWorkflow` 的子类体系。当前差异可以通过声明式定义表达；只有未来出现无法声明表达的真实需求时，才考虑增加小型扩展点。
 
-### 11.1 `workflow.json` V1 结构
+### 11.1 `workflow.json` V2 结构
 
-V1 合约已经固定，完整内置定义见 [`skills/software-development/workflow.json`](../../skills/software-development/workflow.json)。根对象包含以下字段：
+V2 合约已经固定，完整内置定义见 [`skills/software-development/workflow.json`](../../skills/software-development/workflow.json)。除负责人、任务类型和任务字段契约外，`lifecycle` 是 MCP 和后台调度程序共同读取的状态机定义：
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "key": "software-development",
-  "labels": {
-    "zh-CN": "软件开发",
-    "en": "Software development"
-  },
-  "short_descriptions": {
-    "zh-CN": "由 PM、技术负责人、QA 和设计共同完成规划、实现、评审与验证。",
-    "en": "Plan, build, review, and verify software work with PM, Technical Lead, QA, and Design."
-  },
   "coordinator_role": "pm",
-  "roles": [
-    {
-      "key": "pm",
-      "labels": {
-        "zh-CN": "PM",
-        "en": "PM"
-      },
-      "descriptions": {
-        "zh-CN": "负责范围、优先级、验收标准、任务路由、最终评审和项目决策人沟通。",
-        "en": "Owns scope, priority, acceptance criteria, task routing, final review, and stakeholder alignment."
-      },
-      "allow_multiple": false
-    }
-  ],
-  "task_types": [
-    {
-      "key": "development",
-      "labels": {
-        "zh-CN": "开发",
-        "en": "Development"
-      },
-      "descriptions": {
-        "zh-CN": "完成实现、重构或技术改造。",
-        "en": "Implements, refactors, or performs technical changes."
-      },
-      "default_role": "tl"
-    }
-  ],
-  "task_schema": {
-    "base": "teamflow-task-v1",
-    "required_for_ready": [
-      "description",
-      "acceptance_criteria",
-      "priority",
-      "role"
+  "lifecycle": {
+    "initial_state": "backlog",
+    "terminal_states": ["done", "canceled"],
+    "states": [
+      {
+        "key": "ready",
+        "labels": {"zh-CN": "可执行", "en": "Ready"},
+        "color": {"hue": "Blue", "lightness": "Lighter"},
+        "dispatch": "task_role",
+        "dispatch_instructions": {
+          "zh-CN": "这是一项等待认领的可执行任务……",
+          "en": "This task is ready to be claimed..."
+        }
+      }
     ],
-    "task_id": {
-      "sequence_length": 4
+    "actions": {
+      "claim": {
+        "labels": {"zh-CN": "认领任务", "en": "Claim task"},
+        "rules": [
+          {
+            "key": "claim",
+            "labels": {"zh-CN": "认领执行", "en": "Claim for execution"},
+            "actors": ["task_role"],
+            "from": ["ready"],
+            "to": "in_progress",
+            "actor_fields": {
+              "agent": "agent_name",
+              "agent_id": "agent_id"
+            }
+          }
+        ]
+      }
     }
-  },
-  "policies": {
-    "review_role": "pm",
-    "stakeholder_escalation_role": "pm"
   }
 }
 ```
 
-通用加载器校验目录名与 `key` 一致、双语名称完整、稳定标识唯一、负责人引用有效，以及自动编号长度在飞书支持范围内。V1 不接受表达式语言、Python 钩子或动态脚本字段。
+完整定义必须包含 `create`、`update`、`route`、`claim`、`submit`、`block`、`review` 和 `cancel` 八类业务动作。每条规则声明来源状态、目标状态、合法调用者、职责范围、可写字段、必填输入、任务前置字段、固定或清理字段、合法字段值和运行时前置条件。需要派发的状态还必须提供双语 `dispatch_instructions`，后台调度程序直接读取该内容，不按软件开发状态名写死提示。
+
+不直接改变看板状态的操作写入 `runtime_actions`。当前 `stop_execution` 声明只有协调负责人能在任务处于进行中时，经显式确认后停止执行，并产出 `execution_stopped` 运行时事实。它由通用 MCP 工具 `stop_task_execution` 执行，不在 Python 中硬编码软件开发职责或状态名。
+
+通用加载器校验目录名与 `key` 一致、双语名称完整、稳定标识唯一、所有引用有效、终态不可流出，以及规则字段和调用者语义合法。MCP 只提交业务动作和参数；通用执行器读取当前卡片后选择规则、校验权限与状态、执行写入，并在失败时返回当前状态、失败原因和合法下一步。V2 不接受表达式语言、Python 钩子或动态脚本字段。
 
 
 ## 12. 数据库投影与启动同步
@@ -491,7 +474,7 @@ V1 合约已经固定，完整内置定义见 [`skills/software-development/work
 - `roles`：协作模式下的负责人、中英文名称、是否允许多个智能体、协调负责人标记。
 - `task_types`：协作模式下的任务类型、中英文名称及默认负责人。
 - `workspaces.current_workflow_id`：当前项目选择。
-- `agents`：项目实际注册的智能体、负责人、会话和飞书身份绑定。
+- `agents`：项目实际注册的智能体、负责人、会话和职责上下文状态。
 
 长篇负责人职责不进入数据库，而是随技能文件发布。
 
@@ -591,6 +574,17 @@ revision 63: 可执行 -> 已阻塞      => 新的 blocked_entered
 无法将 agent_x 分配给 QA：该智能体注册在技术负责人名下。
 无法将等待对象设为项目决策人：只有当前协作模式的协调负责人可以升级给项目决策人。
 ```
+
+### 15.1 执行一致性与反馈
+
+- 每次 MCP 变更使用同一个标准 UUID 调用标识完成后台重试，并将该标识作为飞书记录写入的 `client_token`。即使后台调度程序在响应前重启，同一次创建或更新也不能形成两次远端写入。
+- 同一工作区的 MCP 变更串行执行。规则匹配后、实际写入前必须重新读取当前卡片；如果状态、负责人或其他字段已经变化，操作以可重试的冲突错误结束，不覆盖人类或其他 Agent 的新修改。
+- 飞书记录接口没有向调用方暴露单条记录版本的条件写入参数。因此当前实现使用写入前复核，并保留飞书接口默认的一致性检查；调用方收到冲突时必须重新调用 `get_task`，不能基于旧快照继续提交。
+- 后台调度程序派发前直接从飞书重新读取当前卡片，并使用最新快照重建提示词；状态或目标职责已经变化时取消旧投递。卡片离开后重新进入可派发状态会形成新事件；普通字段更新不会重复派发；可执行状态下负责人变化时，旧目标派发失效并按新负责人重新路由。
+- 当前项目数据库只为每张进行中任务保留一条执行控制记录，不保存高频 MCP 调用流水。记录绑定执行 Agent、Session 和精确的 Codex turn；`stop_task_execution` 只允许中断该 turn，不能退化为中断 Session 中的其他工作。确认 turn 已停止后，记录转为停止状态；执行 Agent 后续在新的 turn 中继续通过 TeamFlow 工具处理该任务时，记录会原位更新为新的活动执行。停止事实只证明执行已停止，不代表任务已经取消，也不替 PM 决定回滚方案。
+- `stop_task_execution` 使用独立的任务执行控制锁，等待 Codex turn 停止时不会占用工作区的看板写入锁。停止后仍会重新读取卡片并核对执行记录；任务状态、执行 Agent 或目标 turn 同时变化时返回冲突，不签发可用于取消的停止事实。
+- QA 的 `passed` 与 `failed` 结论以稳定的双语前缀写入“结果与证据”，让看板历史和幂等重试都能区分两种结果。
+- 成功结果必须返回实际采用的规则、状态变化、最新卡片和当前可执行动作。失败结果必须返回稳定错误码、当前状态、失败字段或前置条件、是否可重试，以及调用者当前允许的动作。
 
 ## 16. 中英文与语言偏好
 
