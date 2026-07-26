@@ -36,4 +36,4 @@ def daemon_request(payload: dict[str, Any], *, timeout: float = 2) -> dict[str, 
 
 
 def write_output(payload: dict[str, Any]) -> None:
-    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)

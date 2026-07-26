@@ -20,6 +20,7 @@ MIGRATION_MODULES = (
     "017_lark_task_events",
     "018_agent_delivery_runtime",
     "019_delivery_assignment_revision",
+    "020_agent_context_fingerprint",
 )
 
 MIGRATIONS = [import_module(f"{__name__}.{name}") for name in MIGRATION_MODULES]

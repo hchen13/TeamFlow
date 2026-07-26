@@ -210,6 +210,13 @@ const text = {
     agentBusyActionHint: "Agent 正在工作，完成后才能切换或移除。",
     agentCheckingActionHint: "正在确认 Agent 的实时状态，确认完成后才能切换或移除。",
     agentUnconfirmedActionHint: "Agent 的实时状态尚未确认，暂时不能切换或移除。",
+    onboardingPending: "待入职",
+    onboardingInjected: "已入职",
+    onboardingPendingHint: "下一次向此 Session 发送消息时，TeamFlow 会在后台注入职责与协作规则。点击查看将要注入的内容。",
+    onboardingInjectedHint: "TeamFlow 已将职责与协作规则注入此 Session。点击查看具体内容。",
+    onboardingTitle: "Agent 入职",
+    onboardingContext: "入职内容",
+    onboardingLastInjected: "最近注入",
     changeWorkflow: "在飞书设置中更改",
     registeredCount: "已注册 {count} 个",
     singleAgentRole: "此角色仅允许一个 Agent；注册后可在列表中切换 Session。",
@@ -412,6 +419,13 @@ const text = {
     agentBusyActionHint: "This agent is working. Wait until it finishes before switching or removing it.",
     agentCheckingActionHint: "Wait until TeamFlow confirms the agent's live state before switching or removing it.",
     agentUnconfirmedActionHint: "The agent's live state is unconfirmed. It cannot be switched or removed yet.",
+    onboardingPending: "Pending onboarding",
+    onboardingInjected: "Onboarded",
+    onboardingPendingHint: "TeamFlow will inject the role and collaboration rules in the background when the next message enters this session. Click to preview them.",
+    onboardingInjectedHint: "TeamFlow has injected the role and collaboration rules into this session. Click to inspect them.",
+    onboardingTitle: "Agent onboarding",
+    onboardingContext: "Onboarding context",
+    onboardingLastInjected: "Last injected",
     changeWorkflow: "Change in Lark setup",
     registeredCount: "{count} registered",
     singleAgentRole: "This role allows one agent. Switch its session from the registered-agent list.",
@@ -431,6 +445,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   const [runtimeBySession, setRuntimeBySession] = useState({});
   const [lifecycleBySession, setLifecycleBySession] = useState({});
   const refreshInFlight = useRef(null);
+  const pendingOnboardingSessions = useRef(new Set());
   const t = text[lang];
   const board = state.lark_board || {};
   const botIdentities = state.lark_identities?.filter((identity) => identity.auth_mode === "bot" && identity.app_id) || [];
@@ -471,6 +486,13 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   useEffect(() => setLiveAgents(state.agents || []), [state.agents]);
   useEffect(() => setLiveCodexSessions(codexSessions), [codexSessions]);
   useEffect(() => setLiveCodexSessionError(codexSessionError), [codexSessionError]);
+  useEffect(() => {
+    pendingOnboardingSessions.current = new Set(
+      liveAgents
+        .filter((agent) => agent.onboarding?.status !== "injected")
+        .map((agent) => agent.session_id)
+    );
+  }, [liveAgents]);
 
   useEffect(() => {
     if (tab !== "agent") {
@@ -489,6 +511,9 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
         setRuntimeBySession(sessionMap(event.sessions || []));
       } else if (event.type === "runtime") {
         setRuntimeBySession((current) => updateRuntime(current, event));
+        if (pendingOnboardingSessions.current.has(event.threadId)) {
+          refreshCodexState();
+        }
         if (event.title) {
           setLiveAgents((current) => current.map((agent) => (
             agent.session_id === event.threadId
@@ -1564,12 +1589,24 @@ function CloseIcon() {
 function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSessions, currentRoles, currentWorkflow, lifecycleBySession, lang, refreshCodexState, runtimeBySession, setAgentFormOpen, t }) {
   const [selectedRoleKey, setSelectedRoleKey] = useState("");
   const [editingAgentId, setEditingAgentId] = useState("");
+  const [onboardingAgentId, setOnboardingAgentId] = useState("");
+  const onboardingDialogRef = useRef(null);
   const selectableSessions = codexSessions.filter((session) => session.status !== "systemError");
   const availableRoles = currentRoles.filter((role) => role.allow_multiple || !agents.some((agent) => agent.role_key === role.role_key));
   const effectiveRoleKey = availableRoles.some((role) => role.role_key === selectedRoleKey)
     ? selectedRoleKey
     : availableRoles[0]?.role_key || "";
   const selectedRole = availableRoles.find((role) => role.role_key === effectiveRoleKey);
+  const onboardingAgent = agents.find((agent) => agent.id === onboardingAgentId);
+
+  useEffect(() => {
+    const dialog = onboardingDialogRef.current;
+    if (onboardingAgent && dialog && !dialog.open) {
+      dialog.showModal();
+    } else if (!onboardingAgent && dialog?.open) {
+      dialog.close();
+    }
+  }, [onboardingAgent]);
 
   return (
     <div className="agentPage">
@@ -1671,7 +1708,10 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
                     <input name="runtime_status" type="hidden" value={runtimeStatus || ""} suppressHydrationWarning />
                     <div className="agentIdentity">
                       <strong>{agent.display_name || assignedRole}</strong>
-                      <span>{agent.display_name ? `${assignedRole} · ${harnessName(agent.harness_type)}` : harnessName(agent.harness_type)}</span>
+                      <div className="agentIdentityMeta">
+                        <span>{agent.display_name ? `${assignedRole} · ${harnessName(agent.harness_type)}` : harnessName(agent.harness_type)}</span>
+                        <AgentOnboardingBadge agent={agent} onOpen={() => setOnboardingAgentId(agent.id)} t={t} />
+                      </div>
                     </div>
                     <div className="agentSessionEditor">
                       <SessionField
@@ -1696,7 +1736,10 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
                 <div className="agentRow" key={agent.id} tabIndex={0}>
                   <div className="agentIdentity">
                     <strong>{agent.display_name || assignedRole}</strong>
-                    <span>{agent.display_name ? `${assignedRole} · ${harnessName(agent.harness_type)}` : harnessName(agent.harness_type)}</span>
+                    <div className="agentIdentityMeta">
+                      <span>{agent.display_name ? `${assignedRole} · ${harnessName(agent.harness_type)}` : harnessName(agent.harness_type)}</span>
+                      <AgentOnboardingBadge agent={agent} onOpen={() => setOnboardingAgentId(agent.id)} t={t} />
+                    </div>
                   </div>
                   <div className="agentSession">
                     <strong title={sessionName}>{sessionName}</strong>
@@ -1729,8 +1772,63 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
           ) : null}
         </div>
       </section>
+      <dialog
+        className="agentOnboardingDialog"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) event.currentTarget.close();
+        }}
+        onClose={() => setOnboardingAgentId("")}
+        ref={onboardingDialogRef}
+      >
+        {onboardingAgent ? (
+          <div className="agentOnboardingDialogPanel">
+            <header>
+              <div>
+                <strong>{t.onboardingTitle}</strong>
+                <span>{onboardingAgent.display_name || roleName(currentRoles, onboardingAgent.role_key)}</span>
+              </div>
+              <button aria-label={t.cancel} className="iconButton" onClick={() => onboardingDialogRef.current?.close()} type="button">
+                <CloseIcon />
+              </button>
+            </header>
+            <div className="agentOnboardingSummary">
+              <AgentOnboardingBadge agent={onboardingAgent} t={t} />
+              <span>{onboardingHint(onboardingAgent, t)}</span>
+              <span>{t.onboardingLastInjected}: {shortDateTime(onboardingAgent.onboarding?.injected_at)}</span>
+            </div>
+            <div className="agentOnboardingContext">
+              <span>{t.onboardingContext}</span>
+              <pre>{onboardingAgent.onboarding?.context || ""}</pre>
+            </div>
+          </div>
+        ) : null}
+      </dialog>
     </div>
   );
+}
+
+function AgentOnboardingBadge({ agent, onOpen, t }) {
+  const injected = agent.onboarding?.status === "injected";
+  const label = injected ? t.onboardingInjected : t.onboardingPending;
+  const className = `agentOnboardingBadge ${injected ? "injected" : "pending"}`;
+  if (!onOpen) {
+    return <span className={className}>{label}</span>;
+  }
+  return (
+    <button
+      aria-label={`${label}: ${onboardingHint(agent, t)}`}
+      className={className}
+      onClick={onOpen}
+      title={onboardingHint(agent, t)}
+      type="button"
+    >
+      {label}
+    </button>
+  );
+}
+
+function onboardingHint(agent, t) {
+  return agent.onboarding?.status === "injected" ? t.onboardingInjectedHint : t.onboardingPendingHint;
 }
 
 function SessionField({ error, initialValue = "", onRefresh, sessions, t }) {

@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .agent_runtime import find_agent_assignment
+from .agent_runtime import confirm_agent_context, find_agent_assignment
 from .codex import codex_thread_is_permanently_unavailable, codex_turn, read_codex_thread, run_codex_turn
 from .config import resolve_workspace_paths
 from .db import now
@@ -435,7 +435,14 @@ class TeamFlowDaemon:
             "active_sessions": sorted(self.active_sessions),
         }
 
-    def assignment_context(self, *, session_id: str, cwd: str | None, consume: bool) -> dict[str, Any]:
+    def assignment_context(
+        self,
+        *,
+        session_id: str,
+        cwd: str | None,
+        consume: bool,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
         with self.sync_lock:
             workspaces = [
                 root
@@ -447,8 +454,44 @@ class TeamFlowDaemon:
             session_id=session_id,
             cwd=cwd,
             consume=consume,
+            refresh=refresh,
         )
         return result or {"assignment": None, "additional_context": None}
+
+    def confirm_assignment_context(
+        self,
+        *,
+        workspace: str,
+        agent_id: str,
+        session_id: str,
+        assignment_revision: int,
+        context_fingerprint: str,
+        context_kind: str | None,
+    ) -> dict[str, Any]:
+        result = confirm_agent_context(
+            workspace,
+            agent_id=agent_id,
+            session_id=session_id,
+            assignment_revision=assignment_revision,
+            context_fingerprint=context_fingerprint,
+        )
+        assignment = result.get("assignment")
+        if result["confirmed"] and assignment:
+            _emit_log(
+                _style(
+                    "AGENT CONTEXT RESTORED" if context_kind == "recovery" else "AGENT ONBOARDED",
+                    "1;32",
+                ),
+                fields={
+                    "workspace": assignment["workspace_name"],
+                    "workflow": assignment["workflow_key"],
+                    "role": assignment["role_key"],
+                    "agent": assignment["agent_id"],
+                    "session": assignment["session_id"],
+                    "revision": assignment["assignment_revision"],
+                },
+            )
+        return result
 
     def authorize_tool(
         self,
@@ -1197,6 +1240,16 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     session_id=str(request.get("session_id") or ""),
                     cwd=request.get("cwd"),
                     consume=bool(request.get("consume")),
+                    refresh=bool(request.get("refresh")),
+                )
+            elif action == "confirm_assignment_context":
+                result = self.server.runtime.confirm_assignment_context(
+                    workspace=str(request.get("workspace") or ""),
+                    agent_id=str(request.get("agent_id") or ""),
+                    session_id=str(request.get("session_id") or ""),
+                    assignment_revision=int(request.get("assignment_revision") or 0),
+                    context_fingerprint=str(request.get("context_fingerprint") or ""),
+                    context_kind=request.get("context_kind"),
                 )
             elif action == "authorize_tool":
                 result = self.server.runtime.authorize_tool(

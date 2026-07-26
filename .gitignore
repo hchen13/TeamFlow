@@ -6,6 +6,7 @@ play.py
 .venv/
 node_modules/
 ui/.next/
+ui/.next-workspaces/
 ui/node_modules/
 ui/.env*.local
 .teamflow/

@@ -5,7 +5,7 @@ description: Use when a Codex session is registered as a TeamFlow software-devel
 
 # TeamFlow 软件开发协作
 
-以 UserPromptSubmit 注入的工作区、协作模式和职责为准。不要自行假设另一种职责，也不要代替其他职责处理任务。
+以 TeamFlow Hook 注入的工作区、协作模式和职责为准。不要自行假设另一种职责，也不要代替其他职责处理任务。
 
 ## 开始工作
 

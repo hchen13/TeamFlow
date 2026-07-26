@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -13,7 +14,18 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from core.agent_runtime import agent_context
+import anyio
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from mcp.types import RequestParams
+
+from core import agent_runtime as teamflow_agent_runtime
+from core import mcp_server as teamflow_mcp_server
+from core.agent_runtime import (
+    agent_context,
+    confirm_agent_context,
+    inspect_agent_contexts,
+)
 from core.config import resolve_workspace_paths
 from core.daemon import (
     DaemonServer,
@@ -56,7 +68,12 @@ from core.task_dispatch import (
     prepare_agent_catchup_deliveries,
     prepare_task_deliveries,
 )
-from scripts.teamflow import cmd_verify_lark_user_identity
+from scripts.teamflow import (
+    cmd_inspect_agent_context,
+    cmd_serve_ui,
+    cmd_verify_lark_user_identity,
+    ui_dist_dir,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +107,13 @@ class LarkEventsTest(unittest.TestCase):
         self.temp.cleanup()
         self.home_env.stop()
         self.home.cleanup()
+        try:
+            event_loop = asyncio.get_event_loop_policy().get_event_loop()
+        except RuntimeError:
+            return
+        if not event_loop.is_running():
+            event_loop.close()
+            asyncio.set_event_loop(None)
 
     def context(self) -> LarkEventContext:
         return LarkEventContext(
@@ -769,7 +793,7 @@ class LarkEventsTest(unittest.TestCase):
         self.assertEqual(delivery["status"], "canceled")
         self.assertEqual(delivery["last_error"], "task is no longer ready")
 
-    def test_agent_context_onboards_once_and_repeats_the_runtime_role(self):
+    def test_agent_context_requires_confirmation_and_restores_after_compaction(self):
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
             workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
             role = conn.execute(
@@ -790,10 +814,191 @@ class LarkEventsTest(unittest.TestCase):
         second = agent_context(self.workspace, session_id="session_context", consume=True)
 
         self.assertIn("你已被注册为 TeamFlow Agent", first["additional_context"])
+        self.assertEqual(second["context_fingerprint"], first["context_fingerprint"])
+        self.assertIn("你已被注册为 TeamFlow Agent", second["additional_context"])
+
+        confirmed = confirm_agent_context(
+            self.workspace,
+            agent_id=first["assignment"]["agent_id"],
+            session_id=first["assignment"]["session_id"],
+            assignment_revision=first["assignment"]["assignment_revision"],
+            context_fingerprint=first["context_fingerprint"],
+        )
+        after_confirmation = agent_context(
+            self.workspace,
+            session_id="session_context",
+            consume=True,
+        )
+        recovered = agent_context(
+            self.workspace,
+            session_id="session_context",
+            consume=True,
+            refresh=True,
+        )
+        recovery_confirmation = confirm_agent_context(
+            self.workspace,
+            agent_id=recovered["assignment"]["agent_id"],
+            session_id=recovered["assignment"]["session_id"],
+            assignment_revision=recovered["assignment"]["assignment_revision"],
+            context_fingerprint=recovered["context_fingerprint"],
+        )
+        after_recovery = agent_context(
+            self.workspace,
+            session_id="session_context",
+            consume=True,
+        )
+
         self.assertIn("技术负责人", first["additional_context"])
-        self.assertNotIn("你已被注册为 TeamFlow Agent", second["additional_context"])
-        self.assertIn("TeamFlow 当前职责上下文", second["additional_context"])
-        self.assertIn("技术负责人", second["additional_context"])
+        self.assertTrue(confirmed["confirmed"])
+        self.assertIsNone(after_confirmation["additional_context"])
+        self.assertIn("会话压缩后恢复", recovered["additional_context"])
+        self.assertIn("技术负责人", recovered["additional_context"])
+        self.assertTrue(recovery_confirmation["confirmed"])
+        self.assertIsNone(after_recovery["additional_context"])
+
+    def test_stale_context_confirmation_cannot_onboard_a_reassigned_session(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_context_stale', ?, ?, ?, 'tl', 'codex', 'session_context_old', 'Stale TL', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+
+        old_context = agent_context(
+            self.workspace,
+            session_id="session_context_old",
+            consume=True,
+        )
+        with patch("core.db.verify_agent", return_value={"ok": True}):
+            update_agent(
+                self.workspace,
+                agent_id="agent_context_stale",
+                session_id="session_context_new",
+            )
+
+        stale_confirmation = confirm_agent_context(
+            self.workspace,
+            agent_id=old_context["assignment"]["agent_id"],
+            session_id=old_context["assignment"]["session_id"],
+            assignment_revision=old_context["assignment"]["assignment_revision"],
+            context_fingerprint=old_context["context_fingerprint"],
+        )
+        reassigned = agent_context(
+            self.workspace,
+            session_id="session_context_new",
+            consume=True,
+        )
+
+        self.assertFalse(stale_confirmation["confirmed"])
+        self.assertEqual(reassigned["assignment"]["assignment_revision"], 2)
+        self.assertEqual(reassigned["context_status"], "pending")
+        self.assertIn("你已被注册为 TeamFlow Agent", reassigned["additional_context"])
+
+    def test_agent_context_fingerprint_reacts_to_rendered_instruction_changes(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_context_template', ?, ?, ?, 'tl', 'codex', 'session_context_template', 'Template TL', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+
+        initial = agent_context(
+            self.workspace,
+            session_id="session_context_template",
+            consume=True,
+        )
+        confirm_agent_context(
+            self.workspace,
+            agent_id=initial["assignment"]["agent_id"],
+            session_id=initial["assignment"]["session_id"],
+            assignment_revision=initial["assignment"]["assignment_revision"],
+            context_fingerprint=initial["context_fingerprint"],
+        )
+        original_render = teamflow_agent_runtime.render_agent_context
+
+        with patch(
+            "core.agent_runtime.render_agent_context",
+            side_effect=lambda assignment, **options: (
+                f"{original_render(assignment, **options)}\n新增职责规则。"
+            ),
+        ):
+            changed = agent_context(
+                self.workspace,
+                session_id="session_context_template",
+                consume=True,
+            )
+            inspected = inspect_agent_contexts(
+                self.workspace,
+                agent_id="agent_context_template",
+            )
+
+        self.assertNotEqual(changed["context_fingerprint"], initial["context_fingerprint"])
+        self.assertEqual(changed["context_status"], "pending")
+        self.assertIn("新增职责规则", changed["additional_context"])
+        self.assertEqual(inspected[0]["status"], "pending")
+
+    def test_inspect_agent_context_cli_lists_every_agent_in_a_role(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            for suffix in ("a", "b"):
+                conn.execute(
+                    """
+                    INSERT INTO agents (
+                      id, workspace_id, workflow_id, role_id, role_key,
+                      harness_type, session_id, display_name, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'tl', 'codex', ?, ?, ?, ?)
+                    """,
+                    (
+                        f"agent_context_{suffix}",
+                        workspace["id"],
+                        workspace["current_workflow_id"],
+                        role["id"],
+                        f"session_context_{suffix}",
+                        f"Context TL {suffix.upper()}",
+                        now(),
+                        now(),
+                    ),
+                )
+
+        output = io.StringIO()
+        args = Mock(
+            workspace=self.workspace,
+            agent_id=None,
+            role="tl",
+            session_id=None,
+            all=False,
+            json=True,
+        )
+        with redirect_stdout(output):
+            result = cmd_inspect_agent_context(args)
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual({agent["role_key"] for agent in payload["agents"]}, {"tl"})
+        self.assertTrue(all(agent["status"] == "pending" for agent in payload["agents"]))
 
     def test_tool_grant_is_bound_to_the_session_input_and_single_use(self):
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
@@ -855,7 +1060,7 @@ class LarkEventsTest(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_plugin_hooks_inject_context_and_authorize_mcp_input(self):
+    def test_plugin_context_hook_and_mcp_metadata_resolve_the_registered_agent(self):
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
             workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
             role = conn.execute(
@@ -891,27 +1096,152 @@ class LarkEventsTest(unittest.TestCase):
                 "你已被注册为 TeamFlow Agent",
                 prompt_output["hookSpecificOutput"]["additionalContext"],
             )
-            tool_hook = subprocess.run(
-                ["python3", str(ROOT / "hooks" / "pre_tool_use.py")],
+            repeated_prompt_hook = subprocess.run(
+                ["python3", str(ROOT / "hooks" / "user_prompt_submit.py")],
                 input=json.dumps({
                     "session_id": "session_hook",
                     "cwd": self.workspace,
-                    "turn_id": "turn_hook",
-                    "tool_name": "mcp__teamflow__get_assignment",
-                    "tool_input": {},
+                    "turn_id": "turn_hook_2",
+                    "hook_event_name": "UserPromptSubmit",
                 }),
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            tool_output = json.loads(tool_hook.stdout)["hookSpecificOutput"]
-            self.assertEqual(tool_output["permissionDecision"], "allow")
-            self.assertTrue(tool_output["updatedInput"]["teamflow_authorization"])
+            self.assertEqual(repeated_prompt_hook.stdout, "")
+            compact_hook = subprocess.run(
+                ["python3", str(ROOT / "hooks" / "user_prompt_submit.py")],
+                input=json.dumps({
+                    "session_id": "session_hook",
+                    "cwd": self.workspace,
+                    "turn_id": "turn_compact",
+                    "hook_event_name": "SessionStart",
+                    "source": "compact",
+                }),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            compact_output = json.loads(compact_hook.stdout)
+            self.assertEqual(
+                compact_output["hookSpecificOutput"]["hookEventName"],
+                "SessionStart",
+            )
+            self.assertIn(
+                "会话压缩后恢复",
+                compact_output["hookSpecificOutput"]["additionalContext"],
+            )
+
+            async def call_assignment():
+                parameters = StdioServerParameters(
+                    command=sys.executable,
+                    args=[str(ROOT / "scripts" / "teamflow.py"), "mcp-server"],
+                    cwd=ROOT,
+                    env=dict(os.environ),
+                )
+                async with stdio_client(parameters) as (read_stream, write_stream):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
+                        return await session.call_tool(
+                            "get_assignment",
+                            {},
+                            meta={
+                                "threadId": "session_hook",
+                                "x-codex-turn-metadata": {
+                                    "thread_id": "session_hook",
+                                    "turn_id": "turn_hook",
+                                },
+                            },
+                        )
+
+            try:
+                default_loop = asyncio.get_event_loop_policy().get_event_loop()
+            except RuntimeError:
+                default_loop = None
+            try:
+                result = anyio.run(call_assignment)
+            finally:
+                if default_loop is not None:
+                    default_loop.close()
+
+            self.assertFalse(result.isError)
+            self.assertEqual(result.structuredContent["assignment"]["agent_id"], "agent_hook")
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
             runtime.close()
+
+    def test_mcp_tools_only_expose_business_arguments(self):
+        tools = {
+            tool.name: tool.parameters
+            for tool in teamflow_mcp_server.mcp._tool_manager.list_tools()
+        }
+
+        self.assertEqual(tools["get_assignment"]["properties"], {})
+        self.assertEqual(tools["list_available_tasks"]["properties"], {})
+        self.assertEqual(set(tools["get_task"]["properties"]), {"record_id"})
+        self.assertEqual(set(tools["claim_task"]["properties"]), {"record_id"})
+
+    def test_mcp_rejects_missing_or_inconsistent_codex_identity(self):
+        missing = Mock()
+        missing.request_context.meta = None
+        with self.assertRaisesRegex(ValueError, "requires Codex MCP request metadata"):
+            teamflow_mcp_server.get_assignment(missing)
+
+        inconsistent = Mock()
+        inconsistent.request_context.meta = RequestParams.Meta.model_validate(
+            {
+                "threadId": "session_a",
+                "x-codex-turn-metadata": json.dumps({
+                    "thread_id": "session_b",
+                    "turn_id": "turn_mismatch",
+                }),
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "inconsistent Codex thread metadata"):
+            teamflow_mcp_server.get_assignment(inconsistent)
+
+    def test_mcp_internal_grant_uses_codex_thread_and_turn_metadata(self):
+        context = Mock()
+        context.request_context.meta = RequestParams.Meta.model_validate(
+            {
+                "threadId": "session_metadata",
+                "x-codex-turn-metadata": json.dumps({
+                    "thread_id": "session_metadata",
+                    "turn_id": "turn_metadata",
+                }),
+            }
+        )
+        with patch(
+            "core.mcp_server._daemon_request",
+            side_effect=[
+                {"grant": "grant_metadata", "expires_in": 60},
+                {"ok": True, "task": {"record_id": "recMetadata"}},
+            ],
+        ) as daemon_request:
+            result = teamflow_mcp_server.get_task("recMetadata", context)
+
+        self.assertEqual(result["task"]["record_id"], "recMetadata")
+        self.assertEqual(
+            daemon_request.call_args_list[0].args[0],
+            {
+                "action": "authorize_tool",
+                "session_id": "session_metadata",
+                "turn_id": "turn_metadata",
+                "tool_name": "mcp__teamflow__get_task",
+                "tool_input": {"record_id": "recMetadata"},
+            },
+        )
+        self.assertEqual(
+            daemon_request.call_args_list[1].args[0],
+            {
+                "action": "invoke_tool",
+                "grant": "grant_metadata",
+                "tool_name": "get_task",
+                "arguments": {"record_id": "recMetadata"},
+            },
+        )
 
     def test_codex_delivery_persists_turn_before_completion(self):
         context = self.context()
@@ -1273,6 +1603,23 @@ class LarkEventsTest(unittest.TestCase):
             self.assertEqual(_styled_task_change("updated"), "\033[1;33mupdated\033[0m")
             self.assertEqual(_styled_task_change("deleted"), "\033[1;31mdeleted\033[0m")
             self.assertEqual(_styled_task_change("unchanged"), "\033[2munchanged\033[0m")
+
+    def test_ui_development_output_is_outside_the_production_build_directory(self):
+        dist_dir = ui_dist_dir(self.workspace)
+
+        self.assertTrue(dist_dir.startswith(".next-workspaces/"))
+        self.assertFalse(dist_dir.startswith(".next/"))
+        self.assertEqual(dist_dir, ui_dist_dir(self.workspace))
+        self.assertNotEqual(dist_dir, ui_dist_dir(f"{self.workspace}-other"))
+
+    def test_ui_stops_cleanly_on_keyboard_interrupt(self):
+        args = Mock(workspace=self.workspace, host="127.0.0.1", port=12346)
+        with patch("scripts.teamflow.init_workspace"), patch("scripts.teamflow.register_workspace"), patch(
+            "scripts.teamflow.ensure_ui_dependencies"
+        ), patch("scripts.teamflow.subprocess.call", side_effect=KeyboardInterrupt):
+            result = cmd_serve_ui(args)
+
+        self.assertEqual(result, 130)
 
     def test_user_identity_verification_resyncs_an_enabled_running_workspace(self):
         args = Mock(workspace=self.workspace)

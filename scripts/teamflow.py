@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.codex import run_codex_turn
+from core.agent_runtime import attach_agent_contexts, inspect_agent_contexts
 from core.daemon import (
     daemon_status,
     disable_daemon_workspace,
@@ -77,6 +78,19 @@ def main() -> int:
     add_workspace_args(inspect_parser)
     inspect_parser.add_argument("--json", action="store_true", help="Print raw JSON.")
     inspect_parser.set_defaults(func=cmd_inspect)
+
+    inspect_context_parser = subparsers.add_parser(
+        "inspect-agent-context",
+        help="Inspect TeamFlow onboarding state and hidden role context.",
+    )
+    add_workspace_args(inspect_context_parser)
+    context_selector = inspect_context_parser.add_mutually_exclusive_group(required=True)
+    context_selector.add_argument("--agent-id", help="Inspect one registered Agent ID.")
+    context_selector.add_argument("--role", help="Inspect every Agent registered for this role.")
+    context_selector.add_argument("--session-id", help="Inspect the Agent bound to this Session ID.")
+    context_selector.add_argument("--all", action="store_true", help="Inspect every registered Agent.")
+    inspect_context_parser.add_argument("--json", action="store_true", help="Print raw JSON.")
+    inspect_context_parser.set_defaults(func=cmd_inspect_agent_context)
 
     identity_parser = subparsers.add_parser("configure-lark-identity", help="Store a Lark bot identity locally.")
     add_workspace_args(identity_parser)
@@ -243,7 +257,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
-    result = inspect_workspace(args.workspace)
+    result = attach_agent_contexts(args.workspace, inspect_workspace(args.workspace))
     if args.json:
         print_json(result)
         return 0
@@ -261,6 +275,33 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     print(f"Workflows: {len(result['workflows'])}")
     print(f"Roles: {len(result['roles'])}")
     print(f"Agents: {len(result['agents'])}")
+    return 0
+
+
+def cmd_inspect_agent_context(args: argparse.Namespace) -> int:
+    contexts = inspect_agent_contexts(
+        args.workspace,
+        agent_id=args.agent_id,
+        role_key=args.role.strip().lower() if args.role else None,
+        session_id=args.session_id,
+    )
+    if args.json:
+        print_json({"ok": True, "count": len(contexts), "agents": contexts})
+        return 0
+    if not contexts:
+        print("No matching TeamFlow agents.")
+        return 0
+    for index, context in enumerate(contexts):
+        if index:
+            print()
+        print(f"Agent: {context['agent_name']} ({context['agent_id']})")
+        print(f"Role: {context['role_name']} ({context['role_key']})")
+        print(f"Session: {context['session_id']}")
+        print(f"Onboarding: {context['status']}")
+        print(f"Last injected: {context['injected_at'] or '-'}")
+        print(f"Context fingerprint: {context['context_fingerprint']}")
+        print("Context:")
+        print(context["context"])
     return 0
 
 
@@ -459,13 +500,21 @@ def cmd_serve_ui(args: argparse.Namespace) -> int:
     workspace_root = str(Path(args.workspace).expanduser().resolve())
     env["TEAMFLOW_CLI"] = str(ROOT / "scripts" / "teamflow.py")
     env["TEAMFLOW_WORKSPACE"] = workspace_root
-    env["TEAMFLOW_UI_DIST_DIR"] = f".next/workspaces-{hashlib.sha256(workspace_root.encode()).hexdigest()[:12]}"
+    env["TEAMFLOW_UI_DIST_DIR"] = ui_dist_dir(workspace_root)
     print(f"TeamFlow UI: http://{host}:{port}/")
-    return subprocess.call(
-        ["npm", "run", "dev", "--", "--hostname", host, "--port", str(port)],
-        cwd=ui_dir,
-        env=env,
-    )
+    try:
+        return subprocess.call(
+            ["npm", "run", "dev", "--", "--hostname", host, "--port", str(port)],
+            cwd=ui_dir,
+            env=env,
+        )
+    except KeyboardInterrupt:
+        return 130
+
+
+def ui_dist_dir(workspace_root: str) -> str:
+    workspace_hash = hashlib.sha256(workspace_root.encode()).hexdigest()[:12]
+    return f".next-workspaces/{workspace_hash}"
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
@@ -686,7 +735,7 @@ def cmd_self_check(args: argparse.Namespace) -> int:
     user_identity = next(identity for identity in result["lark_identities"] if identity["auth_mode"] == "user")
     board = result["lark_board"]
     assert result["initialized"] is True
-    assert result["schema_version"] == "019_delivery_assignment_revision"
+    assert result["schema_version"] == "020_agent_context_fingerprint"
     assert {workflow["key"] for workflow in result["workflows"]} == {DEFAULT_WORKFLOW_KEY, "general-task"}
     assert all(workflow["short_description"] for workflow in result["workflows"])
     assert result["current_workflow"]["key"] == DEFAULT_WORKFLOW_KEY

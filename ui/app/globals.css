@@ -2098,6 +2098,133 @@ button.accessCheck.failed:focus-visible {
   font-size: 14px;
 }
 
+.agentIdentityMeta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 7px;
+}
+
+.agentOnboardingBadge {
+  width: fit-content;
+  min-height: 20px;
+  padding: 2px 6px;
+  border: 1px solid;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 850;
+  line-height: 1.2;
+}
+
+.agentOnboardingBadge.pending {
+  border-color: #d7b684;
+  background: #fff8eb;
+  color: #7f581f;
+}
+
+.agentOnboardingBadge.injected {
+  border-color: #a9c9bc;
+  background: #edf7f2;
+  color: #23644f;
+}
+
+.agentOnboardingDialog {
+  width: min(720px, calc(100vw - 28px));
+  max-width: none;
+  max-height: min(760px, calc(100vh - 28px));
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.agentOnboardingDialog::backdrop {
+  background: rgba(16, 22, 20, 0.66);
+  backdrop-filter: blur(5px);
+}
+
+.agentOnboardingDialogPanel {
+  display: grid;
+  max-height: min(760px, calc(100vh - 28px));
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid #cdd4cf;
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgba(8, 14, 12, 0.34);
+}
+
+.agentOnboardingDialogPanel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.agentOnboardingDialogPanel .iconButton svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.8;
+}
+
+.agentOnboardingDialogPanel header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.agentOnboardingDialogPanel header > div > strong {
+  font-size: 17px;
+}
+
+.agentOnboardingDialogPanel header > div > span,
+.agentOnboardingSummary > span,
+.agentOnboardingContext > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.agentOnboardingSummary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.agentOnboardingSummary > span:last-child {
+  margin-left: auto;
+}
+
+.agentOnboardingSummary .agentOnboardingBadge {
+  pointer-events: none;
+}
+
+.agentOnboardingContext {
+  display: grid;
+  min-height: 0;
+  gap: 6px;
+}
+
+.agentOnboardingContext > pre {
+  min-height: 180px;
+  max-height: 480px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f6f7f4;
+  color: var(--ink);
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
 .agentSession strong {
   min-width: 0;
   overflow: hidden;
@@ -2405,6 +2532,15 @@ button.accessCheck.failed:focus-visible {
     visibility: visible;
     opacity: 1;
     pointer-events: auto;
+  }
+
+  .agentOnboardingDialogPanel {
+    padding: 14px;
+  }
+
+  .agentOnboardingSummary > span:last-child {
+    width: 100%;
+    margin-left: 0;
   }
 
   .userConnectionRow .connectionActions {

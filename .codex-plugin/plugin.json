@@ -1,17 +1,26 @@
 {
   "name": "teamflow",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260724062613",
   "description": "Coordinate multi-agent project roles through shared team workflows.",
   "author": {
-    "name": "Local developer"
+    "name": "TeamFlow",
+    "url": "https://github.com/hchen13/TeamFlow"
   },
+  "homepage": "https://github.com/hchen13/TeamFlow",
+  "repository": "https://github.com/hchen13/TeamFlow",
+  "keywords": [
+    "multi-agent",
+    "workflow",
+    "project-management",
+    "lark"
+  ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
-    "displayName": "TeamFlow 同舟",
+    "displayName": "TeamFlow \u540c\u821f",
     "shortDescription": "Coordinate PM, TL, QA, and developer agents through shared workflows.",
-    "longDescription": "TeamFlow 同舟 helps Codex sessions form a multi-agent project team, assign PM, TL, QA, and developer roles, connect shared project boards, and keep work moving through explicit team workflows.",
-    "developerName": "Local developer",
+    "longDescription": "TeamFlow \u540c\u821f helps Codex sessions form a multi-agent project team, assign PM, TL, QA, and developer roles, connect shared project boards, and keep work moving through explicit team workflows.",
+    "developerName": "TeamFlow",
     "category": "Productivity",
     "capabilities": [
       "Multi-agent teamwork",
@@ -20,6 +29,8 @@
       "Board-backed task state",
       "Lark-ready integration"
     ],
-    "defaultPrompt": "Set up TeamFlow for this project."
+    "defaultPrompt": [
+      "Set up TeamFlow for this project."
+    ]
   }
 }

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import tempfile
 import threading
 import time
@@ -16,6 +18,7 @@ from core.db import (
     init_workspace,
     inspect_workspace,
     resolve_lark_wiki_bitable,
+    run_lark_cli_json,
     select_workflow,
     verify_lark_user_identity,
 )
@@ -70,6 +73,37 @@ class WorkflowDefinitionTest(unittest.TestCase):
         self.assertEqual({role["key"] for role in definition["roles"]}, {"pm", "tl", "qa", "design"})
         self.assertEqual(len(definition["task_types"]), 7)
         self.assertEqual(definition["task_schema"]["task_id"]["sequence_length"], 4)
+
+
+class LarkCliDependencyTest(unittest.TestCase):
+    def test_missing_local_cli_is_installed_without_consuming_mcp_stdio(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ui_dir = Path(temp_dir) / "ui"
+            cli_path = ui_dir / "node_modules" / ".bin" / "lark-cli"
+            ui_dir.mkdir()
+            (ui_dir / "package-lock.json").write_text("{}\n", encoding="utf-8")
+
+            def run(command, **kwargs):
+                if command == ["npm", "ci"]:
+                    cli_path.parent.mkdir(parents=True)
+                    cli_path.write_text("#!/bin/sh\n", encoding="utf-8")
+                    cli_path.chmod(0o755)
+                    return Mock(returncode=0, stdout="", stderr="")
+                return Mock(returncode=0, stdout='{"ok": true}', stderr="")
+
+            with patch.dict(os.environ, {"LARK_CLI": str(cli_path)}), patch(
+                "core.db.subprocess.run",
+                side_effect=run,
+            ) as process:
+                result = run_lark_cli_json(["auth", "status"])
+
+        self.assertEqual(result, {"ok": True})
+        npm_call, cli_call = process.call_args_list
+        self.assertEqual(npm_call.args[0], ["npm", "ci"])
+        self.assertEqual(npm_call.kwargs["cwd"], ui_dir)
+        self.assertIs(npm_call.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertTrue(npm_call.kwargs["capture_output"])
+        self.assertEqual(cli_call.args[0], [str(cli_path), "auth", "status"])
 
 
 class FakeBoardClient:

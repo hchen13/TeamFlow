@@ -1,9 +1,10 @@
 {
   "mcpServers": {
     "teamflow": {
-      "command": "uv",
-      "args": ["run", "--project", ".", "--locked", "python", "scripts/teamflow.py", "mcp-server"],
-      "cwd": "."
+      "command": "./teamflow",
+      "args": ["mcp-server"],
+      "cwd": ".",
+      "startup_timeout_sec": 60
     }
   }
 }

@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 import uuid
@@ -735,7 +736,7 @@ def update_agent(workspace: str | None, *, agent_id: str, session_id: str) -> di
             """
             UPDATE agents
             SET session_id = ?, assignment_revision = assignment_revision + 1,
-                context_applied_revision = 0, context_applied_at = NULL, updated_at = ?
+                context_fingerprint = NULL, context_injected_at = NULL, updated_at = ?
             WHERE id = ?
             """,
             (session, timestamp, agent_id),
@@ -1233,8 +1234,9 @@ def fetch_lark_app_info(app_id: str, app_secret: str, domain: str) -> tuple[str 
 
 
 def run_lark_cli_json(args: list[str]) -> dict[str, Any]:
+    command = resolve_lark_cli_command()
     result = subprocess.run(
-        [os.environ.get("LARK_CLI", "lark-cli"), *args],
+        [command, *args],
         capture_output=True,
         text=True,
         check=False,
@@ -1249,6 +1251,40 @@ def run_lark_cli_json(args: list[str]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("lark-cli did not return a JSON object")
     return payload
+
+
+def resolve_lark_cli_command() -> str:
+    command = os.environ.get("LARK_CLI", "lark-cli")
+    path = Path(command).expanduser()
+    if path.is_file() and os.access(path, os.X_OK):
+        return str(path)
+    if command == "lark-cli":
+        return command
+
+    expected_suffix = Path("node_modules") / ".bin" / "lark-cli"
+    if len(path.parents) < 3 or Path(*path.parts[-3:]) != expected_suffix:
+        return command
+    ui_dir = path.parents[2]
+    if not (ui_dir / "package-lock.json").is_file():
+        return command
+
+    print("teamflow: installing local Lark dependencies...", file=sys.stderr)
+    try:
+        result = subprocess.run(
+            ["npm", "ci"],
+            cwd=ui_dir,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise ValueError("npm is required to install local Lark dependencies") from error
+    if result.returncode:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "npm ci failed")
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError("local lark-cli was not installed")
+    return str(path)
 
 
 def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> tuple[dict[str, Any], str | None]:
