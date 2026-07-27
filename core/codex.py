@@ -141,20 +141,8 @@ def run_codex_turn(
 
     message_id = client_message_id or str(uuid.uuid4())
     required_tools = tuple(required_mcp_tools)
-    authorization = (
+    if required_tools:
         require_teamflow_mcp_authorization(required_tools)
-        if required_tools
-        else None
-    )
-
-    if authorization and authorization["activation_pending"]:
-        return _run_codex_app_server_turn(
-            thread,
-            prompt,
-            client_message_id=message_id,
-            on_started=on_started,
-            stop_event=stop_event,
-        )
 
     try:
         return _run_codex_ipc_turn(

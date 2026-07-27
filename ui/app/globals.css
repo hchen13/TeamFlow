@@ -1985,11 +1985,6 @@ button.accessCheck.failed:focus-visible {
   background: #fff9ef;
 }
 
-.codexToolAuthorization.pending {
-  border-color: #b77928;
-  background: #fff9ef;
-}
-
 .codexToolAuthorization > div {
   display: grid;
   gap: 3px;

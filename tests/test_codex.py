@@ -526,45 +526,7 @@ class CodexTurnTest(unittest.TestCase):
         ipc.assert_not_called()
         fallback.assert_not_called()
 
-    def test_pending_desktop_reload_uses_fresh_app_server(self):
-        expected = {
-            "ok": True,
-            "turn_id": "turn_1",
-            "transport": "app-server",
-        }
-        with (
-            patch(
-                "core.codex.require_teamflow_mcp_authorization",
-                return_value={
-                    "authorized": True,
-                    "activation_pending": True,
-                },
-            ) as authorize,
-            patch("core.codex._run_codex_ipc_turn") as ipc,
-            patch(
-                "core.codex._run_codex_app_server_turn",
-                return_value=expected,
-            ) as app_server,
-        ):
-            result = run_codex_turn(
-                "thread_1",
-                "New work",
-                client_message_id="message_1",
-                required_mcp_tools=["update_task"],
-            )
-
-        self.assertIs(result, expected)
-        authorize.assert_called_once_with(("update_task",))
-        ipc.assert_not_called()
-        app_server.assert_called_once_with(
-            "thread_1",
-            "New work",
-            client_message_id="message_1",
-            on_started=None,
-            stop_event=None,
-        )
-
-    def test_loaded_authorization_uses_live_ipc(self):
+    def test_global_authorization_uses_live_ipc_when_session_is_loaded(self):
         expected = {
             "ok": True,
             "turn_id": "turn_1",
@@ -573,10 +535,7 @@ class CodexTurnTest(unittest.TestCase):
         with (
             patch(
                 "core.codex.require_teamflow_mcp_authorization",
-                return_value={
-                    "authorized": True,
-                    "activation_pending": False,
-                },
+                return_value={"authorized": True},
             ) as authorize,
             patch(
                 "core.codex._run_codex_ipc_turn",

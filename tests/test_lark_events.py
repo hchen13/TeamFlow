@@ -3389,7 +3389,6 @@ class LarkEventsTest(unittest.TestCase):
         runtime.delivery_runtime.background_mcp_ready = lambda: {
             "authorized": False,
             "configured": False,
-            "activation_pending": False,
             "missing_tools": ["update_task"],
         }
         output = io.StringIO()
@@ -3429,7 +3428,6 @@ class LarkEventsTest(unittest.TestCase):
             runtime.delivery_runtime.background_mcp_ready = lambda: {
                 "authorized": True,
                 "configured": True,
-                "activation_pending": True,
                 "missing_tools": [],
             }
             runtime.delivery_runtime.resume_permission_waiting(context)

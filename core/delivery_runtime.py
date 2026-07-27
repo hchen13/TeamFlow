@@ -215,8 +215,7 @@ class DeliveryRuntime:
             permission = self._background_mcp_status()
             if not permission["authorized"]:
                 raise CodexBackgroundMcpPermissionRequired(
-                    permission["missing_tools"],
-                    activation_pending=permission["activation_pending"],
+                    permission["missing_tools"]
                 )
             prompt = render_task_prompt(
                 context,
@@ -333,12 +332,10 @@ class DeliveryRuntime:
                 "missing_tools": list(
                     value.get("missing_tools") or TEAMFLOW_MCP_TOOLS
                 ),
-                "activation_pending": bool(value.get("activation_pending")),
             }
         return {
             "authorized": bool(value),
             "missing_tools": list(TEAMFLOW_MCP_TOOLS),
-            "activation_pending": False,
         }
 
     def reconcile(self, context: LarkEventContext) -> None:

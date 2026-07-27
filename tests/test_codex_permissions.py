@@ -97,14 +97,10 @@ class CodexPermissionTest(unittest.TestCase):
             ])
             path.write_text(original, encoding="utf-8")
 
-            with patch(
-                "core.codex_permissions._codex_client_process_ids",
-                return_value=set(),
-            ):
-                result = authorize_teamflow_mcp(
-                    confirmed=True,
-                    config_path=path,
-                )
+            result = authorize_teamflow_mcp(
+                confirmed=True,
+                config_path=path,
+            )
 
             parsed = tomllib.loads(path.read_text(encoding="utf-8"))
             server = (
@@ -122,61 +118,8 @@ class CodexPermissionTest(unittest.TestCase):
         self.assertTrue(result["authorized"])
         self.assertTrue(result["configured"])
         self.assertTrue(result["changed"])
-        self.assertFalse(result["restart_required"])
 
-    def test_authorization_uses_background_runtime_until_codex_restarts(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            path = root / "config.toml"
-            ipc_path = root / "ipc.sock"
-            path.write_text(
-                "\n".join([
-                    '[plugins."teamflow@teamflow"]',
-                    "enabled = true",
-                    "",
-                ]),
-                encoding="utf-8",
-            )
-            ipc_path.write_text("first runtime", encoding="utf-8")
-
-            with patch(
-                "core.codex_permissions._codex_client_process_ids",
-                return_value=None,
-            ):
-                pending = authorize_teamflow_mcp(
-                    confirmed=True,
-                    config_path=path,
-                    ipc_path=ipc_path,
-                )
-
-            self.assertTrue(pending["configured"])
-            self.assertTrue(pending["authorized"])
-            self.assertTrue(pending["activation_pending"])
-            self.assertTrue(pending["restart_required"])
-            self.assertEqual(
-                pending["source"],
-                "background_active_restart_pending",
-            )
-            self.assertIn("app-server", pending["warning"])
-            replacement = root / "new-ipc.sock"
-            replacement.write_text("second runtime", encoding="utf-8")
-            os.replace(replacement, ipc_path)
-
-            with patch(
-                "core.codex_permissions._codex_client_process_ids",
-                return_value=None,
-            ):
-                active = inspect_teamflow_mcp_authorization(
-                    path,
-                    ipc_path=ipc_path,
-                )
-
-        self.assertTrue(active["configured"])
-        self.assertTrue(active["authorized"])
-        self.assertFalse(active["activation_pending"])
-        self.assertFalse(active["restart_required"])
-
-    def test_authorization_waits_until_every_loaded_codex_client_exits(self):
+    def test_authorization_is_immediately_active_for_every_session(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
             path.write_text(
@@ -187,30 +130,17 @@ class CodexPermissionTest(unittest.TestCase):
                 ]),
                 encoding="utf-8",
             )
-            with patch(
-                "core.codex_permissions._codex_client_process_ids",
-                return_value={101, 202},
-            ):
-                pending = authorize_teamflow_mcp(
-                    confirmed=True,
-                    config_path=path,
-                )
-            with patch(
-                "core.codex_permissions._codex_client_process_ids",
-                return_value={202, 303},
-            ):
-                one_stale_client = inspect_teamflow_mcp_authorization(path)
-            with patch(
-                "core.codex_permissions._codex_client_process_ids",
-                return_value={303},
-            ):
-                active = inspect_teamflow_mcp_authorization(path)
-            marker = path.with_name(".teamflow-mcp-authorization.json")
 
-        self.assertTrue(pending["activation_pending"])
-        self.assertTrue(one_stale_client["activation_pending"])
-        self.assertFalse(active["activation_pending"])
-        self.assertFalse(marker.exists())
+            authorized = authorize_teamflow_mcp(
+                confirmed=True,
+                config_path=path,
+            )
+            inspected = inspect_teamflow_mcp_authorization(path)
+
+        for result in (authorized, inspected):
+            self.assertTrue(result["authorized"])
+            self.assertNotIn("activation_pending", result)
+            self.assertNotIn("restart_required", result)
 
     def test_authorization_requires_explicit_confirmation(self):
         with tempfile.TemporaryDirectory() as directory:
