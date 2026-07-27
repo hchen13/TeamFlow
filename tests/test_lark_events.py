@@ -1319,6 +1319,10 @@ class LarkEventsTest(unittest.TestCase):
                         "turns": [{
                             "id": "turn_generation",
                             "status": "inProgress",
+                            "items": [{
+                                "type": "userMessage",
+                                "clientId": old_delivery["client_message_id"],
+                            }],
                         }],
                     },
                 ),
@@ -3204,6 +3208,10 @@ class LarkEventsTest(unittest.TestCase):
                     "turns": [{
                         "id": "turn_interrupted",
                         "status": "interrupted",
+                        "items": [{
+                            "type": "userMessage",
+                            "clientId": delivery["client_message_id"],
+                        }],
                     }],
                 }),
                 redirect_stdout(retry_output),
@@ -3244,6 +3252,10 @@ class LarkEventsTest(unittest.TestCase):
                     "turns": [{
                         "id": "turn_interrupted",
                         "status": "interrupted",
+                        "items": [{
+                            "type": "userMessage",
+                            "clientId": delivery["client_message_id"],
+                        }],
                     }],
                 }),
                 redirect_stdout(failed_output),
@@ -3773,6 +3785,9 @@ class LarkEventsTest(unittest.TestCase):
                         "id": "turn_mcp_restart",
                         "status": "completed",
                         "items": [{
+                            "type": "userMessage",
+                            "clientId": delivery["client_message_id"],
+                        }, {
                             "type": "mcpToolCall",
                             "server": "teamflow",
                             "tool": "get_task",
