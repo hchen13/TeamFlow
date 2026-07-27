@@ -30,7 +30,7 @@ from core.codex import (
     _stop_app_server,
     codex_delivery_error_is_terminal,
 )
-from core.codex_ipc import CodexTurnAcceptanceUnknown
+from core.codex_ipc import CodexIpcEmptyTurn, CodexTurnAcceptanceUnknown
 from core.codex_permissions import CodexBackgroundMcpPermissionRequired
 
 
@@ -416,6 +416,7 @@ class CodexTurnTest(unittest.TestCase):
         connection.wait_for_turn_started.assert_called_once_with(
             "thread_1",
             "turn_1",
+            client_message_id="message_1",
             stop_event=None,
         )
         connection.wait_for_turn.assert_called_once_with(
@@ -446,6 +447,79 @@ class CodexTurnTest(unittest.TestCase):
             )
 
         started.assert_called_once_with("turn_ghost")
+        connection.wait_for_turn.assert_not_called()
+        connection.unfollow.assert_called_once_with("thread_1")
+        connection.close.assert_called_once_with()
+
+    def test_falls_back_when_an_owner_completes_without_the_requested_message(self):
+        connection = Mock()
+        connection.start_turn.return_value = "turn_empty"
+        connection.wait_for_turn_started.side_effect = CodexIpcEmptyTurn(
+            "Codex owner completed a turn without the requested message"
+        )
+        expected = {
+            "ok": True,
+            "turn_id": "turn_app_server",
+            "transport": "app-server",
+        }
+        started = Mock()
+        with (
+            patch(
+                "core.codex._CodexIpcConnection.connect",
+                return_value=connection,
+            ),
+            patch(
+                "core.codex._run_codex_app_server_turn",
+                return_value=expected,
+            ) as fallback,
+        ):
+            result = run_codex_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_empty",
+                on_started=started,
+            )
+
+        self.assertIs(result, expected)
+        started.assert_not_called()
+        fallback.assert_called_once_with(
+            "thread_1",
+            "New work",
+            client_message_id="message_empty",
+            on_started=started,
+            stop_event=None,
+        )
+        connection.wait_for_turn.assert_not_called()
+        connection.unfollow.assert_called_once_with("thread_1")
+        connection.close.assert_called_once_with()
+
+    def test_does_not_fall_back_after_an_accepted_ipc_turn_loses_connection(self):
+        connection = Mock()
+        connection.start_turn.return_value = "turn_unknown"
+        connection.wait_for_turn_started.side_effect = _CodexIpcUnavailable(
+            "Codex client IPC connection closed"
+        )
+        started = Mock()
+        with (
+            patch(
+                "core.codex._CodexIpcConnection.connect",
+                return_value=connection,
+            ),
+            patch("core.codex._run_codex_app_server_turn") as fallback,
+            self.assertRaisesRegex(
+                CodexTurnAcceptanceUnknown,
+                "could not be confirmed",
+            ),
+        ):
+            run_codex_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_unknown",
+                on_started=started,
+            )
+
+        started.assert_called_once_with("turn_unknown")
+        fallback.assert_not_called()
         connection.wait_for_turn.assert_not_called()
         connection.unfollow.assert_called_once_with("thread_1")
         connection.close.assert_called_once_with()
@@ -808,6 +882,26 @@ class CodexTurnTest(unittest.TestCase):
             stream.result("turn_1"),
             {"status": "completed", "response": "TEAMFLOW_ACK", "error": None},
         )
+
+    def test_matches_the_exact_client_message_in_an_ipc_turn(self):
+        stream = _CodexThreadStream()
+        stream.entries["turn"] = {
+            "turnId": "turn_1",
+            "status": "inProgress",
+            "items": {
+                0: {
+                    "type": "userMessage",
+                    "clientId": "message_1",
+                    "content": [{"type": "text", "text": "New work"}],
+                }
+            },
+        }
+
+        self.assertTrue(stream.contains_client_message("turn_1", "message_1"))
+        self.assertFalse(stream.contains_client_message("turn_1", "other"))
+        self.assertFalse(stream.is_terminal("turn_1"))
+        stream.entries["turn"]["status"] = "completed"
+        self.assertTrue(stream.is_terminal("turn_1"))
 
     def test_classifies_only_terminal_thread_lookup_errors_as_permanent(self):
         self.assertTrue(codex_thread_is_permanently_unavailable(

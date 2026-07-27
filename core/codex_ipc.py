@@ -25,6 +25,10 @@ class CodexIpcUnavailable(ValueError):
     pass
 
 
+class CodexIpcEmptyTurn(CodexIpcUnavailable):
+    pass
+
+
 class CodexTurnAcceptanceUnknown(ValueError):
     pass
 
@@ -183,11 +187,16 @@ class CodexIpcConnection:
         thread_id: str,
         turn_id: str,
         *,
+        client_message_id: str,
         stop_event: threading.Event | None,
     ) -> None:
         stream = self.streams.setdefault(thread_id, CodexThreadStream())
         deadline = time.monotonic() + 5
-        while not stream.contains(turn_id):
+        while not stream.contains_client_message(turn_id, client_message_id):
+            if stream.is_terminal(turn_id):
+                raise CodexIpcEmptyTurn(
+                    "Codex owner completed a turn without the requested message"
+                )
             if self.owner_client_id in self.disconnected_clients:
                 raise ValueError(
                     "Codex session owner disconnected before the turn materialized"
@@ -455,24 +464,43 @@ def run_codex_ipc_turn(
             client_message_id=client_message_id,
             stop_event=stop_event,
         )
-        if on_started:
-            on_started(turn_id)
-        connection.wait_for_turn_started(
-            thread,
-            turn_id,
-            stop_event=stop_event,
-        )
-        connection.ensure_exclusive_turn(
-            thread,
-            turn_id,
-            interrupt_competing_turn=interrupt_competing_turn,
-        )
-        completed = connection.wait_for_turn(
-            thread,
-            turn_id,
-            interrupt_competing_turn=interrupt_competing_turn,
-            stop_event=stop_event,
-        )
+        turn_recorded = False
+
+        def record_started() -> None:
+            nonlocal turn_recorded
+            turn_recorded = True
+            if on_started:
+                on_started(turn_id)
+
+        try:
+            connection.wait_for_turn_started(
+                thread,
+                turn_id,
+                client_message_id=client_message_id,
+                stop_event=stop_event,
+            )
+            record_started()
+            connection.ensure_exclusive_turn(
+                thread,
+                turn_id,
+                interrupt_competing_turn=interrupt_competing_turn,
+            )
+            completed = connection.wait_for_turn(
+                thread,
+                turn_id,
+                interrupt_competing_turn=interrupt_competing_turn,
+                stop_event=stop_event,
+            )
+        except CodexIpcEmptyTurn:
+            raise
+        except Exception as error:
+            if not turn_recorded:
+                record_started()
+            if isinstance(error, CodexIpcUnavailable):
+                raise CodexTurnAcceptanceUnknown(
+                    "Codex turn acceptance could not be confirmed"
+                ) from error
+            raise
         return {
             "ok": completed["status"] == "completed",
             "thread_id": thread,

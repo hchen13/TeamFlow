@@ -86,14 +86,7 @@ class CodexThreadStream:
             item[str(path[6])] = value
 
     def result(self, turn_id: str) -> dict[str, Any] | None:
-        entry = next(
-            (
-                item
-                for item in self.entries.values()
-                if str(item.get("turnId") or "") == turn_id
-            ),
-            None,
-        )
+        entry = self._turn(turn_id)
         if entry is None:
             return None
         status = str(entry.get("status") or "")
@@ -118,10 +111,25 @@ class CodexThreadStream:
             "error": error,
         }
 
-    def contains(self, turn_id: str) -> bool:
+    def contains_client_message(
+        self,
+        turn_id: str,
+        client_message_id: str,
+    ) -> bool:
+        entry = self._turn(turn_id)
+        if entry is None:
+            return False
         return any(
-            str(entry.get("turnId") or "") == turn_id
-            for entry in self.entries.values()
+            item.get("type") == "userMessage"
+            and str(item.get("clientId") or "") == client_message_id
+            for item in entry.get("items", {}).values()
+        )
+
+    def is_terminal(self, turn_id: str) -> bool:
+        entry = self._turn(turn_id)
+        return (
+            entry is not None
+            and str(entry.get("status") or "") in TERMINAL_TURN_STATUSES
         )
 
     def has_active_turn(self) -> bool:
@@ -137,6 +145,16 @@ class CodexThreadStream:
             and str(entry.get("status") or "") not in TERMINAL_TURN_STATUSES
             and str(entry.get("turnId") or "") != turn_id
             for entry in self.entries.values()
+        )
+
+    def _turn(self, turn_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                entry
+                for entry in self.entries.values()
+                if str(entry.get("turnId") or "") == turn_id
+            ),
+            None,
         )
 
     @staticmethod
