@@ -250,18 +250,24 @@ class DeliveryRuntime:
                     )
                 )
         except Exception as caught:
-            error = caught
+            error = (
+                InterruptedError(
+                    "TeamFlow daemon stopped while the Codex turn was running"
+                )
+                if turn_started and self.stopping.is_set()
+                else caught
+            )
             waiting_permission = isinstance(
-                caught,
+                error,
                 CodexBackgroundMcpPermissionRequired,
             )
-            acceptance_unknown = isinstance(caught, CodexTurnAcceptanceUnknown)
+            acceptance_unknown = isinstance(error, CodexTurnAcceptanceUnknown)
             retry = (
                 not waiting_permission
                 and not turn_started
                 and not acceptance_unknown
                 and delivery["harness_type"] == "codex"
-                and not self.delivery_error_is_terminal(caught)
+                and not self.delivery_error_is_terminal(error)
             )
         finally:
             reconciling = bool(error and (turn_started or acceptance_unknown))

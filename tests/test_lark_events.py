@@ -3155,7 +3155,8 @@ class LarkEventsTest(unittest.TestCase):
             self.assertTrue(required_mcp_tools)
             self.assertEqual(client_message_id, delivery["client_message_id"])
             on_started("turn_interrupted")
-            raise RuntimeError("TeamFlow daemon stopped while the Codex turn was running")
+            stop_event.set()
+            raise RuntimeError("plugin warning from app-server stderr")
 
         try:
             output = io.StringIO()
@@ -3181,9 +3182,13 @@ class LarkEventsTest(unittest.TestCase):
             (saved["status"], saved["attempts"], saved["turn_id"], saved["turn_status"]),
             ("processing", 1, "turn_interrupted", "inProgress"),
         )
-        self.assertIn("daemon stopped", saved["last_error"])
+        self.assertEqual(
+            saved["last_error"],
+            "TeamFlow daemon stopped while the Codex turn was running",
+        )
         self.assertIn("DISPATCH RECONCILING", output.getvalue())
         self.assertIn("turn=turn_interrupted", output.getvalue())
+        self.assertNotIn("plugin warning", output.getvalue())
         self.assertNotIn("DISPATCH RETRY", output.getvalue())
 
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:

@@ -281,10 +281,11 @@ DISPATCH NOT-REQUIRED reason="当前变更不通知 Agent"
 
 ### 投递对账
 
-1. 创建一张指令为“等待 30 秒后只回复固定标识，不调用 MCP”的可派发卡。
-2. 看到 `DISPATCH STARTED` 后立即按 `Ctrl-C` 停止后台调度程序。
-3. 等待 Agent turn 完成。
-4. 重新运行 `$tf daemon run`。
+1. 先在 Codex Desktop 或 VS Code 中加载目标 Agent Session，确认本次投递使用实时 Codex IPC。
+2. 创建一张指令为“等待 30 秒后只回复固定标识，不调用 MCP”的可派发卡。
+3. 看到 `DISPATCH STARTED` 后立即按 `Ctrl-C` 停止后台调度程序。
+4. 等待 Agent turn 在已加载的 Codex 客户端中完成。
+5. 重新运行 `$tf daemon run`。
 
 通过条件：
 
@@ -292,6 +293,8 @@ DISPATCH NOT-REQUIRED reason="当前变更不通知 Agent"
 - 重启后使用原 `turn_id` 对账。
 - 已完成 turn 出现 `DISPATCH RECOVERED`，不重复注入。
 - 未完成或永久失败按真实状态重试或失败，不能误报恢复成功。
+
+目标 Session 未加载时，TeamFlow 会使用 daemon 持有的独立 app-server。停止 daemon 会同时中断该 turn；此时重启后应记录 `DISPATCH RETRY`，并在新 turn 中只产生一次最终回复，不能误报 `DISPATCH RECOVERED`。
 
 ### MCP 重连
 
