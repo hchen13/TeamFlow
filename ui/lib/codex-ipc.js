@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync, statSync, watch } from "node:fs";
+import { existsSync, statSync, unwatchFile, watch, watchFile } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { createConnection } from "node:net";
@@ -13,7 +13,7 @@ const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"])
 const TERMINAL_TURN_STATUSES = new Set(["completed", "success", "failed", "interrupted", "cancelled", "canceled"]);
 const LOCAL_HOST_ID = "local";
 const FOLLOW_TIMEOUT_MS = 30000;
-const BRIDGE_VERSION = 12;
+const BRIDGE_VERSION = 13;
 const globalKey = Symbol.for("teamflow.codexBridge");
 
 export class CodexBridge extends EventEmitter {
@@ -33,6 +33,7 @@ export class CodexBridge extends EventEmitter {
     this.unconfirmedThreads = new Set();
     this.followTimers = new Map();
     this.watchers = [];
+    this.watchedFiles = [];
     this.startWatchers();
     this.connect();
   }
@@ -49,6 +50,7 @@ export class CodexBridge extends EventEmitter {
     }
     this.socket?.destroy();
     this.watchers.forEach((watcher) => watcher.close());
+    this.watchedFiles.forEach((file) => unwatchFile(file));
     this.removeAllListeners();
   }
 
@@ -477,6 +479,13 @@ export class CodexBridge extends EventEmitter {
         // Dropdown-open refresh remains available where recursive watch is unsupported.
       }
     }
+    const sessionIndex = path.join(this.codexHome, "session_index.jsonl");
+    watchFile(sessionIndex, { interval: 500, persistent: false }, (current, previous) => {
+      if (current.mtimeMs !== previous.mtimeMs || current.ino !== previous.ino) {
+        this.scheduleCatalogRefresh();
+      }
+    });
+    this.watchedFiles.push(sessionIndex);
   }
 
   scheduleCatalogRefresh() {
