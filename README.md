@@ -23,7 +23,7 @@ TeamFlow 把 Agent、角色、任务、工作流和事件连接到同一个项�
 - 为每个项目创建独立的 `.teamflow/teamflow.db`。
 - 配置飞书/Lark 用户身份或应用身份，并验证多维表格的认证、协作者、读写和清理权限。
 - 创建多维表格，或连接已有的 Base/Wiki 多维表格链接。
-- 初始化 `software-development` 任务表、字段、选项和看板视图。
+- 按所选协作模式初始化任务表、字段、选项和看板视图。
 - 用稳定字段键读取、创建和更新任务。
 - 查找 Codex Session，把 Session 注册为 PM、技术负责人、QA 或设计 Agent，并检查其运行状态。
 - 向空闲的 Codex Agent Session 发送一轮消息并等待结果。
@@ -116,7 +116,7 @@ http://127.0.0.1:13145/
 
 在 UI 中依次完成：
 
-1. 选择 `software-development` 工作流。
+1. 选择 `software-development` 或 `general-task` 协作模式。
 2. 连接飞书用户身份，或填写应用 ID 和应用密钥保存 Bot 身份。
 3. 粘贴已有多维表格链接，或用已保存身份创建新表。
 4. 验证各身份的看板访问权限，并选择拥有者/管理员作为主身份。
@@ -139,7 +139,7 @@ UI 负责工作流、飞书身份、看板访问、事件监听和 Agent Session
 
 初始化遵循增量策略：补充缺失字段、选项和视图，不删除已有业务字段。若已有默认数据表为空，TeamFlow 会复用它并删除其中的空白占位记录；非空默认表不会被改造成任务表。
 
-内置的 `software-development` 工作流包含四类项目角色：
+内置的 `software-development` 协作模式包含四类项目角色：
 
 | 角色键 | 角色 | 数量 |
 | --- | --- | --- |
@@ -149,6 +149,8 @@ UI 负责工作流、飞书身份、看板访问、事件监听和 Agent Session
 | `design` | 设计 | 多个 |
 
 任务类型为 `requirement`、`decision`、`design`、`development`、`bug`、`validation` 和 `chore`。
+
+`general-task` 协作模式包含单个 `owner` 以及可并行注册的 `executor`、`reviewer`，适用于调研、内容、决策、评审和一般事务。
 
 ## CLI 配置示例
 
@@ -351,11 +353,11 @@ core/                     Python 核心、数据库、飞书、Codex 与 daemon
 core/migrations/          项目 SQLite 迁移
 scripts/teamflow.py       CLI 实现
 teamflow                  基于 uv 的仓库入口
-skills/software-development/workflow.json
-                          软件开发工作流机器定义
+skills/*/workflow.json    各协作模式的机器定义
 docs/workflows/           工作流产品规则与架构边界
 ui/                       Next.js 本地配置 UI
 tests/                    Python 单元测试
+tests/acceptance/         真实 Codex、飞书与 UI 手工验收
 ```
 
-详细的角色职责、任务协议、状态流转与协作规则见 [软件开发工作流设计](docs/workflows/software-development.md)。
+统一的协作模式语法见 [TeamFlow 协作模式定义规范](docs/workflows/workflow-definition.md)，软件开发的具体职责和流转见 [软件开发工作流设计](docs/workflows/software-development.md)，测试边界与代码导读见 [测试导读](tests/README.md)，真实环境验收步骤见 [真实链路验收手册](tests/acceptance/manual.md)。

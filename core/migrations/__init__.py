@@ -22,6 +22,7 @@ MIGRATION_MODULES = (
     "019_delivery_assignment_revision",
     "020_agent_context_fingerprint",
     "021_task_executions",
+    "022_delivery_client_message",
 )
 
 MIGRATIONS = [import_module(f"{__name__}.{name}") for name in MIGRATION_MODULES]

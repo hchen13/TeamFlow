@@ -10,9 +10,10 @@ const FOLLOWING_VERSION = 1;
 const ARCHIVED_VERSION = 2;
 const UNARCHIVED_VERSION = 1;
 const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"]);
+const TERMINAL_TURN_STATUSES = new Set(["completed", "success", "failed", "interrupted", "cancelled", "canceled"]);
 const LOCAL_HOST_ID = "local";
 const FOLLOW_TIMEOUT_MS = 30000;
-const BRIDGE_VERSION = 9;
+const BRIDGE_VERSION = 10;
 const globalKey = Symbol.for("teamflow.codexBridge");
 
 export class CodexBridge extends EventEmitter {
@@ -215,6 +216,13 @@ export class CodexBridge extends EventEmitter {
       }
       return;
     }
+    if (method === "thread-stream-following-changed" && message.version === FOLLOWING_VERSION) {
+      const threadId = findValue(params, ["conversationId", "threadId"]);
+      if (params.following === false && threadId) {
+        this.removeSourceRuntime(message.sourceClientId || "unknown", threadId);
+      }
+      return;
+    }
     if (method === "thread-stream-state-changed" && message.version === STREAM_VERSION) {
       this.updateRuntime(message.sourceClientId || "unknown", params);
       return;
@@ -296,6 +304,22 @@ export class CodexBridge extends EventEmitter {
       } else {
         this.requestFollow(threadId);
       }
+    }
+  }
+
+  removeSourceRuntime(sourceClientId, threadId) {
+    const sourceRuntime = this.runtimeBySource.get(sourceClientId);
+    if (!sourceRuntime?.delete(threadId)) {
+      return;
+    }
+    if (sourceRuntime.size === 0) {
+      this.runtimeBySource.delete(sourceClientId);
+    }
+    const runtime = this.aggregateRuntime().get(threadId);
+    if (runtime) {
+      this.emit("event", { type: "runtime", ...runtime });
+    } else if (this.knownThreads.has(threadId)) {
+      this.requestFollow(threadId);
     }
   }
 
@@ -480,7 +504,9 @@ export function codexThreadMetadata(value) {
   const settings = runtimeObject?.latestThreadSettings;
   const threadId = findValue(value, ["conversationId", "threadId", "thread_id", "sessionId"])
     || runtimeObject?.id;
-  const status = runtimeStatus(runtimeObject?.threadRuntimeStatus) || findPatchStatus(value);
+  const reportedStatus = runtimeStatus(runtimeObject?.threadRuntimeStatus) || findPatchStatus(value);
+  const inferredTurnStatus = findTurnStatus(value);
+  const status = mergeRuntimeStatus(reportedStatus, inferredTurnStatus);
   const metadata = {
     threadId: threadId || undefined,
     status,
@@ -492,6 +518,77 @@ export function codexThreadMetadata(value) {
     error: status === "systemError" ? findErrorMessage(value) : undefined
   };
   return Object.fromEntries(Object.entries(metadata).filter(([, item]) => item !== undefined));
+}
+
+function mergeRuntimeStatus(reportedStatus, inferredTurnStatus) {
+  if (reportedStatus === "systemError") {
+    return reportedStatus;
+  }
+  if (reportedStatus === "notLoaded") {
+    return reportedStatus;
+  }
+  if (inferredTurnStatus === "active" || reportedStatus === "active") {
+    return "active";
+  }
+  return inferredTurnStatus || reportedStatus;
+}
+
+function findTurnStatus(value) {
+  const change = value?.change || value;
+  if (change?.type === "snapshot") {
+    const entities = change.conversationState?.turnHistory?.history?.entitiesByKey;
+    if (!entities || typeof entities !== "object") {
+      return undefined;
+    }
+    return Object.values(entities).some((entry) => isActiveTurn(entry)) ? "active" : "idle";
+  }
+  if (change?.type !== "patches" || !Array.isArray(change.patches)) {
+    return undefined;
+  }
+  let terminalChange = false;
+  for (const patch of change.patches) {
+    const patchPath = patch?.path;
+    if (!Array.isArray(patchPath) || patchPath.slice(0, 3).join("/") !== "turnHistory/history/entitiesByKey") {
+      continue;
+    }
+    if (patch.op === "remove" && patchPath.length === 4) {
+      terminalChange = true;
+      continue;
+    }
+    if (patchPath.length === 4 && patch.value && typeof patch.value === "object") {
+      const status = turnStatus(patch.value.status);
+      if (status === "active") {
+        return status;
+      }
+      if (status === "idle") {
+        terminalChange = true;
+      }
+      continue;
+    }
+    if (patchPath[4] === "status") {
+      const status = turnStatus(patch.value);
+      if (status === "active") {
+        return status;
+      }
+      if (status === "idle") {
+        terminalChange = true;
+      }
+    }
+  }
+  return terminalChange ? "idle" : undefined;
+}
+
+function isActiveTurn(entry) {
+  const status = typeof entry?.status === "string" ? entry.status : entry?.status?.type;
+  return Boolean(status) && !TERMINAL_TURN_STATUSES.has(status);
+}
+
+function turnStatus(value) {
+  const status = typeof value === "string" ? value : value?.type;
+  if (!status) {
+    return undefined;
+  }
+  return TERMINAL_TURN_STATUSES.has(status) ? "idle" : "active";
 }
 
 function findObjectWithRuntime(value, depth = 0) {

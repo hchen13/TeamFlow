@@ -7,7 +7,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .daemon import _daemon_request, _tool_input_hash
+from .daemon import _daemon_request
 
 
 mcp = FastMCP("TeamFlow")

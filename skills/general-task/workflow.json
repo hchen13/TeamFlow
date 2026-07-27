@@ -1,77 +1,89 @@
 {
   "schema_version": 2,
-  "key": "software-development",
+  "key": "general-task",
   "labels": {
-    "zh-CN": "软件开发",
-    "en": "Software development"
+    "zh-CN": "通用任务",
+    "en": "General task"
   },
   "short_descriptions": {
-    "zh-CN": "由 PM、技术负责人、QA 和设计共同完成规划、实现、评审与验证。",
-    "en": "Plan, build, review, and verify software work with PM, Technical Lead, QA, and Design."
+    "zh-CN": "由负责人、执行者和评审者协作完成一般性任务。",
+    "en": "Coordinate general work with an owner, executors, and reviewers."
   },
-  "coordinator_role": "pm",
+  "coordinator_role": "owner",
   "roles": [
     {
-      "key": "pm",
+      "key": "owner",
       "labels": {
-        "zh-CN": "PM",
-        "en": "PM"
+        "zh-CN": "负责人",
+        "en": "Owner"
       },
       "descriptions": {
-        "zh-CN": "负责范围、优先级、验收标准、任务路由、最终评审和项目决策人沟通。",
-        "en": "Owns scope, priority, acceptance criteria, task routing, final review, and stakeholder alignment."
+        "zh-CN": "负责目标、范围、优先级、任务路由、最终验收和外部决策沟通。",
+        "en": "Owns goals, scope, priority, task routing, final acceptance, and external decisions."
       },
       "allow_multiple": false
     },
     {
-      "key": "tl",
+      "key": "executor",
       "labels": {
-        "zh-CN": "技术负责人",
-        "en": "Technical Lead"
+        "zh-CN": "执行者",
+        "en": "Executor"
       },
       "descriptions": {
-        "zh-CN": "负责技术方案、任务拆解、实现、代码质量和技术风险。",
-        "en": "Owns technical design, task breakdown, implementation, code quality, and technical risk."
+        "zh-CN": "负责认领任务、完成工作、报告进展并提交结果与证据。",
+        "en": "Claims tasks, performs the work, reports progress, and submits results with evidence."
       },
       "allow_multiple": true
     },
     {
-      "key": "qa",
+      "key": "reviewer",
       "labels": {
-        "zh-CN": "QA",
-        "en": "QA"
+        "zh-CN": "评审者",
+        "en": "Reviewer"
       },
       "descriptions": {
-        "zh-CN": "负责行为验证、回归检查、测试证据和缺陷反馈。",
-        "en": "Owns behavior verification, regression checks, test evidence, and defect feedback."
-      },
-      "allow_multiple": true
-    },
-    {
-      "key": "design",
-      "labels": {
-        "zh-CN": "设计",
-        "en": "Design"
-      },
-      "descriptions": {
-        "zh-CN": "负责产品交互、视觉设计、用户体验和用户文案。",
-        "en": "Owns product interaction, visual design, user experience, and user-facing copy."
+        "zh-CN": "负责独立检查结果、识别风险并提交评审证据。",
+        "en": "Independently checks results, identifies risks, and submits review evidence."
       },
       "allow_multiple": true
     }
   ],
   "task_types": [
     {
-      "key": "requirement",
+      "key": "task",
       "labels": {
-        "zh-CN": "需求",
-        "en": "Requirement"
+        "zh-CN": "任务",
+        "en": "Task"
       },
       "descriptions": {
-        "zh-CN": "澄清问题、范围、目标和验收标准。",
-        "en": "Clarifies the problem, scope, goals, and acceptance criteria."
+        "zh-CN": "完成一个边界和验收标准明确的普通任务。",
+        "en": "Completes a general task with clear boundaries and acceptance criteria."
       },
-      "default_role": "pm"
+      "default_role": "executor"
+    },
+    {
+      "key": "research",
+      "labels": {
+        "zh-CN": "调研",
+        "en": "Research"
+      },
+      "descriptions": {
+        "zh-CN": "收集证据、比较选项并形成可复查结论。",
+        "en": "Collects evidence, compares options, and produces a reviewable conclusion."
+      },
+      "default_role": "executor"
+    },
+    {
+      "key": "content",
+      "labels": {
+        "zh-CN": "内容",
+        "en": "Content"
+      },
+      "descriptions": {
+        "zh-CN": "撰写、整理或更新文档及其他内容产物。",
+        "en": "Writes, organizes, or updates documents and other content deliverables."
+      },
+      "default_role": "executor"
     },
     {
       "key": "decision",
@@ -80,78 +92,42 @@
         "en": "Decision"
       },
       "descriptions": {
-        "zh-CN": "比较选项、记录取舍并形成明确结论。",
-        "en": "Compares options, records tradeoffs, and produces a clear decision."
+        "zh-CN": "比较方案、记录取舍并形成明确决定。",
+        "en": "Compares alternatives, records tradeoffs, and produces a clear decision."
       },
-      "default_role": "pm"
+      "default_role": "owner"
     },
     {
-      "key": "design",
+      "key": "review",
       "labels": {
-        "zh-CN": "设计",
-        "en": "Design"
+        "zh-CN": "评审",
+        "en": "Review"
       },
       "descriptions": {
-        "zh-CN": "产出用户体验、界面、视觉、交互或用户文案。",
-        "en": "Produces user experience, interface, visual, interaction, or user-copy work."
+        "zh-CN": "独立检查已有产物并形成评审结论。",
+        "en": "Independently checks an existing deliverable and produces a review conclusion."
       },
-      "default_role": "design"
-    },
-    {
-      "key": "development",
-      "labels": {
-        "zh-CN": "开发",
-        "en": "Development"
-      },
-      "descriptions": {
-        "zh-CN": "完成实现、重构或技术改造。",
-        "en": "Implements, refactors, or performs technical changes."
-      },
-      "default_role": "tl"
-    },
-    {
-      "key": "bug",
-      "labels": {
-        "zh-CN": "缺陷",
-        "en": "Bug"
-      },
-      "descriptions": {
-        "zh-CN": "完成缺陷复现、定位、修复和回归准备。",
-        "en": "Reproduces, diagnoses, fixes, and prepares defects for regression testing."
-      },
-      "default_role": "tl"
-    },
-    {
-      "key": "validation",
-      "labels": {
-        "zh-CN": "验证",
-        "en": "Validation"
-      },
-      "descriptions": {
-        "zh-CN": "执行测试、验证、回归和发布检查。",
-        "en": "Performs testing, validation, regression, and release checks."
-      },
-      "default_role": "qa"
+      "default_role": "reviewer"
     },
     {
       "key": "chore",
       "labels": {
-        "zh-CN": "工程事务",
+        "zh-CN": "事务",
         "en": "Chore"
       },
       "descriptions": {
-        "zh-CN": "处理配置、构建、文档和工程维护。",
-        "en": "Handles configuration, build work, documentation, and engineering maintenance."
+        "zh-CN": "处理配置、维护、整理和其他日常事务。",
+        "en": "Handles configuration, maintenance, organization, and other routine work."
       },
-      "default_role": "tl"
+      "default_role": "executor"
     }
   ],
   "waiting_targets": [
     {
-      "key": "pm",
+      "key": "owner",
       "labels": {
-        "zh-CN": "PM",
-        "en": "PM"
+        "zh-CN": "负责人",
+        "en": "Owner"
       },
       "color": {
         "hue": "Blue",
@@ -161,7 +137,7 @@
     {
       "key": "stakeholder",
       "labels": {
-        "zh-CN": "项目决策人",
+        "zh-CN": "外部决策人",
         "en": "Stakeholder"
       },
       "color": {
@@ -210,8 +186,8 @@
         },
         "dispatch": "task_role",
         "dispatch_instructions": {
-          "zh-CN": "这是一项等待认领的可执行任务。请读取完整卡片并判断是否接手；仅在决定执行后通过 TeamFlow 工具认领，收到通知本身不代表已经认领。",
-          "en": "This task is ready to be claimed. Read the complete task before deciding whether to claim it through TeamFlow; receiving this notification does not claim the task."
+          "zh-CN": "这是一项等待认领的任务。请读取完整卡片并判断是否接手；仅在决定执行后通过 TeamFlow 工具认领。",
+          "en": "This task is ready to be claimed. Read the complete task and claim it through TeamFlow only after deciding to execute it."
         },
         "required_fields": [
           "title",
@@ -256,8 +232,8 @@
         },
         "dispatch": "coordinator",
         "dispatch_instructions": {
-          "zh-CN": "该任务已进入待评审。请读取结果与证据，按照当前协作模式中协调负责人的权限完成评审并决定下一步。",
-          "en": "This task is ready for review. Read its result and evidence, then apply a review decision permitted for the workflow coordinator."
+          "zh-CN": "该任务已进入待评审。请读取结果与证据，并由负责人决定通过、返工或转交独立评审。",
+          "en": "This task is ready for review. Read its result and evidence, then decide whether to approve, rework, or request an independent review."
         },
         "required_fields": [
           "title",
@@ -281,8 +257,8 @@
         },
         "dispatch": "coordinator",
         "dispatch_instructions": {
-          "zh-CN": "该任务刚进入已阻塞。请读取阻塞原因、等待对象和下一步，按照当前协作模式中协调负责人的权限处理本次阻塞。",
-          "en": "This task is blocked. Read the blocking reason, waiting target, and next action, then handle it within the workflow coordinator's permissions."
+          "zh-CN": "该任务已阻塞。请读取阻塞原因、等待对象和下一步，并由负责人协调处理。",
+          "en": "This task is blocked. Read the reason, waiting target, and next action, then coordinate the resolution as the owner."
         },
         "required_fields": [
           "title",
@@ -370,8 +346,8 @@
           {
             "key": "coordinate",
             "labels": {
-              "zh-CN": "协调更新",
-              "en": "Coordinator update"
+              "zh-CN": "负责人更新",
+              "en": "Owner update"
             },
             "actors": [
               "coordinator"
@@ -398,8 +374,8 @@
           {
             "key": "coordinate_blocked",
             "labels": {
-              "zh-CN": "阻塞态协调更新",
-              "en": "Blocked task coordinator update"
+              "zh-CN": "阻塞态负责人更新",
+              "en": "Blocked task owner update"
             },
             "actors": [
               "coordinator"
@@ -449,11 +425,11 @@
           "en": "Route task"
         },
         "rules": [
-        {
-          "key": "prepare",
-          "labels": {
-            "zh-CN": "准备完成",
-            "en": "Ready for execution"
+          {
+            "key": "prepare",
+            "labels": {
+              "zh-CN": "准备完成",
+              "en": "Ready for execution"
             },
             "actors": [
               "coordinator"
@@ -472,40 +448,14 @@
               "agent",
               "agent_id",
               "blocked_reason",
-            "waiting_on"
-          ]
-        },
-        {
-          "key": "delegate",
-          "labels": {
-            "zh-CN": "转交执行职责",
-            "en": "Delegate for execution"
+              "waiting_on"
+            ]
           },
-          "actors": [
-            "coordinator"
-          ],
-          "from": [
-            "ready"
-          ],
-          "to": "ready",
-          "writable_fields": [
-            "role"
-          ],
-          "required_inputs": [
-            "role"
-          ],
-          "clear_fields": [
-            "agent",
-            "agent_id",
-            "blocked_reason",
-            "waiting_on"
-          ]
-        },
-        {
-          "key": "resume",
-          "labels": {
-            "zh-CN": "解除阻塞",
-            "en": "Resume after blocking"
+          {
+            "key": "resume",
+            "labels": {
+              "zh-CN": "解除阻塞",
+              "en": "Resume after blocking"
             },
             "actors": [
               "coordinator"
@@ -605,9 +555,8 @@
               "assigned_agent"
             ],
             "roles": [
-              "pm",
-              "tl",
-              "design"
+              "owner",
+              "executor"
             ],
             "from": [
               "in_progress"
@@ -626,16 +575,16 @@
             ]
           },
           {
-            "key": "passed",
+            "key": "reviewed",
             "labels": {
-              "zh-CN": "验证通过",
-              "en": "Validation passed"
+              "zh-CN": "评审完成",
+              "en": "Review completed"
             },
             "actors": [
               "assigned_agent"
             ],
             "roles": [
-              "qa"
+              "reviewer"
             ],
             "from": [
               "in_progress"
@@ -653,38 +602,7 @@
               "result_evidence"
             ],
             "field_prefixes": {
-              "result_evidence": "QA 结论：通过（Passed）\n"
-            }
-          },
-          {
-            "key": "failed",
-            "labels": {
-              "zh-CN": "验证未通过",
-              "en": "Validation failed"
-            },
-            "actors": [
-              "assigned_agent"
-            ],
-            "roles": [
-              "qa"
-            ],
-            "from": [
-              "in_progress"
-            ],
-            "to": "review",
-            "writable_fields": [
-              "progress",
-              "next_action",
-              "result_evidence"
-            ],
-            "required_inputs": [
-              "result_evidence"
-            ],
-            "required_task_fields": [
-              "result_evidence"
-            ],
-            "field_prefixes": {
-              "result_evidence": "QA 结论：未通过（Failed）\n"
+              "result_evidence": "评审结论：已审阅（Reviewed）\n"
             }
           }
         ]
@@ -696,7 +614,7 @@
         },
         "rules": [
           {
-            "key": "ready_executor",
+            "key": "ready_worker",
             "labels": {
               "zh-CN": "执行前发现阻塞",
               "en": "Blocked before execution"
@@ -705,9 +623,8 @@
               "task_role"
             ],
             "roles": [
-              "tl",
-              "qa",
-              "design"
+              "executor",
+              "reviewer"
             ],
             "from": [
               "ready"
@@ -726,14 +643,14 @@
             ],
             "field_values": {
               "waiting_on": [
-                "pm"
+                "owner"
               ]
             }
           },
           {
-            "key": "ready_coordinator",
+            "key": "ready_owner",
             "labels": {
-              "zh-CN": "执行前等待项目决策",
+              "zh-CN": "执行前等待外部决策",
               "en": "Await stakeholder before execution"
             },
             "actors": [
@@ -761,18 +678,17 @@
             }
           },
           {
-            "key": "executor",
+            "key": "worker",
             "labels": {
-              "zh-CN": "执行中等待 PM",
-              "en": "Executor waiting on PM"
+              "zh-CN": "执行中等待负责人",
+              "en": "Worker waiting on owner"
             },
             "actors": [
               "assigned_agent"
             ],
             "roles": [
-              "tl",
-              "qa",
-              "design"
+              "executor",
+              "reviewer"
             ],
             "from": [
               "in_progress"
@@ -791,21 +707,21 @@
             ],
             "field_values": {
               "waiting_on": [
-                "pm"
+                "owner"
               ]
             }
           },
           {
-            "key": "coordinator",
+            "key": "owner",
             "labels": {
-              "zh-CN": "等待项目决策人",
+              "zh-CN": "等待外部决策人",
               "en": "Waiting on stakeholder"
             },
             "actors": [
               "coordinator"
             ],
             "roles": [
-              "pm"
+              "owner"
             ],
             "from": [
               "in_progress",
@@ -858,13 +774,6 @@
             ],
             "required_task_fields": [
               "result_evidence"
-            ],
-            "clear_fields": [
-              "role",
-              "agent",
-              "agent_id",
-              "progress",
-              "next_action"
             ]
           },
           {
@@ -898,10 +807,10 @@
             ]
           },
           {
-            "key": "send_to_qa",
+            "key": "send_to_reviewer",
             "labels": {
-              "zh-CN": "转交 QA",
-              "en": "Send to QA"
+              "zh-CN": "转交评审者",
+              "en": "Send to reviewer"
             },
             "actors": [
               "coordinator"
@@ -921,7 +830,7 @@
               "result_evidence"
             ],
             "fixed_fields": {
-              "role": "qa"
+              "role": "reviewer"
             },
             "clear_fields": [
               "agent",

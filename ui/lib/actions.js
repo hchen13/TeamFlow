@@ -3,10 +3,12 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { getCodexBridge } from "./codex-ipc";
-import { run, startLarkUserAuthFlow, workspaceArgs } from "./teamflow";
+import { run, runJson, startLarkUserAuthFlow, workspaceArgs } from "./teamflow";
 
 const messages = {
   zh: {
+    codexToolsAuthorized: "TeamFlow 工具授权已生效。",
+    codexToolsAuthorizedPending: "TeamFlow 后台工具授权已生效；重启当前已运行的 Codex 客户端后恢复前台实时派发。",
     agentRegistered: "Agent 已注册，状态已检查",
     agentRemoved: "Agent 已移除",
     agentUpdated: "Agent Session 已切换",
@@ -27,6 +29,8 @@ const messages = {
     workflowUpdated: "Workflow 已更新"
   },
   en: {
+    codexToolsAuthorized: "TeamFlow tool authorization is active.",
+    codexToolsAuthorizedPending: "TeamFlow background tool authorization is active. Restart the currently running Codex clients to restore live foreground dispatch.",
     agentRegistered: "Agent registered and checked",
     agentRemoved: "Agent removed",
     agentUpdated: "Agent session updated",
@@ -47,6 +51,22 @@ const messages = {
     workflowUpdated: "Workflow updated"
   }
 };
+
+export async function authorizeCodexTools(formData) {
+  const lang = language(formData);
+  let target;
+  try {
+    const result = await runJson(["authorize-codex-tools", "--confirmed"]);
+    revalidatePath("/");
+    const message = result.activation_pending
+      ? messages[lang].codexToolsAuthorizedPending
+      : messages[lang].codexToolsAuthorized;
+    target = redirectTarget("agent", lang, message);
+  } catch (error) {
+    target = redirectTarget("agent", lang, localizedError(error, lang), true);
+  }
+  redirect(target);
+}
 
 export async function configureLarkIdentity(formData) {
   const args = ["configure-lark-identity", ...workspaceArgs()];

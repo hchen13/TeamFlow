@@ -24,7 +24,11 @@ from .codex import (
 )
 from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
 from .migrations import MIGRATIONS
-from .workflow import load_workflow_definitions, sync_workflow_definitions
+from .workflow import (
+    load_workflow_definition,
+    load_workflow_definitions,
+    sync_workflow_definitions,
+)
 
 
 SCHEMA_VERSION = MIGRATIONS[-1].ID
@@ -85,6 +89,17 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
 
     with connect(paths.db_path) as conn:
         bootstrap_workspace(conn)
+        definitions = load_workflow_definitions()
+        installed_roles = {
+            (workflow_key, role["key"])
+            for workflow_key, definition in definitions.items()
+            for role in definition["roles"]
+        }
+        installed_task_types = {
+            (workflow_key, task_type["key"])
+            for workflow_key, definition in definitions.items()
+            for task_type in definition["task_types"]
+        }
         workspace_row = conn.execute(
             "SELECT * FROM workspaces WHERE root_path = ?",
             (str(paths.root),),
@@ -107,6 +122,42 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
         )
         for access in access_rows:
             access["missing_scopes"] = json.loads(access["missing_scopes"] or "[]")
+        workflows = [
+            row
+            for row in fetch_all(conn, "SELECT * FROM workflows ORDER BY key")
+            if row["key"] in definitions
+        ]
+        roles = [
+            row
+            for row in fetch_all(conn, """
+                SELECT roles.*, workflows.key AS workflow_key
+                FROM roles
+                JOIN workflows ON workflows.id = roles.workflow_id
+                ORDER BY workflows.key, roles.role_key
+            """)
+            if (row["workflow_key"], row["role_key"]) in installed_roles
+        ]
+        task_types = [
+            row
+            for row in fetch_all(conn, """
+                SELECT task_types.*, workflows.key AS workflow_key
+                FROM task_types
+                JOIN workflows ON workflows.id = task_types.workflow_id
+                ORDER BY workflows.key, task_types.type_key
+            """)
+            if (row["workflow_key"], row["type_key"]) in installed_task_types
+        ]
+        agents = [
+            row
+            for row in fetch_all(conn, """
+                SELECT agents.*, workflows.key AS workflow_key
+                FROM agents
+                LEFT JOIN workflows ON workflows.id = agents.workflow_id
+                WHERE agents.workspace_id = ?
+                ORDER BY agents.role_key, agents.updated_at DESC
+            """, workspace_id)
+            if (row["workflow_key"], row["role_key"]) in installed_roles
+        ]
         return {
             "ok": True,
             "initialized": True,
@@ -119,26 +170,10 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
             "lark_board": row_dict(board_row),
             "lark_board_access": access_rows,
             "current_workflow": row_dict(current_workflow(conn, workspace_row)),
-            "workflows": fetch_all(conn, "SELECT * FROM workflows ORDER BY key"),
-            "roles": fetch_all(conn, """
-                SELECT roles.*, workflows.key AS workflow_key
-                FROM roles
-                JOIN workflows ON workflows.id = roles.workflow_id
-                ORDER BY workflows.key, roles.role_key
-            """),
-            "task_types": fetch_all(conn, """
-                SELECT task_types.*, workflows.key AS workflow_key
-                FROM task_types
-                JOIN workflows ON workflows.id = task_types.workflow_id
-                ORDER BY workflows.key, task_types.type_key
-            """),
-            "agents": fetch_all(conn, """
-                SELECT agents.*, workflows.key AS workflow_key
-                FROM agents
-                LEFT JOIN workflows ON workflows.id = agents.workflow_id
-                WHERE agents.workspace_id = ?
-                ORDER BY agents.role_key, agents.updated_at DESC
-            """, workspace_id),
+            "workflows": workflows,
+            "roles": roles,
+            "task_types": task_types,
+            "agents": agents,
         }
 
 
@@ -363,6 +398,7 @@ def select_workflow(workspace: str | None, *, workflow: str) -> dict[str, Any]:
     init_result = init_workspace(workspace)
     paths = resolve_workspace_paths(workspace)
     workflow_key = normalize_key(workflow, "workflow")
+    load_workflow_definition(workflow_key)
 
     with connect(paths.db_path) as conn:
         workspace_id = workspace_id_for_root(conn, paths.root)
@@ -892,7 +928,25 @@ def run_migrations(conn: sqlite3.Connection) -> None:
 
 def bootstrap_workspace(conn: sqlite3.Connection) -> None:
     run_migrations(conn)
-    sync_workflow_definitions(conn, load_workflow_definitions())
+    definitions = load_workflow_definitions()
+    sync_workflow_definitions(conn, definitions)
+    if DEFAULT_WORKFLOW_KEY not in definitions:
+        raise ValueError(f"default workflow definition is not installed: {DEFAULT_WORKFLOW_KEY}")
+    placeholders = ", ".join("?" for _ in definitions)
+    conn.execute(
+        f"""
+        UPDATE workspaces
+        SET current_workflow_id = (
+              SELECT id FROM workflows WHERE key = ?
+            ),
+            updated_at = ?
+        WHERE current_workflow_id IS NULL
+           OR current_workflow_id NOT IN (
+                SELECT id FROM workflows WHERE key IN ({placeholders})
+              )
+        """,
+        (DEFAULT_WORKFLOW_KEY, now(), *definitions),
+    )
 
 
 def upsert_workspace(conn: sqlite3.Connection, root: Path, display_name: str | None) -> str:
@@ -1102,6 +1156,15 @@ def upsert_agent(
 
 
 def role_for_key(conn: sqlite3.Connection, workflow_key: str, role_key: str) -> sqlite3.Row:
+    definition = load_workflow_definition(workflow_key)
+    supported_role_keys = {role["key"] for role in definition["roles"]}
+    if role_key not in supported_role_keys:
+        supported = ", ".join(
+            f"{workflow_key}:{key}" for key in sorted(supported_role_keys)
+        )
+        raise ValueError(
+            f"unsupported role: {workflow_key}:{role_key}. Supported roles: {supported}"
+        )
     role = conn.execute(
         """
         SELECT roles.*, workflows.key AS workflow_key
@@ -1128,6 +1191,7 @@ def role_for_key(conn: sqlite3.Connection, workflow_key: str, role_key: str) -> 
 
 
 def workflow_for_key(conn: sqlite3.Connection, workflow_key: str) -> sqlite3.Row:
+    load_workflow_definition(workflow_key)
     workflow = conn.execute("SELECT * FROM workflows WHERE key = ?", (workflow_key,)).fetchone()
     if workflow is None:
         supported = [row["key"] for row in conn.execute("SELECT key FROM workflows ORDER BY key")]

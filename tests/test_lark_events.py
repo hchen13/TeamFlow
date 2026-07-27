@@ -29,6 +29,10 @@ from core.agent_runtime import (
     mark_agent_context_recovery_pending,
 )
 from core.config import resolve_workspace_paths
+from core.codex_permissions import (
+    TEAMFLOW_MCP_TOOLS,
+    CodexBackgroundMcpPermissionRequired,
+)
 from core.daemon import (
     DaemonServer,
     TeamFlowDaemon,
@@ -40,6 +44,7 @@ from core.daemon import (
     run_daemon,
 )
 from core.db import connect, configure_lark_board, configure_lark_identity, init_workspace, now, update_agent
+from core.delivery_runtime import DeliveryRuntime
 from core.global_db import (
     claim_lark_event,
     cleanup_lark_events,
@@ -65,12 +70,15 @@ from core.lark_events import (
 )
 from core.task_dispatch import (
     claim_task_deliveries,
+    due_processing_task_deliveries,
     finish_task_delivery,
     mark_task_delivery_turn_started,
     prepare_agent_catchup_deliveries,
     prepare_task_deliveries,
+    recover_task_deliveries,
     render_task_prompt,
     task_delivery_is_current,
+    task_delivery_turn_is_current,
 )
 from core.teamflow_tools import list_available_tasks
 from core.workflow import load_workflow_definition, validate_workflow_definition
@@ -340,6 +348,44 @@ class LarkEventsTest(unittest.TestCase):
 
         process_type.assert_not_called()
 
+    def test_daemon_worker_replacement_uses_worker_facade(self):
+        runtime = TeamFlowDaemon()
+        previous = self.context()
+        replacement = LarkEventContext(**{
+            **previous.__dict__,
+            "app_secret": "replacement-secret",
+        })
+        previous_worker = {
+            "context": previous,
+            "credentials": (
+                previous.app_id,
+                previous.app_secret,
+                previous.brand,
+            ),
+            "process": Mock(),
+            "ready": Mock(),
+            "errors": Mock(),
+        }
+        ready = Mock()
+        ready.wait.return_value = True
+        errors = Mock()
+        errors.get_nowait.return_value = None
+        process = Mock()
+        process.is_alive.return_value = True
+        runtime.workers[runtime.app_key(previous)] = previous_worker
+
+        with (
+            patch.object(runtime, "_stop_worker") as stop_worker,
+            patch.object(runtime.mp, "Event", return_value=ready),
+            patch.object(runtime.mp, "Queue", return_value=errors),
+            patch.object(runtime.mp, "Process", return_value=process),
+        ):
+            runtime._ensure_app(replacement)
+
+        runtime.workers.clear()
+        runtime.close()
+        stop_worker.assert_called_once_with(previous_worker)
+
     def test_daemon_stops_an_app_after_the_last_workspace_moves(self):
         runtime = TeamFlowDaemon()
         previous = self.context()
@@ -362,6 +408,16 @@ class LarkEventsTest(unittest.TestCase):
         runtime.close()
 
         stop_worker.assert_called_once_with(previous_worker)
+
+    def test_daemon_close_uses_worker_facade(self):
+        runtime = TeamFlowDaemon()
+        worker = {"process": Mock(), "errors": Mock()}
+        runtime.workers["app"] = worker
+
+        with patch.object(runtime, "_stop_worker") as stop_worker:
+            runtime.close()
+
+        stop_worker.assert_called_once_with(worker)
 
     def test_failed_initial_reconciliation_does_not_commit_the_route(self):
         runtime = TeamFlowDaemon()
@@ -769,12 +825,298 @@ class LarkEventsTest(unittest.TestCase):
 
         first = claim_task_deliveries(context)
         self.assertEqual(len(first), 1)
+        self.assertEqual(claim_task_deliveries(context), [])
         finish_task_delivery(
             context,
             delivery_id=first[0]["id"],
             result={"ok": True, "status": "completed"},
         )
         self.assertEqual(len(claim_task_deliveries(context)), 1)
+
+    def test_unconfirmed_delivery_keeps_its_message_id_until_reconciled(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_message', ?, ?, ?, 'tl', 'codex',
+                          'session_message', 'Message TL', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        save_task_snapshot(
+            context,
+            record_id="recMessage",
+            task={
+                "record_id": "recMessage",
+                "task_id": "TF-MESSAGE",
+                "title": "Preserve delivery intent",
+                "status": "ready",
+                "role": "tl",
+            },
+            source_event_id="evtMessage",
+            source_revision="22",
+        )
+        prepare_task_deliveries(context)
+
+        first = claim_task_deliveries(context)[0]
+        recover_task_deliveries(context)
+        self.assertEqual(claim_task_deliveries(context), [])
+        recovered = due_processing_task_deliveries(context)[0]
+        self.assertEqual(
+            recovered["client_message_id"],
+            first["client_message_id"],
+        )
+
+        mark_task_delivery_turn_started(
+            context,
+            delivery_id=recovered["id"],
+            turn_id="turn_message",
+        )
+        finish_task_delivery(
+            context,
+            delivery_id=recovered["id"],
+            error=ValueError("MCP unavailable"),
+            retry=True,
+        )
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
+            )
+        retried = claim_task_deliveries(context)[0]
+        self.assertNotEqual(
+            retried["client_message_id"],
+            first["client_message_id"],
+        )
+
+    def test_delivery_schedule_reserves_processing_sessions_in_other_workspaces(self):
+        first = Mock()
+        second = Mock()
+        runtime = DeliveryRuntime(
+            sync_lock=threading.RLock(),
+            stopping=threading.Event(),
+            routes_ready=threading.Event(),
+            wakeup=threading.Event(),
+            active_sessions=set(),
+            workers={},
+            contexts=lambda: [first, second],
+            reserved_sessions=lambda: {"shared_session"},
+            get_task=Mock(),
+            run_turn=Mock(),
+            read_thread=Mock(),
+            stop_turn=Mock(),
+            find_turn=Mock(),
+            find_turn_by_client_message_id=Mock(),
+            unresolved_mcp_failures=Mock(),
+            delivery_error_is_terminal=Mock(),
+            log_dispatch=Mock(),
+        )
+
+        with patch(
+            "core.delivery_runtime.claim_task_deliveries",
+            return_value=[],
+        ) as claim:
+            runtime.schedule(second)
+
+        claim.assert_called_once_with(
+            second,
+            exclude_session_ids={"shared_session"},
+        )
+
+    def test_daemon_reserves_processing_sessions_from_an_unloaded_workspace(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_unloaded', ?, ?, ?, 'tl', 'codex',
+                          'session_unloaded', 'Unloaded TL', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        save_task_snapshot(
+            context,
+            record_id="recUnloaded",
+            task={
+                "record_id": "recUnloaded",
+                "task_id": "TF-UNLOADED",
+                "title": "Reserve an unloaded workspace session",
+                "status": "ready",
+                "role": "tl",
+            },
+            source_event_id="evtUnloaded",
+            source_revision="73",
+        )
+        prepare_task_deliveries(context)
+        claim_task_deliveries(context)
+        register_workspace(self.workspace, enabled=True)
+
+        runtime = TeamFlowDaemon()
+        try:
+            self.assertNotIn(self.workspace, runtime.routes)
+            self.assertIn(
+                "session_unloaded",
+                runtime._reserved_delivery_sessions(),
+            )
+        finally:
+            runtime.close()
+
+    def test_delivery_runtime_executes_different_sessions_in_parallel(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            roles = {
+                row["role_key"]: row
+                for row in conn.execute(
+                    "SELECT * FROM roles WHERE workflow_id = ? AND role_key IN ('pm', 'tl')",
+                    (workspace["current_workflow_id"],),
+                )
+            }
+            for agent_id, role_key, session_id in (
+                ("agent_parallel_pm", "pm", "session_parallel_pm"),
+                ("agent_parallel_tl", "tl", "session_parallel_tl"),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO agents (
+                      id, workspace_id, workflow_id, role_id, role_key,
+                      harness_type, session_id, display_name, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'codex', ?, ?, ?, ?)
+                    """,
+                    (
+                        agent_id,
+                        workspace["id"],
+                        workspace["current_workflow_id"],
+                        roles[role_key]["id"],
+                        role_key,
+                        session_id,
+                        f"Parallel {role_key.upper()}",
+                        now(),
+                        now(),
+                    ),
+                )
+        for index, role_key in enumerate(("pm", "tl"), start=1):
+            save_task_snapshot(
+                context,
+                record_id=f"recParallel{index}",
+                task={
+                    "record_id": f"recParallel{index}",
+                    "task_id": f"TF-002{index}",
+                    "title": f"Parallel task {index}",
+                    "status": "ready",
+                    "role": role_key,
+                },
+                source_event_id=f"evtParallel{index}",
+                source_revision=str(30 + index),
+            )
+        prepare_task_deliveries(context)
+
+        release = threading.Event()
+        both_started = threading.Event()
+        started_sessions = set()
+        started_lock = threading.Lock()
+
+        def get_task(_workspace, *, record_id):
+            role_key = "pm" if record_id == "recParallel1" else "tl"
+            return {
+                "task": {
+                    "record_id": record_id,
+                    "task_id": (
+                        "TF-0021"
+                        if role_key == "pm"
+                        else "TF-0022"
+                    ),
+                    "title": f"Parallel {role_key.upper()}",
+                    "status": "ready",
+                    "role": role_key,
+                }
+            }
+
+        def run_turn(
+            session_id,
+            _prompt,
+            *,
+            client_message_id,
+            on_started,
+            stop_event,
+        ):
+            self.assertTrue(client_message_id)
+            on_started(f"turn_{session_id}")
+            with started_lock:
+                started_sessions.add(session_id)
+                if len(started_sessions) == 2:
+                    both_started.set()
+            if not release.wait(2):
+                raise TimeoutError("parallel delivery test did not release workers")
+            return {
+                "ok": True,
+                "status": "completed",
+                "turn_id": f"turn_{session_id}",
+                "transport": "test",
+            }
+
+        active_sessions = set()
+        workers = {}
+        runtime = DeliveryRuntime(
+            sync_lock=threading.RLock(),
+            stopping=threading.Event(),
+            routes_ready=threading.Event(),
+            wakeup=threading.Event(),
+            active_sessions=active_sessions,
+            workers=workers,
+            contexts=lambda: [context],
+            reserved_sessions=lambda: set(),
+            get_task=get_task,
+            run_turn=run_turn,
+            read_thread=lambda *_args, **_kwargs: {},
+            stop_turn=lambda *_args, **_kwargs: {},
+            find_turn=lambda *_args: None,
+            find_turn_by_client_message_id=lambda *_args: None,
+            unresolved_mcp_failures=lambda _turn: [],
+            delivery_error_is_terminal=lambda _error: False,
+            log_dispatch=lambda *_args, **_kwargs: None,
+        )
+
+        runtime.schedule(context)
+
+        self.assertTrue(both_started.wait(2))
+        self.assertEqual(
+            started_sessions,
+            {"session_parallel_pm", "session_parallel_tl"},
+        )
+        self.assertEqual(active_sessions, started_sessions)
+        running_workers = list(workers.values())
+        release.set()
+        for worker in running_workers:
+            worker.join(2)
+        self.assertTrue(all(not worker.is_alive() for worker in running_workers))
+        self.assertEqual(active_sessions, set())
 
     def test_stale_actionable_event_is_not_prepared(self):
         context = self.context()
@@ -920,6 +1262,11 @@ class LarkEventsTest(unittest.TestCase):
         )
         prepare_task_deliveries(context)
         old_delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_turn_started(
+            context,
+            delivery_id=old_delivery["id"],
+            turn_id="turn_generation",
+        )
         save_task_snapshot(
             context,
             record_id="recGeneration",
@@ -942,6 +1289,14 @@ class LarkEventsTest(unittest.TestCase):
             )
         )
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET next_attempt_at = NULL
+                WHERE id = ?
+                """,
+                (old_delivery["id"],),
+            )
             pending = conn.execute(
                 """
                 SELECT COUNT(*)
@@ -953,6 +1308,49 @@ class LarkEventsTest(unittest.TestCase):
                 """
             ).fetchone()[0]
         self.assertEqual(pending, 1)
+
+        runtime = TeamFlowDaemon()
+        try:
+            with (
+                patch(
+                    "core.daemon.read_codex_thread",
+                    return_value={
+                        "status": {"type": "active"},
+                        "turns": [{
+                            "id": "turn_generation",
+                            "status": "inProgress",
+                        }],
+                    },
+                ),
+                patch(
+                    "core.daemon.stop_codex_turn",
+                    side_effect=ValueError(
+                        "Codex task turn turn_generation is not terminal, "
+                        "but the session has no active turn"
+                    ),
+                ) as stop_turn,
+            ):
+                runtime._reconcile_task_deliveries(context)
+        finally:
+            runtime.close()
+
+        stop_turn.assert_called_once_with(
+            "session_generation",
+            expected_turn_id="turn_generation",
+        )
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            stale = conn.execute(
+                """
+                SELECT status, turn_status
+                FROM task_event_deliveries
+                WHERE id = ?
+                """,
+                (old_delivery["id"],),
+            ).fetchone()
+        self.assertEqual(
+            (stale["status"], stale["turn_status"]),
+            ("canceled", "inactive"),
+        )
 
     def test_pending_delivery_renders_the_latest_task_snapshot(self):
         context = self.context()
@@ -1459,6 +1857,381 @@ class LarkEventsTest(unittest.TestCase):
                 )
             self.assertEqual(result["task"]["title"], "Full task")
             read_task.assert_called_once()
+        finally:
+            runtime.close()
+
+    def test_successful_handoff_closes_further_teamflow_calls_in_the_turn(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'pm'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_handoff', ?, ?, ?, 'pm', 'codex',
+                          'session_handoff', 'Handoff PM', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        register_workspace(self.workspace, enabled=True)
+        runtime = TeamFlowDaemon()
+        runtime.routes[self.workspace] = self.context()
+        arguments = {"record_id": "recHandoff", "role": "tl"}
+        result = {
+            "ok": True,
+            "task": {
+                "record_id": "recHandoff",
+                "status": "ready",
+                "role": "tl",
+            },
+            "turn_control": {
+                "action": "end_turn",
+                "reason": "handoff complete",
+            },
+        }
+        try:
+            with (
+                patch.object(
+                    runtime,
+                    "_invoke_teamflow_tool",
+                    return_value=result,
+                ) as invoke,
+                patch.object(
+                    runtime.tool_runtime,
+                    "sync_task_activity",
+                ),
+                patch.object(
+                    runtime.tool_runtime,
+                    "delivery_record_id",
+                    return_value="recHandoff",
+                ),
+            ):
+                grant = runtime.authorize_tool(
+                    invocation_id="invocation_handoff",
+                    session_id="session_handoff",
+                    cwd=self.workspace,
+                    turn_id="turn_handoff",
+                    tool_name="mcp__teamflow__route_task",
+                    tool_input=arguments,
+                )
+                delayed_grant = runtime.authorize_tool(
+                    invocation_id="invocation_delayed_after_handoff",
+                    session_id="session_handoff",
+                    cwd=self.workspace,
+                    turn_id="turn_handoff",
+                    tool_name="mcp__teamflow__get_assignment",
+                    tool_input={},
+                )
+                first = runtime.invoke_tool(
+                    invocation_id="invocation_handoff",
+                    grant=grant["grant"],
+                    tool_name="route_task",
+                    arguments=arguments,
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "handoff is complete",
+                ):
+                    runtime.invoke_tool(
+                        invocation_id="invocation_delayed_after_handoff",
+                        grant=delayed_grant["grant"],
+                        tool_name="get_assignment",
+                        arguments={},
+                    )
+                retry_grant = runtime.authorize_tool(
+                    invocation_id="invocation_handoff",
+                    session_id="session_handoff",
+                    cwd=self.workspace,
+                    turn_id="turn_handoff",
+                    tool_name="mcp__teamflow__route_task",
+                    tool_input=arguments,
+                )
+                retried = runtime.invoke_tool(
+                    invocation_id="invocation_handoff",
+                    grant=retry_grant["grant"],
+                    tool_name="route_task",
+                    arguments=arguments,
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "handoff is complete",
+                ):
+                    runtime.authorize_tool(
+                        invocation_id="invocation_after_handoff",
+                        session_id="session_handoff",
+                        cwd=self.workspace,
+                        turn_id="turn_handoff",
+                        tool_name="mcp__teamflow__get_assignment",
+                        tool_input={},
+                    )
+
+            self.assertEqual(first, result)
+            self.assertEqual(retried, result)
+            invoke.assert_called_once()
+        finally:
+            runtime.close()
+
+    def test_completed_handoff_remains_closed_after_daemon_restart(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'pm'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_durable_handoff', ?, ?, ?, 'pm', 'codex',
+                          'session_durable_handoff', 'Durable Handoff PM', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        save_task_snapshot(
+            context,
+            record_id="recDurableHandoff",
+            task={
+                "record_id": "recDurableHandoff",
+                "task_id": "TF-DURABLE-HANDOFF",
+                "title": "Stop the old PM turn",
+                "status": "ready",
+                "role": "pm",
+            },
+            source_event_id="evtDurableHandoffPm",
+            source_revision="70",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_turn_started(
+            context,
+            delivery_id=delivery["id"],
+            turn_id="turn_durable_handoff",
+        )
+        save_task_snapshot(
+            context,
+            record_id="recDurableHandoff",
+            task={
+                "record_id": "recDurableHandoff",
+                "task_id": "TF-DURABLE-HANDOFF",
+                "title": "Stop the old PM turn",
+                "status": "ready",
+                "role": "tl",
+            },
+            source_event_id="evtDurableHandoffTl",
+            source_revision="71",
+        )
+        prepare_task_deliveries(context)
+        register_workspace(self.workspace, enabled=True)
+
+        runtime = TeamFlowDaemon()
+        runtime.routes[self.workspace] = context
+        try:
+            with self.assertRaisesRegex(ValueError, "handoff is complete"):
+                runtime.authorize_tool(
+                    invocation_id="invocation_after_restart",
+                    session_id="session_durable_handoff",
+                    cwd=self.workspace,
+                    turn_id="turn_durable_handoff",
+                    tool_name="mcp__teamflow__get_assignment",
+                    tool_input={},
+                )
+        finally:
+            runtime.close()
+
+    def test_claimed_execution_keeps_delivery_turn_open(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_claim_turn', ?, ?, ?, 'tl', 'codex',
+                          'session_claim_turn', 'Claim Turn TL', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        ready = {
+            "record_id": "recClaimTurn",
+            "task_id": "TF-CLAIM-TURN",
+            "title": "Keep working after claim",
+            "status": "ready",
+            "role": "tl",
+        }
+        save_task_snapshot(
+            context,
+            record_id="recClaimTurn",
+            task=ready,
+            source_event_id="evtClaimTurnReady",
+            source_revision="72",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_turn_started(
+            context,
+            delivery_id=delivery["id"],
+            turn_id="turn_claim_execution",
+        )
+
+        claimed = {
+            **ready,
+            "status": "in_progress",
+            "agent": "Claim Turn TL",
+            "agent_id": "agent_claim_turn",
+        }
+        save_task_snapshot(
+            context,
+            record_id="recClaimTurn",
+            task=claimed,
+            source_event_id="evtClaimTurnInProgress",
+            source_revision="73",
+        )
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO task_executions (
+                  record_id, agent_id, session_id, turn_id, state, updated_at
+                ) VALUES (?, ?, ?, ?, 'active', ?)
+                """,
+                (
+                    "recClaimTurn",
+                    "agent_claim_turn",
+                    "session_claim_turn",
+                    "turn_claim_execution",
+                    now(),
+                ),
+            )
+
+        self.assertFalse(task_delivery_is_current(
+            context,
+            delivery_id=delivery["id"],
+        ))
+        self.assertTrue(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_claim_execution",
+            agent_id="agent_claim_turn",
+        ))
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute(
+                """
+                UPDATE task_executions
+                SET state = 'stopped', updated_at = ?
+                WHERE record_id = ?
+                """,
+                (now(), "recClaimTurn"),
+            )
+        self.assertFalse(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_claim_execution",
+            agent_id="agent_claim_turn",
+        ))
+
+    def test_routing_a_child_task_does_not_close_the_parent_task_turn(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'pm'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_child_route', ?, ?, ?, 'pm', 'codex',
+                          'session_child_route', 'Child Route PM', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        register_workspace(self.workspace, enabled=True)
+        runtime = TeamFlowDaemon()
+        runtime.routes[self.workspace] = self.context()
+        arguments = {"record_id": "recChild", "role": "tl"}
+        try:
+            with (
+                patch.object(
+                    runtime,
+                    "_invoke_teamflow_tool",
+                    return_value={
+                        "ok": True,
+                        "task": {
+                            "record_id": "recChild",
+                            "status": "ready",
+                            "role": "tl",
+                        },
+                    },
+                ),
+                patch.object(
+                    runtime.tool_runtime,
+                    "sync_task_activity",
+                ),
+                patch.object(
+                    runtime.tool_runtime,
+                    "delivery_record_id",
+                    return_value="recParent",
+                ),
+            ):
+                grant = runtime.authorize_tool(
+                    invocation_id="invocation_child_route",
+                    session_id="session_child_route",
+                    cwd=self.workspace,
+                    turn_id="turn_parent",
+                    tool_name="mcp__teamflow__route_task",
+                    tool_input=arguments,
+                )
+                result = runtime.invoke_tool(
+                    invocation_id="invocation_child_route",
+                    grant=grant["grant"],
+                    tool_name="route_task",
+                    arguments=arguments,
+                )
+                next_grant = runtime.authorize_tool(
+                    invocation_id="invocation_continue_parent",
+                    session_id="session_child_route",
+                    cwd=self.workspace,
+                    turn_id="turn_parent",
+                    tool_name="mcp__teamflow__get_assignment",
+                    tool_input={},
+                )
+
+            self.assertNotIn("turn_control", result)
+            self.assertTrue(next_grant["grant"])
         finally:
             runtime.close()
 
@@ -2071,20 +2844,7 @@ class LarkEventsTest(unittest.TestCase):
         self.assertEqual(set(tools["claim_task"]["properties"]), {"record_id"})
         self.assertEqual(
             set(tools),
-            {
-                "get_assignment",
-                "list_available_tasks",
-                "get_task",
-                "create_task",
-                "update_task",
-                "route_task",
-                "claim_task",
-                "submit_task",
-                "block_task",
-                "review_task",
-                "stop_task_execution",
-                "cancel_task",
-            },
+            set(TEAMFLOW_MCP_TOOLS),
         )
         self.assertEqual(
             set(tools["stop_task_execution"]["properties"]),
@@ -2236,7 +2996,17 @@ class LarkEventsTest(unittest.TestCase):
         runtime = TeamFlowDaemon()
         runtime.active_sessions.add("session_turn")
 
-        def complete_turn(thread_id, prompt, *, on_started, stop_event):
+        def complete_turn(
+            thread_id,
+            prompt,
+            *,
+            client_message_id,
+            on_started,
+            stop_event,
+            required_mcp_tools,
+        ):
+            self.assertTrue(required_mcp_tools)
+            self.assertEqual(client_message_id, delivery["client_message_id"])
             self.assertIn("Latest task snapshot", prompt)
             self.assertNotIn("Old task snapshot", prompt)
             on_started("turn_persisted")
@@ -2373,7 +3143,17 @@ class LarkEventsTest(unittest.TestCase):
         runtime = TeamFlowDaemon()
         runtime.active_sessions.add("session_interrupted")
 
-        def interrupt_turn(thread_id, prompt, *, on_started, stop_event):
+        def interrupt_turn(
+            thread_id,
+            prompt,
+            *,
+            client_message_id,
+            on_started,
+            stop_event,
+            required_mcp_tools,
+        ):
+            self.assertTrue(required_mcp_tools)
+            self.assertEqual(client_message_id, delivery["client_message_id"])
             on_started("turn_interrupted")
             raise RuntimeError("TeamFlow daemon stopped while the Codex turn was running")
 
@@ -2405,6 +3185,263 @@ class LarkEventsTest(unittest.TestCase):
         self.assertIn("DISPATCH RECONCILING", output.getvalue())
         self.assertIn("turn=turn_interrupted", output.getvalue())
         self.assertNotIn("DISPATCH RETRY", output.getvalue())
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
+            )
+        runtime = TeamFlowDaemon()
+        retry_output = io.StringIO()
+        try:
+            with (
+                patch("core.daemon.read_codex_thread", return_value={
+                    "status": {"type": "idle"},
+                    "turns": [{
+                        "id": "turn_interrupted",
+                        "status": "interrupted",
+                    }],
+                }),
+                redirect_stdout(retry_output),
+            ):
+                runtime._reconcile_task_deliveries(context)
+        finally:
+            runtime.close()
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            retried = conn.execute(
+                """
+                SELECT status, turn_id, turn_status
+                FROM task_event_deliveries
+                """
+            ).fetchone()
+        self.assertEqual(
+            (retried["status"], retried["turn_id"], retried["turn_status"]),
+            ("retry", "turn_interrupted", "interrupted"),
+        )
+        self.assertIn("DISPATCH RETRY", retry_output.getvalue())
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET status = 'processing',
+                    attempts = 3,
+                    turn_status = 'inProgress',
+                    next_attempt_at = NULL
+                """
+            )
+        runtime = TeamFlowDaemon()
+        failed_output = io.StringIO()
+        try:
+            with (
+                patch("core.daemon.read_codex_thread", return_value={
+                    "status": {"type": "idle"},
+                    "turns": [{
+                        "id": "turn_interrupted",
+                        "status": "interrupted",
+                    }],
+                }),
+                redirect_stdout(failed_output),
+            ):
+                runtime._reconcile_task_deliveries(context)
+        finally:
+            runtime.close()
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            exhausted = conn.execute(
+                """
+                SELECT status, attempts, turn_id, turn_status
+                FROM task_event_deliveries
+                """
+            ).fetchone()
+        self.assertEqual(
+            (
+                exhausted["status"],
+                exhausted["attempts"],
+                exhausted["turn_id"],
+                exhausted["turn_status"],
+            ),
+            ("failed", 3, "turn_interrupted", "interrupted"),
+        )
+        self.assertIn("DISPATCH FAILED", failed_output.getvalue())
+        self.assertNotIn("DISPATCH RETRY", failed_output.getvalue())
+
+    def test_daemon_retries_without_a_turn_when_the_codex_session_is_busy(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_busy', ?, ?, ?, 'tl', 'codex',
+                          'session_busy', 'Busy TL', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        save_task_snapshot(
+            context,
+            record_id="recBusy",
+            task={
+                "record_id": "recBusy",
+                "task_id": "TF-BUSY",
+                "title": "Wait for the busy session",
+                "status": "ready",
+                "role": "tl",
+            },
+            source_event_id="evtBusy",
+            source_revision="49",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        runtime = TeamFlowDaemon()
+        runtime.active_sessions.add("session_busy")
+
+        try:
+            output = io.StringIO()
+            with (
+                patch("core.daemon.get_lark_task", return_value={
+                    "task": json.loads(delivery["after_json"])
+                }),
+                patch(
+                    "core.daemon.run_codex_turn",
+                    side_effect=ValueError("Codex agent is busy"),
+                ),
+                redirect_stdout(output),
+            ):
+                runtime._execute_task_delivery(context, delivery)
+        finally:
+            runtime.close()
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            saved = conn.execute(
+                """
+                SELECT status, attempts, turn_id, turn_status, last_error
+                FROM task_event_deliveries
+                """
+            ).fetchone()
+        self.assertEqual(
+            (
+                saved["status"],
+                saved["attempts"],
+                saved["turn_id"],
+                saved["turn_status"],
+            ),
+            ("retry", 1, None, None),
+        )
+        self.assertIn("Codex agent is busy", saved["last_error"])
+        self.assertNotIn("session_busy", runtime.active_sessions)
+        self.assertIn("DISPATCH RETRY", output.getvalue())
+        self.assertNotIn("DISPATCH STARTED", output.getvalue())
+
+    def test_daemon_waits_for_background_mcp_authorization_before_starting_turn(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_permission', ?, ?, ?, 'tl', 'codex',
+                          'session_permission', 'Permission TL', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        save_task_snapshot(
+            context,
+            record_id="recPermission",
+            task={
+                "record_id": "recPermission",
+                "task_id": "TF-PERMISSION",
+                "title": "Wait for MCP authorization",
+                "status": "ready",
+                "role": "tl",
+            },
+            source_event_id="evtPermission",
+            source_revision="50",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        runtime = TeamFlowDaemon()
+        runtime.active_sessions.add("session_permission")
+        runtime.delivery_runtime.background_mcp_ready = lambda: {
+            "authorized": False,
+            "configured": False,
+            "activation_pending": False,
+            "missing_tools": ["update_task"],
+        }
+        output = io.StringIO()
+        try:
+            with (
+                patch("core.daemon.get_lark_task", return_value={
+                    "task": json.loads(delivery["after_json"])
+                }),
+                patch("core.daemon.run_codex_turn") as run_turn,
+                redirect_stdout(output),
+            ):
+                runtime._execute_task_delivery(context, delivery)
+
+            with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+                waiting = conn.execute(
+                    """
+                    SELECT status, turn_id, last_error
+                    FROM task_event_deliveries
+                    """
+                ).fetchone()
+            self.assertEqual(waiting["status"], "waiting_permission")
+            self.assertIsNone(waiting["turn_id"])
+            self.assertIn("update_task", waiting["last_error"])
+            self.assertIn("DISPATCH WAITING", output.getvalue())
+            self.assertNotIn("DISPATCH STARTED", output.getvalue())
+            run_turn.assert_not_called()
+
+            runtime.delivery_runtime.resume_permission_waiting(context)
+            with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT status FROM task_event_deliveries"
+                    ).fetchone()["status"],
+                    "waiting_permission",
+                )
+
+            runtime.delivery_runtime.background_mcp_ready = lambda: {
+                "authorized": True,
+                "configured": True,
+                "activation_pending": True,
+                "missing_tools": [],
+            }
+            runtime.delivery_runtime.resume_permission_waiting(context)
+            with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT status FROM task_event_deliveries"
+                    ).fetchone()["status"],
+                    "retry",
+                )
+        finally:
+            runtime.close()
 
     def test_daemon_reconciles_a_completed_turn_after_restart(self):
         context = self.context()
@@ -2469,6 +3506,208 @@ class LarkEventsTest(unittest.TestCase):
         )
         self.assertIn("DISPATCH RECOVERED", output.getvalue())
         self.assertIn("turn=turn_restart", output.getvalue())
+
+    def test_daemon_recovers_an_unconfirmed_turn_by_client_message_id(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_message_recovery', ?, ?, ?, 'tl', 'codex',
+                          'session_message_recovery', 'Message Recovery TL', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        save_task_snapshot(
+            context,
+            record_id="recMessageRecovery",
+            task={
+                "record_id": "recMessageRecovery",
+                "task_id": "TF-MESSAGE-RECOVERY",
+                "title": "Recover unknown IPC acceptance",
+                "status": "ready",
+                "role": "tl",
+            },
+            source_event_id="evtMessageRecovery",
+            source_revision="72",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
+            )
+
+        runtime = TeamFlowDaemon()
+        output = io.StringIO()
+        try:
+            with (
+                patch("core.daemon.read_codex_thread", return_value={
+                    "status": {"type": "idle"},
+                    "turns": [{
+                        "id": "turn_message_recovery",
+                        "status": "completed",
+                        "items": [{
+                            "type": "userMessage",
+                            "clientId": delivery["client_message_id"],
+                        }],
+                    }],
+                }),
+                redirect_stdout(output),
+            ):
+                runtime._reconcile_task_deliveries(context)
+        finally:
+            runtime.close()
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            saved = conn.execute(
+                """
+                SELECT status, turn_id, turn_status
+                FROM task_event_deliveries
+                """
+            ).fetchone()
+        self.assertEqual(
+            (saved["status"], saved["turn_id"], saved["turn_status"]),
+            ("completed", "turn_message_recovery", "completed"),
+        )
+        self.assertIn("DISPATCH STARTED", output.getvalue())
+        self.assertIn("recovered from client message ID", output.getvalue())
+        self.assertIn("DISPATCH RECOVERED", output.getvalue())
+
+    def test_daemon_defers_then_retries_an_unconfirmed_turn(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_missing', ?, ?, ?, 'tl', 'codex',
+                          'session_missing', 'Missing TL', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        save_task_snapshot(
+            context,
+            record_id="recMissing",
+            task={
+                "record_id": "recMissing",
+                "task_id": "TF-MISSING",
+                "title": "Retry a missing turn",
+                "status": "ready",
+                "role": "tl",
+            },
+            source_event_id="evtMissing",
+            source_revision="50",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_turn_started(
+            context,
+            delivery_id=delivery["id"],
+            turn_id="turn_missing",
+        )
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute("UPDATE task_event_deliveries SET next_attempt_at = NULL")
+
+        runtime = TeamFlowDaemon()
+        try:
+            output = io.StringIO()
+            with (
+                patch("core.daemon.read_codex_thread", return_value={
+                    "status": {"type": "idle"},
+                    "turns": [],
+                }),
+                redirect_stdout(output),
+            ):
+                runtime._reconcile_task_deliveries(context)
+        finally:
+            runtime.close()
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            saved = conn.execute(
+                """
+                SELECT status, turn_id, turn_status, last_error
+                FROM task_event_deliveries
+                """
+            ).fetchone()
+        self.assertEqual(
+            (saved["status"], saved["turn_id"], saved["turn_status"]),
+            ("processing", "turn_missing", "inProgress"),
+        )
+        self.assertIn("not visible", saved["last_error"])
+        self.assertNotIn("DISPATCH RETRY", output.getvalue())
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET started_at = '2000-01-01T00:00:00+00:00',
+                    next_attempt_at = NULL
+                """
+            )
+        runtime = TeamFlowDaemon()
+        try:
+            expired_output = io.StringIO()
+            with (
+                patch("core.daemon.read_codex_thread", return_value={
+                    "status": {"type": "active"},
+                    "turns": [],
+                }),
+                redirect_stdout(expired_output),
+            ):
+                runtime._reconcile_task_deliveries(context)
+        finally:
+            runtime.close()
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            expired = conn.execute(
+                """
+                SELECT status, turn_id, turn_status, last_error,
+                       client_message_id
+                FROM task_event_deliveries
+                """
+            ).fetchone()
+        self.assertEqual(
+            (expired["status"], expired["turn_id"], expired["turn_status"]),
+            ("retry", "turn_missing", "unconfirmed"),
+        )
+        self.assertIsNone(expired["client_message_id"])
+        self.assertIn("remained unconfirmed", expired["last_error"])
+        self.assertIn("DISPATCH RETRY", expired_output.getvalue())
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
+            )
+        retried = claim_task_deliveries(context)[0]
+        self.assertNotEqual(
+            retried["client_message_id"],
+            delivery["client_message_id"],
+        )
 
     def test_daemon_retries_a_completed_turn_with_interrupted_mcp_calls(self):
         context = self.context()

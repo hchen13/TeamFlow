@@ -1,5 +1,6 @@
 import TeamFlowClient from "./teamflow-client";
 import {
+  authorizeCodexTools,
   configureLarkBoard,
   configureLarkIdentity,
   createLarkBoard,
@@ -41,6 +42,7 @@ export default async function Page({ searchParams }) {
   return (
     <TeamFlowClient
       actions={{
+        authorizeCodexTools,
         configureLarkBoard,
         configureLarkIdentity,
         createLarkBoard,

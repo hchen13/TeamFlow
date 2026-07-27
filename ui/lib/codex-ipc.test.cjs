@@ -38,6 +38,68 @@ test("extracts snapshot and patch runtime metadata", async () => {
     change: { patches: [{ path: ["threadRuntimeStatus", "type"], value: "active" }] }
   }).status, "active");
 
+  assert.equal(codexThreadMetadata({
+    conversationId: "thread-1",
+    change: {
+      type: "snapshot",
+      conversationState: {
+        threadRuntimeStatus: { type: "idle" },
+        turnHistory: {
+          history: {
+            entitiesByKey: {
+              pending: { status: "inProgress", items: [] }
+            }
+          }
+        }
+      }
+    }
+  }).status, "active");
+
+  assert.equal(codexThreadMetadata({
+    conversationId: "thread-1",
+    change: {
+      type: "patches",
+      patches: [{
+        path: ["turnHistory", "history", "entitiesByKey", "turn-1", "status"],
+        value: "completed"
+      }]
+    }
+  }).status, "idle");
+
+  assert.equal(codexThreadMetadata({
+    conversationId: "thread-1",
+    change: {
+      type: "snapshot",
+      conversationState: {
+        threadRuntimeStatus: { type: "notLoaded" },
+        turnHistory: {
+          history: {
+            entitiesByKey: {
+              stale: { status: "inProgress", items: [] }
+            }
+          }
+        }
+      }
+    }
+  }).status, "notLoaded");
+
+  assert.equal(codexThreadMetadata({
+    conversationId: "thread-1",
+    change: {
+      type: "patches",
+      patches: [
+        {
+          path: ["turnHistory", "history", "entitiesByKey", "old", "status"],
+          value: "completed"
+        },
+        {
+          path: ["turnHistory", "history", "entitiesByKey", "new", "status"],
+          value: "inProgress"
+        }
+      ]
+    }
+  }).status, "active");
+
   assert.deepEqual(codexThreadMetadata({
     conversationId: "thread-1",
     change: {
@@ -98,6 +160,39 @@ test("re-announces a tracked follower when a Codex owner appears", async () => {
   });
 
   assert.deepEqual(followed, [{ threadId: "thread-1", targetClientIds: ["codex-owner"] }]);
+});
+
+test("removes stale runtime state when a source stops following", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  const events = [];
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map([
+    ["desktop", new Map([["thread-1", { threadId: "thread-1", status: "active" }]])],
+    ["vscode", new Map([["thread-1", { threadId: "thread-1", status: "idle" }]])]
+  ]);
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+  bridge.emit = (...args) => events.push(args);
+
+  bridge.onMessage({
+    type: "broadcast",
+    method: "thread-stream-following-changed",
+    version: 1,
+    sourceClientId: "desktop",
+    params: {
+      conversationId: "thread-1",
+      hostId: "local",
+      following: false
+    }
+  });
+
+  assert.equal(bridge.runtimeBySource.has("desktop"), false);
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "idle");
+  assert.deepEqual(events.at(-1), [
+    "event",
+    { type: "runtime", threadId: "thread-1", status: "idle" }
+  ]);
 });
 
 test("reports a pending follower as checking rather than not loaded", async () => {

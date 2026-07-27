@@ -13,21 +13,79 @@ from core.codex import (
     _CodexIpcConnection,
     _CodexIpcUnavailable,
     _CodexThreadStream,
+    _call,
+    _interrupt_competing_codex_turn,
     _notify_codex_clients_thread_changed,
+    _start_app_server,
     codex_developer_context_evidence,
     codex_thread_is_permanently_unavailable,
     codex_thread_settings,
     codex_turn,
+    codex_turn_by_client_message_id,
     codex_turn_unresolved_teamflow_mcp_failures,
     read_codex_thread,
     run_codex_turn,
     stop_codex_turn,
     _run_codex_app_server_turn,
     _stop_app_server,
+    codex_delivery_error_is_terminal,
 )
+from core.codex_ipc import CodexTurnAcceptanceUnknown
+from core.codex_permissions import CodexBackgroundMcpPermissionRequired
 
 
 class CodexTurnTest(unittest.TestCase):
+    def test_start_app_server_uses_codex_facade_dependencies(self):
+        process = Mock()
+        with (
+            patch(
+                "core.codex_app_server_protocol.subprocess.Popen",
+                return_value=process,
+            ) as popen,
+            patch(
+                "core.codex._codex_executable",
+                return_value="/tmp/teamflow-codex",
+            ),
+            patch("core.codex._send") as send,
+            patch("core.codex._response_for", return_value={}) as response,
+        ):
+            result = _start_app_server()
+
+        self.assertIs(result, process)
+        self.assertEqual(
+            popen.call_args.args[0][0],
+            "/tmp/teamflow-codex",
+        )
+        self.assertEqual(send.call_count, 2)
+        response.assert_called_once_with(process, 1)
+
+    def test_call_uses_codex_facade_dependencies(self):
+        process = Mock()
+        with (
+            patch("core.codex._send") as send,
+            patch(
+                "core.codex._response_for",
+                return_value={"result": {"ok": True}},
+            ) as response,
+        ):
+            result = _call(
+                process,
+                2,
+                "thread/read",
+                {"threadId": "thread_1"},
+            )
+
+        self.assertEqual(result, {"ok": True})
+        send.assert_called_once_with(
+            process,
+            {
+                "id": 2,
+                "method": "thread/read",
+                "params": {"threadId": "thread_1"},
+            },
+        )
+        response.assert_called_once_with(process, 2, pending=None)
+
     def test_stopping_app_server_closes_all_process_pipes(self):
         process = Mock()
         process.poll.return_value = None
@@ -67,13 +125,105 @@ class CodexTurnTest(unittest.TestCase):
                 "result": {"result": {"turn": {"id": "turn_1"}}},
             }),
         ):
-            turn_id = connection.start_turn("thread_1", "New work", stop_event=None)
+            connection.streams["thread_1"] = _CodexThreadStream()
+            connection.streams["thread_1"].initialized = True
+            turn_id = connection.start_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+                stop_event=None,
+            )
 
         self.assertEqual(turn_id, "turn_1")
         self.assertEqual(
             send.call_args_list[0].args[0]["method"],
             "thread-stream-following-status-requested",
         )
+
+    def test_rejects_an_ipc_turn_when_the_followed_session_is_active(self):
+        connection = _CodexIpcConnection(Mock(), "teamflow-client")
+        connection.followers["thread_1"] = {"desktop-client"}
+        connection.streams["thread_1"] = _CodexThreadStream()
+        connection.streams["thread_1"].initialized = True
+        connection.streams["thread_1"].entries["active"] = {
+            "turnId": "turn_active",
+            "status": "inProgress",
+            "items": {},
+        }
+        with (
+            patch.object(connection, "_send") as send,
+            patch.object(connection, "_collect_followers"),
+            self.assertRaisesRegex(ValueError, "Codex agent is busy"),
+        ):
+            connection.start_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+                stop_event=None,
+            )
+
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(
+            send.call_args.args[0]["method"],
+            "thread-stream-following-status-requested",
+        )
+
+    def test_treats_an_in_progress_placeholder_as_a_busy_session(self):
+        stream = _CodexThreadStream()
+        stream.entries["placeholder"] = {
+            "turnId": None,
+            "status": "inProgress",
+            "items": {},
+        }
+
+        self.assertTrue(stream.has_active_turn())
+
+    def test_refuses_to_start_without_an_initial_owner_snapshot(self):
+        connection = _CodexIpcConnection(Mock(), "teamflow-client")
+        connection.followers["thread_1"] = {"desktop-client"}
+        connection.streams["thread_1"] = _CodexThreadStream()
+
+        with (
+            patch.object(connection, "_send") as send,
+            patch.object(connection, "_collect_followers"),
+            self.assertRaisesRegex(
+                _CodexIpcUnavailable,
+                "initial session snapshot",
+            ),
+        ):
+            connection.start_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+                stop_event=None,
+            )
+
+        self.assertEqual(send.call_count, 1)
+
+    def test_treats_a_transport_failure_after_start_as_unknown_acceptance(self):
+        connection = _CodexIpcConnection(Mock(), "teamflow-client")
+        connection.followers["thread_1"] = {"desktop-client"}
+        connection.streams["thread_1"] = _CodexThreadStream()
+        connection.streams["thread_1"].initialized = True
+
+        with (
+            patch.object(
+                connection,
+                "_send",
+                side_effect=[None, _CodexIpcUnavailable("connection closed")],
+            ),
+            patch.object(connection, "_collect_followers"),
+            self.assertRaisesRegex(
+                CodexTurnAcceptanceUnknown,
+                "could not be confirmed",
+            ),
+        ):
+            connection.start_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+                stop_event=None,
+            )
 
     def test_interrupts_a_turn_through_the_codex_owner_client(self):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")
@@ -140,6 +290,7 @@ class CodexTurnTest(unittest.TestCase):
             result_holder["turn"] = _run_codex_app_server_turn(
                 "thread_app",
                 "work",
+                client_message_id="message_app",
                 on_started=None,
                 stop_event=threading.Event(),
             )
@@ -199,6 +350,28 @@ class CodexTurnTest(unittest.TestCase):
 
         self.assertFalse(active["interrupt_requested"].is_set())
 
+    def test_stop_without_a_registered_turn_uses_interrupt_facade(self):
+        expected = {
+            "ok": True,
+            "thread_id": "thread_unregistered",
+            "turn_id": "turn_unregistered",
+            "status": "interrupted",
+        }
+        with patch(
+            "core.codex._interrupt_codex_app_server_turn",
+            return_value=expected,
+        ) as interrupt:
+            result = stop_codex_turn(
+                "thread_unregistered",
+                expected_turn_id="turn_unregistered",
+            )
+
+        self.assertIs(result, expected)
+        interrupt.assert_called_once_with(
+            "thread_unregistered",
+            expected_turn_id="turn_unregistered",
+        )
+
     def test_background_turn_notifies_connected_codex_clients(self):
         connection = Mock()
         connection.client_id = "teamflow-client"
@@ -217,9 +390,17 @@ class CodexTurnTest(unittest.TestCase):
             "response": "TEAMFLOW_ACK",
             "error": None,
         }
-        with patch("core.codex._CodexIpcConnection.connect", return_value=connection):
+        with patch(
+            "core.codex._CodexIpcConnection.connect",
+            return_value=connection,
+        ):
             started = Mock()
-            result = run_codex_turn("thread_1", "Reply with TEAMFLOW_ACK", on_started=started)
+            result = run_codex_turn(
+                "thread_1",
+                "Reply with TEAMFLOW_ACK",
+                client_message_id="message_1",
+                on_started=started,
+            )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["response"], "TEAMFLOW_ACK")
@@ -229,13 +410,43 @@ class CodexTurnTest(unittest.TestCase):
         connection.start_turn.assert_called_once_with(
             "thread_1",
             "Reply with TEAMFLOW_ACK",
+            client_message_id="message_1",
+            stop_event=None,
+        )
+        connection.wait_for_turn_started.assert_called_once_with(
+            "thread_1",
+            "turn_1",
             stop_event=None,
         )
         connection.wait_for_turn.assert_called_once_with(
             "thread_1",
             "turn_1",
+            interrupt_competing_turn=_interrupt_competing_codex_turn,
             stop_event=None,
         )
+        connection.unfollow.assert_called_once_with("thread_1")
+        connection.close.assert_called_once_with()
+
+    def test_persists_an_owner_accepted_ipc_turn_before_it_materializes(self):
+        connection = Mock()
+        connection.start_turn.return_value = "turn_ghost"
+        connection.wait_for_turn_started.side_effect = ValueError(
+            "Codex turn turn_ghost did not materialize in session thread_1"
+        )
+        started = Mock()
+        with (
+            patch("core.codex._CodexIpcConnection.connect", return_value=connection),
+            self.assertRaisesRegex(ValueError, "did not materialize"),
+        ):
+            run_codex_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_ghost",
+                on_started=started,
+            )
+
+        started.assert_called_once_with("turn_ghost")
+        connection.wait_for_turn.assert_not_called()
         connection.unfollow.assert_called_once_with("thread_1")
         connection.close.assert_called_once_with()
 
@@ -248,12 +459,17 @@ class CodexTurnTest(unittest.TestCase):
             ),
             patch("core.codex._run_codex_app_server_turn", return_value=expected) as fallback,
         ):
-            result = run_codex_turn("thread_1", "New work")
+            result = run_codex_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+            )
 
         self.assertIs(result, expected)
         fallback.assert_called_once_with(
             "thread_1",
             "New work",
+            client_message_id="message_1",
             on_started=None,
             stop_event=None,
         )
@@ -267,15 +483,160 @@ class CodexTurnTest(unittest.TestCase):
             ),
             patch("core.codex._run_codex_app_server_turn", return_value=expected) as fallback,
         ):
-            result = run_codex_turn("thread_1", "New work")
+            result = run_codex_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+            )
 
         self.assertIs(result, expected)
         fallback.assert_called_once_with(
             "thread_1",
             "New work",
+            client_message_id="message_1",
             on_started=None,
             stop_event=None,
         )
+
+    def test_background_mcp_authorization_is_required_before_app_server_fallback(self):
+        with (
+            patch(
+                "core.codex._run_codex_ipc_turn",
+            ) as ipc,
+            patch(
+                "core.codex.require_teamflow_mcp_authorization",
+                side_effect=CodexBackgroundMcpPermissionRequired(
+                    ["update_task"],
+                ),
+            ) as authorize,
+            patch("core.codex._run_codex_app_server_turn") as fallback,
+            self.assertRaisesRegex(
+                CodexBackgroundMcpPermissionRequired,
+                "update_task",
+            ),
+        ):
+            run_codex_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+                required_mcp_tools=["update_task"],
+            )
+
+        authorize.assert_called_once_with(("update_task",))
+        ipc.assert_not_called()
+        fallback.assert_not_called()
+
+    def test_pending_desktop_reload_uses_fresh_app_server(self):
+        expected = {
+            "ok": True,
+            "turn_id": "turn_1",
+            "transport": "app-server",
+        }
+        with (
+            patch(
+                "core.codex.require_teamflow_mcp_authorization",
+                return_value={
+                    "authorized": True,
+                    "activation_pending": True,
+                },
+            ) as authorize,
+            patch("core.codex._run_codex_ipc_turn") as ipc,
+            patch(
+                "core.codex._run_codex_app_server_turn",
+                return_value=expected,
+            ) as app_server,
+        ):
+            result = run_codex_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+                required_mcp_tools=["update_task"],
+            )
+
+        self.assertIs(result, expected)
+        authorize.assert_called_once_with(("update_task",))
+        ipc.assert_not_called()
+        app_server.assert_called_once_with(
+            "thread_1",
+            "New work",
+            client_message_id="message_1",
+            on_started=None,
+            stop_event=None,
+        )
+
+    def test_loaded_authorization_uses_live_ipc(self):
+        expected = {
+            "ok": True,
+            "turn_id": "turn_1",
+            "transport": "codex-ipc",
+        }
+        with (
+            patch(
+                "core.codex.require_teamflow_mcp_authorization",
+                return_value={
+                    "authorized": True,
+                    "activation_pending": False,
+                },
+            ) as authorize,
+            patch(
+                "core.codex._run_codex_ipc_turn",
+                return_value=expected,
+            ) as ipc,
+            patch("core.codex._run_codex_app_server_turn") as app_server,
+        ):
+            result = run_codex_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+                required_mcp_tools=["update_task"],
+            )
+
+        self.assertIs(result, expected)
+        authorize.assert_called_once_with(("update_task",))
+        ipc.assert_called_once()
+        app_server.assert_not_called()
+
+    def test_does_not_fall_back_when_ipc_acceptance_is_unknown(self):
+        with (
+            patch(
+                "core.codex._run_codex_ipc_turn",
+                side_effect=CodexTurnAcceptanceUnknown(
+                    "Codex turn acceptance could not be confirmed"
+                ),
+            ),
+            patch("core.codex._run_codex_app_server_turn") as fallback,
+            self.assertRaisesRegex(
+                CodexTurnAcceptanceUnknown,
+                "could not be confirmed",
+            ),
+        ):
+            run_codex_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+            )
+
+        fallback.assert_not_called()
+
+    def test_uses_the_owner_snapshot_instead_of_an_app_server_preflight(self):
+        with (
+            patch("core.codex.read_codex_thread") as read_thread,
+            patch(
+                "core.codex._run_codex_ipc_turn",
+                side_effect=ValueError("Codex agent is busy"),
+            ) as ipc,
+            patch("core.codex._run_codex_app_server_turn") as app_server,
+            self.assertRaisesRegex(ValueError, "Codex agent is busy"),
+        ):
+            run_codex_turn(
+                "thread_1",
+                "New work",
+                client_message_id="message_1",
+            )
+
+        read_thread.assert_not_called()
+        ipc.assert_called_once()
+        app_server.assert_not_called()
 
     def test_finds_a_persisted_turn_by_id(self):
         expected = {"id": "turn_2", "status": "completed"}
@@ -283,6 +644,70 @@ class CodexTurnTest(unittest.TestCase):
 
         self.assertIs(codex_turn(thread, "turn_2"), expected)
         self.assertIsNone(codex_turn(thread, "missing"))
+
+    def test_finds_a_persisted_turn_by_client_message_id(self):
+        expected = {
+            "id": "turn_2",
+            "status": "completed",
+            "items": [
+                {
+                    "type": "userMessage",
+                    "clientId": "message_2",
+                    "content": [{"type": "text", "text": "work"}],
+                }
+            ],
+        }
+        thread = {
+            "turns": [
+                {
+                    "id": "turn_1",
+                    "items": [
+                        {
+                            "type": "userMessage",
+                            "clientId": "message_1",
+                        }
+                    ],
+                },
+                expected,
+            ]
+        }
+
+        self.assertIs(
+            codex_turn_by_client_message_id(thread, "message_2"),
+            expected,
+        )
+        self.assertIsNone(
+            codex_turn_by_client_message_id(thread, "missing"),
+        )
+
+    def test_interrupts_only_the_teamflow_turn_after_a_concurrent_turn_appears(self):
+        connection = _CodexIpcConnection(Mock(), "teamflow-client")
+        stream = _CodexThreadStream()
+        stream.initialized = True
+        stream.entries["teamflow"] = {
+            "turnId": "turn_teamflow",
+            "status": "inProgress",
+            "items": {},
+        }
+        stream.entries["user"] = {
+            "turnId": "turn_user",
+            "status": "inProgress",
+            "items": {},
+        }
+        connection.streams["thread_1"] = stream
+        interrupt = Mock()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "started another turn concurrently",
+        ):
+            connection.ensure_exclusive_turn(
+                "thread_1",
+                "turn_teamflow",
+                interrupt_competing_turn=interrupt,
+            )
+
+        interrupt.assert_called_once_with("thread_1", "turn_teamflow")
 
     def test_read_resumes_a_not_loaded_thread_before_loading_turns(self):
         process = object()
@@ -431,6 +856,9 @@ class CodexTurnTest(unittest.TestCase):
         ))
         self.assertFalse(codex_thread_is_permanently_unavailable(ValueError("thread is archived")))
         self.assertFalse(codex_thread_is_permanently_unavailable(ValueError("Codex app-server timed out")))
+        self.assertFalse(codex_delivery_error_is_terminal(
+            ValueError("Codex turn turn_1 did not materialize in session thread_1")
+        ))
 
     def test_finds_only_unresolved_teamflow_daemon_failures_in_a_turn(self):
         failed = {

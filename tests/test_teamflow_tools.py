@@ -24,12 +24,16 @@ from core.workflow import (
 )
 
 
-def assignment(role: str, agent: str) -> dict[str, object]:
+def assignment(
+    role: str,
+    agent: str,
+    workflow: str = "software-development",
+) -> dict[str, object]:
     return {
         "agent_id": agent,
         "agent_name": f"{role.upper()} Agent",
         "workspace_root": "/workspace",
-        "workflow_key": "software-development",
+        "workflow_key": workflow,
         "role_key": role,
     }
 
@@ -84,6 +88,9 @@ class WorkflowActionTest(unittest.TestCase):
         self.pm = assignment("pm", "agent_pm")
         self.tl = assignment("tl", "agent_tl")
         self.qa = assignment("qa", "agent_qa")
+        self.owner = assignment("owner", "agent_owner", "general-task")
+        self.executor = assignment("executor", "agent_executor", "general-task")
+        self.reviewer = assignment("reviewer", "agent_reviewer", "general-task")
 
     def test_definition_drives_statuses_dispatch_and_actions(self):
         definition = load_workflow_definition("software-development")
@@ -229,14 +236,108 @@ class WorkflowActionTest(unittest.TestCase):
                 record_id="recFlow",
                 outcome="passed",
                 result_evidence="验收用例全部通过。",
+                progress="QA 已完成全部验收用例。",
+                next_action="请 PM 进行最终验收。",
             )
             self.assertEqual(qa_submitted["task"]["status"], "review")
+            self.assertEqual(qa_submitted["task"]["role"], "qa")
+            self.assertEqual(qa_submitted["task"]["agent"], "QA Agent")
+            self.assertEqual(qa_submitted["task"]["agent_id"], "agent_qa")
+            self.assertEqual(
+                qa_submitted["task"]["progress"],
+                "QA 已完成全部验收用例。",
+            )
+            self.assertEqual(
+                qa_submitted["task"]["next_action"],
+                "请 PM 进行最终验收。",
+            )
 
             completed = review_task(
                 self.pm,
                 record_id="recFlow",
                 decision="approve",
                 result_evidence="PM 确认验收通过。",
+            )
+            self.assertEqual(completed["task"]["status"], "done")
+            for field in ("role", "agent", "agent_id", "progress", "next_action"):
+                self.assertIsNone(completed["task"][field])
+            self.assertEqual(
+                completed["task"]["result_evidence"],
+                "PM 确认验收通过。",
+            )
+            self.assertEqual(completed["available_actions"], [])
+
+    def test_complete_general_task_delivery_flow(self):
+        board = FakeTaskBoard()
+        read, write = board.patches()
+        with read, write:
+            created = create_task(
+                self.owner,
+                title="整理调研结论",
+                task_type="research",
+                priority="P1",
+                description="比较候选方案并整理证据。",
+                acceptance_criteria="结论可复查，取舍明确。",
+            )
+            self.assertEqual(created["task"]["status"], "backlog")
+            self.assertEqual(created["task"]["role"], "executor")
+
+            routed = route_task(
+                self.owner,
+                record_id="recFlow",
+                role="executor",
+            )
+            self.assertEqual(
+                routed["transition"],
+                {"from": "backlog", "to": "ready"},
+            )
+
+            claimed = claim_task(self.executor, record_id="recFlow")
+            self.assertEqual(claimed["task"]["agent_id"], "agent_executor")
+
+            submitted = submit_task(
+                self.executor,
+                record_id="recFlow",
+                outcome="completed",
+                result_evidence="已比较候选方案并整理来源。",
+            )
+            self.assertEqual(submitted["task"]["status"], "review")
+
+            reviewer_routed = review_task(
+                self.owner,
+                record_id="recFlow",
+                decision="send_to_reviewer",
+                result_evidence="负责人请求独立复核。",
+                next_action="核对来源与结论一致性。",
+            )
+            self.assertEqual(reviewer_routed["task"]["status"], "ready")
+            self.assertEqual(reviewer_routed["task"]["role"], "reviewer")
+            self.assertIsNone(reviewer_routed["task"]["agent_id"])
+
+            reviewer_claimed = claim_task(self.reviewer, record_id="recFlow")
+            self.assertEqual(
+                reviewer_claimed["task"]["agent_id"],
+                "agent_reviewer",
+            )
+
+            reviewed = submit_task(
+                self.reviewer,
+                record_id="recFlow",
+                outcome="reviewed",
+                result_evidence="来源与结论一致。",
+            )
+            self.assertEqual(reviewed["task"]["status"], "review")
+            self.assertTrue(
+                reviewed["task"]["result_evidence"].startswith(
+                    "评审结论：已审阅（Reviewed）"
+                )
+            )
+
+            completed = review_task(
+                self.owner,
+                record_id="recFlow",
+                decision="approve",
+                result_evidence="负责人确认验收通过。",
             )
             self.assertEqual(completed["task"]["status"], "done")
             self.assertEqual(completed["available_actions"], [])
@@ -285,6 +386,21 @@ class WorkflowActionTest(unittest.TestCase):
             self.assertTrue(second["ok"])
             self.assertTrue(second["already_applied"])
             self.assertEqual(second["task"]["agent_id"], "agent_tl")
+
+    def test_pm_can_delegate_the_current_ready_task_without_claiming_it(self):
+        board = FakeTaskBoard({
+            **self._ready_task(),
+            "role": "pm",
+        })
+        read, write = board.patches()
+        with read, write:
+            delegated = route_task(self.pm, record_id="recReady", role="tl")
+
+        self.assertTrue(delegated["ok"])
+        self.assertEqual(delegated["transition"], {"from": "ready", "to": "ready"})
+        self.assertEqual(delegated["task"]["role"], "tl")
+        self.assertIsNone(delegated["task"]["agent"])
+        self.assertIsNone(delegated["task"]["agent_id"])
 
     def test_submit_outcomes_and_block_targets_follow_role_rules(self):
         board = FakeTaskBoard({

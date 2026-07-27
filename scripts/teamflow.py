@@ -17,6 +17,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.codex import run_codex_turn
+from core.codex_permissions import (
+    authorize_teamflow_mcp,
+    inspect_teamflow_mcp_authorization,
+    require_teamflow_mcp_authorization,
+)
 from core.agent_runtime import attach_agent_contexts, inspect_agent_contexts
 from core.daemon import (
     daemon_status,
@@ -79,6 +84,17 @@ def main() -> int:
     add_workspace_args(inspect_parser)
     inspect_parser.add_argument("--json", action="store_true", help="Print raw JSON.")
     inspect_parser.set_defaults(func=cmd_inspect)
+
+    authorize_codex_parser = subparsers.add_parser(
+        "authorize-codex-tools",
+        help="Authorize the TeamFlow MCP server for unattended Codex agent work.",
+    )
+    authorize_codex_parser.add_argument(
+        "--confirmed",
+        action="store_true",
+        help="Confirm the user approved this Codex configuration change.",
+    )
+    authorize_codex_parser.set_defaults(func=cmd_authorize_codex_tools)
 
     inspect_context_parser = subparsers.add_parser(
         "inspect-agent-context",
@@ -259,6 +275,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_inspect(args: argparse.Namespace) -> int:
     result = attach_agent_contexts(args.workspace, inspect_workspace(args.workspace))
+    result["codex_mcp_authorization"] = inspect_teamflow_mcp_authorization()
     if args.json:
         print_json(result)
         return 0
@@ -276,6 +293,16 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     print(f"Workflows: {len(result['workflows'])}")
     print(f"Roles: {len(result['roles'])}")
     print(f"Agents: {len(result['agents'])}")
+    authorization = result["codex_mcp_authorization"]
+    print(
+        "Codex MCP authorization: "
+        f"{'yes' if authorization['authorized'] else 'no'}"
+    )
+    return 0
+
+
+def cmd_authorize_codex_tools(args: argparse.Namespace) -> int:
+    print_json(authorize_teamflow_mcp(confirmed=args.confirmed))
     return 0
 
 
@@ -416,6 +443,7 @@ def cmd_create_lark_board(args: argparse.Namespace) -> int:
 
 
 def cmd_register_agent(args: argparse.Namespace) -> int:
+    require_teamflow_mcp_authorization()
     result = register_agent(
         args.workspace,
         workflow=args.workflow,
@@ -445,6 +473,7 @@ def cmd_unregister_agent(args: argparse.Namespace) -> int:
 
 
 def cmd_update_agent(args: argparse.Namespace) -> int:
+    require_teamflow_mcp_authorization()
     result = update_agent(args.workspace, agent_id=args.agent_id, session_id=args.session_id)
     result["daemon_sync"] = sync_agent_change(args.workspace)
     print_json(result)
@@ -744,15 +773,43 @@ def cmd_self_check(args: argparse.Namespace) -> int:
     board = result["lark_board"]
     assert result["initialized"] is True
     assert result["schema_version"] == SCHEMA_VERSION
-    assert {workflow["key"] for workflow in result["workflows"]} == {DEFAULT_WORKFLOW_KEY, "general-task"}
+    assert {workflow["key"] for workflow in result["workflows"]} == {
+        DEFAULT_WORKFLOW_KEY,
+        "general-task",
+    }
     assert all(workflow["short_description"] for workflow in result["workflows"])
     assert result["current_workflow"]["key"] == DEFAULT_WORKFLOW_KEY
-    assert {role["role_key"] for role in result["roles"]} == {"pm", "qa", "tl", "design", "owner", "executor", "reviewer"}
+    assert {role["role_key"] for role in result["roles"]} == {
+        "pm",
+        "qa",
+        "tl",
+        "design",
+        "owner",
+        "executor",
+        "reviewer",
+    }
     assert [role["display_name"] for role in result["roles"] if role["role_key"] == "tl"] == ["Technical Lead"]
     assert all(role["description"] for role in result["roles"])
-    assert [role["role_key"] for role in result["roles"] if role["is_coordinator"]] == ["pm"]
+    assert {
+        (role["workflow_key"], role["role_key"])
+        for role in result["roles"]
+        if role["is_coordinator"]
+    } == {
+        ("software-development", "pm"),
+        ("general-task", "owner"),
+    }
     assert {task_type["type_key"] for task_type in result["task_types"]} == {
-        "requirement", "decision", "design", "development", "bug", "validation", "chore",
+        "requirement",
+        "decision",
+        "design",
+        "development",
+        "bug",
+        "validation",
+        "chore",
+        "task",
+        "research",
+        "content",
+        "review",
     }
     assert bot_identity["app_secret"] == "<stored>"
     assert bot_identity["app_name"] == "Check app"

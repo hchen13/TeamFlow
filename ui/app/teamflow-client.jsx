@@ -153,6 +153,15 @@ const text = {
     saveIdentity: "保存身份",
     agentTitle: "Agent",
     agentSubtitle: "连接当前协作模式需要的 Agent session，并检查它们是否可用。",
+    codexToolsTitle: "Codex 工具授权",
+    codexToolsAuthorized: "已生效",
+    codexToolsPending: "后台已生效",
+    codexToolsMissing: "待授权",
+    codexToolsAuthorizedHint: "已注册 Agent 可以自动调用当前版本的 TeamFlow 工具。",
+    codexToolsPendingHint: "等待中的任务会立即通过后台 app-server 恢复派发。完全退出授权时已运行的 Codex Desktop、VS Code 或 CLI 后，将恢复前台 Session 的实时 IPC 派发。",
+    codexToolsMissingHint: "注册 Agent 前，请一次性授权当前版本的 TeamFlow 工具。授权后，daemon 派发的任务无需停下来等待逐次批准。",
+    authorizeCodexTools: "授权 TeamFlow 工具",
+    authorizeCodexToolsConfirm: "TeamFlow 将备份并更新 Codex 用户配置，把当前版本的全部 TeamFlow 工具设为自动批准。确认继续？",
     role: "角色",
     harness: "Harness",
     sessionId: "Session",
@@ -364,6 +373,15 @@ const text = {
     saveIdentity: "Save identity",
     agentTitle: "Agent",
     agentSubtitle: "Connect the agent sessions required by the current collaboration mode and verify their availability.",
+    codexToolsTitle: "Codex tool authorization",
+    codexToolsAuthorized: "Active",
+    codexToolsPending: "Background active",
+    codexToolsMissing: "Authorization required",
+    codexToolsAuthorizedHint: "Registered agents can invoke the current TeamFlow tools automatically.",
+    codexToolsPendingHint: "Waiting tasks resume immediately through a background app-server. Fully quit the Codex Desktop, VS Code, or CLI clients that were running during authorization to restore live IPC dispatch.",
+    codexToolsMissingHint: "Authorize the current TeamFlow tools once before registering agents. Daemon-delivered work can then run without stopping for per-call approval.",
+    authorizeCodexTools: "Authorize TeamFlow tools",
+    authorizeCodexToolsConfirm: "TeamFlow will back up and update your Codex user configuration, setting every tool in this TeamFlow version to auto-approve. Continue?",
     role: "Role",
     harness: "Harness",
     sessionId: "Session",
@@ -616,6 +634,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
             actions={actions}
             agentFormOpen={agentFormOpen}
             agents={currentAgents}
+            codexMcpAuthorization={state.codex_mcp_authorization || {}}
             codexSessionError={liveCodexSessionError}
             codexSessions={liveCodexSessions}
             currentRoles={currentRoles}
@@ -1591,7 +1610,7 @@ function CloseIcon() {
   return <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m6 6 8 8M14 6l-8 8" /></svg>;
 }
 
-function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSessions, currentRoles, currentWorkflow, lifecycleBySession, lang, refreshCodexState, runtimeBySession, setAgentFormOpen, t }) {
+function AgentPanel({ actions, agentFormOpen, agents, codexMcpAuthorization, codexSessionError, codexSessions, currentRoles, currentWorkflow, lifecycleBySession, lang, refreshCodexState, runtimeBySession, setAgentFormOpen, t }) {
   const [selectedRoleKey, setSelectedRoleKey] = useState("");
   const [editingAgentId, setEditingAgentId] = useState("");
   const [onboardingAgentId, setOnboardingAgentId] = useState("");
@@ -1603,6 +1622,23 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
     : availableRoles[0]?.role_key || "";
   const selectedRole = availableRoles.find((role) => role.role_key === effectiveRoleKey);
   const onboardingAgent = agents.find((agent) => agent.id === onboardingAgentId);
+  const codexToolsAuthorized = Boolean(codexMcpAuthorization?.authorized);
+  const codexToolsPending = Boolean(codexMcpAuthorization?.activation_pending);
+  const codexToolsState = codexToolsPending
+    ? "pending"
+    : codexToolsAuthorized
+      ? "authorized"
+      : "missing";
+  const codexToolsStatus = codexToolsPending
+    ? t.codexToolsPending
+    : codexToolsAuthorized
+      ? t.codexToolsAuthorized
+      : t.codexToolsMissing;
+  const codexToolsHint = codexToolsPending
+    ? t.codexToolsPendingHint
+    : codexToolsAuthorized
+      ? t.codexToolsAuthorizedHint
+      : t.codexToolsMissingHint;
 
   useEffect(() => {
     const dialog = onboardingDialogRef.current;
@@ -1627,13 +1663,32 @@ function AgentPanel({ actions, agentFormOpen, agents, codexSessionError, codexSe
         <a className="agentContextLink" href={`/?tab=lark&lang=${lang}&step=workflow`}>{t.changeWorkflow}</a>
       </section>
 
+      <section className={`codexToolAuthorization ${codexToolsState}`}>
+        <div>
+          <span>{t.codexToolsTitle}</span>
+          <strong>{codexToolsStatus}</strong>
+          <p>{codexToolsHint}</p>
+        </div>
+        {codexToolsState === "missing" ? (
+          <form
+            action={actions.authorizeCodexTools}
+            onSubmit={(event) => {
+              if (!window.confirm(t.authorizeCodexToolsConfirm)) event.preventDefault();
+            }}
+          >
+            <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+            <PendingSubmitButton className="primary compact" label={t.authorizeCodexTools} />
+          </form>
+        ) : null}
+      </section>
+
       <section className="agentRoster">
         <div className="agentRosterHeader">
           <div>
             <h3>{t.configuredAgents}</h3>
             <span>{t.registeredCount.replace("{count}", String(agents.length))}</span>
           </div>
-          {!agentFormOpen && availableRoles.length ? (
+          {codexToolsAuthorized && !agentFormOpen && availableRoles.length ? (
             <button className="primary compact" type="button" onClick={() => { setEditingAgentId(""); setAgentFormOpen(true); }}>
               + {t.addAgent}
             </button>

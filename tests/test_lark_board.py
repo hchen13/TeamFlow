@@ -75,6 +75,20 @@ class WorkflowDefinitionTest(unittest.TestCase):
         self.assertEqual(len(definition["task_types"]), 7)
         self.assertEqual(definition["task_schema"]["task_id"]["sequence_length"], 4)
 
+    def test_general_task_definition(self):
+        definition = load_workflow_definition("general-task")
+
+        self.assertEqual(definition["coordinator_role"], "owner")
+        self.assertEqual(
+            {role["key"] for role in definition["roles"]},
+            {"owner", "executor", "reviewer"},
+        )
+        self.assertEqual(
+            {task_type["key"] for task_type in definition["task_types"]},
+            {"task", "research", "content", "decision", "review", "chore"},
+        )
+        self.assertEqual(definition["task_schema"]["task_id"]["sequence_length"], 4)
+
 
 class LarkCliDependencyTest(unittest.TestCase):
     def test_missing_local_cli_is_installed_without_consuming_mcp_stdio(self):
@@ -372,6 +386,13 @@ class LarkBoardTest(unittest.TestCase):
         workflow = next(item for item in state["workflows"] if item["key"] == "software-development")
         roles = [item for item in state["roles"] if item["workflow_key"] == "software-development"]
         task_types = [item for item in state["task_types"] if item["workflow_key"] == "software-development"]
+        general = next(item for item in state["workflows"] if item["key"] == "general-task")
+        general_roles = [
+            item for item in state["roles"] if item["workflow_key"] == "general-task"
+        ]
+        general_types = [
+            item for item in state["task_types"] if item["workflow_key"] == "general-task"
+        ]
 
         self.assertEqual(workflow["display_name_zh"], "软件开发")
         self.assertEqual(workflow["display_name_en"], "Software development")
@@ -380,6 +401,77 @@ class LarkBoardTest(unittest.TestCase):
             "requirement", "decision", "design", "development", "bug", "validation", "chore",
         })
         self.assertEqual(next(item for item in task_types if item["type_key"] == "validation")["default_role_key"], "qa")
+        self.assertEqual(general["display_name_zh"], "通用任务")
+        self.assertEqual(
+            [role["role_key"] for role in general_roles if role["is_coordinator"]],
+            ["owner"],
+        )
+        self.assertEqual(
+            {item["type_key"] for item in general_types},
+            {"task", "research", "content", "decision", "review", "chore"},
+        )
+        self.assertEqual(
+            {item["key"] for item in state["workflows"]},
+            {"software-development", "general-task"},
+        )
+
+    def test_installed_general_task_can_be_selected(self):
+        selected = select_workflow(self.workspace, workflow="general-task")
+
+        self.assertEqual(selected["workflow_key"], "general-task")
+        self.assertEqual(
+            inspect_workspace(self.workspace)["current_workflow"]["key"],
+            "general-task",
+        )
+
+    def test_uninstalled_workflow_cannot_be_selected_or_remain_current(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "workflow definition is not installed: legacy-workflow",
+        ):
+            select_workflow(self.workspace, workflow="legacy-workflow")
+
+        paths = resolve_workspace_paths(self.workspace)
+        with connect(paths.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO workflows (
+                  id, key, display_name, short_description, description,
+                  created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "workflow_legacy",
+                    "legacy-workflow",
+                    "Legacy",
+                    "Uninstalled legacy workflow",
+                    "Uninstalled legacy workflow",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE workspaces
+                SET current_workflow_id = (
+                  SELECT id FROM workflows WHERE key = 'legacy-workflow'
+                )
+                """
+            )
+        self.assertEqual(
+            inspect_workspace(self.workspace)["current_workflow"]["key"],
+            "software-development",
+        )
+        with connect(paths.db_path) as conn:
+            current = conn.execute(
+                """
+                SELECT workflows.key
+                FROM workspaces
+                JOIN workflows ON workflows.id = workspaces.current_workflow_id
+                """
+            ).fetchone()
+        self.assertEqual(current["key"], "software-development")
 
     def test_blank_default_table_without_table_id_is_reused(self):
         verify_lark_board(self.workspace)
@@ -491,7 +583,6 @@ class LarkBoardTest(unittest.TestCase):
             self.workspace,
             board_url="https://example.feishu.cn/base/bascnTest?table=tblDefault&view=vewGrid",
         )
-        select_workflow(self.workspace, workflow="general-task")
 
         verification = verify_lark_board(self.workspace)
 

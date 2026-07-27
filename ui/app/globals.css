@@ -696,7 +696,7 @@ legend {
 .linkStrip span,
 .authResult span,
 .connectionRow span,
-.agentRow span,
+.agentIdentityMeta > span,
 .emptyState span {
   color: var(--muted);
   font-size: 13px;
@@ -1966,6 +1966,58 @@ button.accessCheck.failed:focus-visible {
   white-space: nowrap;
 }
 
+.codexToolAuthorization {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 13px 16px;
+  border-left: 3px solid;
+  background: var(--surface-soft);
+}
+
+.codexToolAuthorization.authorized {
+  border-color: #4c8a72;
+}
+
+.codexToolAuthorization.missing {
+  border-color: #b77928;
+  background: #fff9ef;
+}
+
+.codexToolAuthorization.pending {
+  border-color: #b77928;
+  background: #fff9ef;
+}
+
+.codexToolAuthorization > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.codexToolAuthorization > div > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.codexToolAuthorization strong {
+  font-size: 14px;
+}
+
+.codexToolAuthorization p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.codexToolAuthorization form {
+  flex: 0 0 auto;
+}
+
 .agentRoster {
   display: grid;
   gap: 14px;
@@ -2313,6 +2365,13 @@ button.accessCheck.failed:focus-visible {
   opacity: 0.42;
 }
 
+.agentActions .primary:disabled {
+  border-color: var(--line-strong);
+  background: var(--surface-strong);
+  color: var(--muted);
+  opacity: 1;
+}
+
 .agentSession code {
   min-width: 0;
   overflow: hidden;
@@ -2467,6 +2526,15 @@ button.accessCheck.failed:focus-visible {
 
   .agentContextLink {
     width: fit-content;
+  }
+
+  .codexToolAuthorization {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .codexToolAuthorization .primary {
+    width: 100%;
   }
 
   .agentRosterHeader,
