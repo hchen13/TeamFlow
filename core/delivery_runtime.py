@@ -356,19 +356,23 @@ class DeliveryRuntime:
             try:
                 thread = self.read_thread(session_id, include_turns=True)
                 turn_id = str(delivery.get("turn_id") or "")
-                turn = (
-                    self.find_turn(thread, turn_id)
-                    if turn_id
-                    else self.find_turn_by_client_message_id(
-                        thread,
-                        str(delivery.get("client_message_id") or ""),
-                    )
+                client_message_id = str(
+                    delivery.get("client_message_id") or ""
                 )
-                if turn is not None and not turn_id:
-                    turn_id = str(turn.get("id") or "")
-                    if not turn_id:
+                turn = (
+                    self.find_turn_by_client_message_id(
+                        thread,
+                        client_message_id,
+                    )
+                    if client_message_id
+                    else self.find_turn(thread, turn_id)
+                )
+                if turn is not None:
+                    recovered_turn_id = str(turn.get("id") or "")
+                    if not recovered_turn_id:
                         turn = None
-                    else:
+                    elif recovered_turn_id != turn_id:
+                        turn_id = recovered_turn_id
                         mark_task_delivery_turn_started(
                             context,
                             delivery_id=int(delivery["id"]),

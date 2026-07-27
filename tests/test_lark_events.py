@@ -3490,7 +3490,14 @@ class LarkEventsTest(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("core.daemon.read_codex_thread", return_value={
-                    "turns": [{"id": "turn_restart", "status": "completed"}]
+                    "turns": [{
+                        "id": "turn_restart",
+                        "status": "completed",
+                        "items": [{
+                            "type": "userMessage",
+                            "clientId": delivery["client_message_id"],
+                        }],
+                    }]
                 }) as read_thread,
                 redirect_stdout(output),
             ):
@@ -3643,7 +3650,11 @@ class LarkEventsTest(unittest.TestCase):
             with (
                 patch("core.daemon.read_codex_thread", return_value={
                     "status": {"type": "idle"},
-                    "turns": [],
+                    "turns": [{
+                        "id": "turn_missing",
+                        "status": "completed",
+                        "items": [],
+                    }],
                 }),
                 redirect_stdout(output),
             ):
@@ -3664,6 +3675,7 @@ class LarkEventsTest(unittest.TestCase):
         )
         self.assertIn("not visible", saved["last_error"])
         self.assertNotIn("DISPATCH RETRY", output.getvalue())
+        self.assertNotIn("DISPATCH RECOVERED", output.getvalue())
 
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
             conn.execute(
