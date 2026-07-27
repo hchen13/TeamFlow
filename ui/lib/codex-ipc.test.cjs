@@ -195,6 +195,34 @@ test("removes stale runtime state when a source stops following", async () => {
   ]);
 });
 
+test("retains an explicit not-loaded state when its source stops following", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  const events = [];
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map([
+    ["desktop", new Map([["thread-1", { threadId: "thread-1", status: "notLoaded" }]])]
+  ]);
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+  bridge.emit = (...args) => events.push(args);
+
+  bridge.onMessage({
+    type: "broadcast",
+    method: "thread-stream-following-changed",
+    version: 1,
+    sourceClientId: "desktop",
+    params: {
+      conversationId: "thread-1",
+      hostId: "local",
+      following: false
+    }
+  });
+
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "notLoaded");
+  assert.deepEqual(events, []);
+});
+
 test("reports a pending follower as checking rather than not loaded", async () => {
   const { CodexBridge } = await modulePromise;
   const bridge = Object.create(CodexBridge.prototype);
@@ -206,7 +234,7 @@ test("reports a pending follower as checking rather than not loaded", async () =
   assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "checking" }]);
 });
 
-test("does not infer not loaded when Codex returns no snapshot", async () => {
+test("reports an unresponsive tracked thread as not loaded while Codex is connected", async () => {
   const { CodexBridge } = await modulePromise;
   const bridge = Object.create(CodexBridge.prototype);
   bridge.connected = true;
@@ -214,7 +242,7 @@ test("does not infer not loaded when Codex returns no snapshot", async () => {
   bridge.pendingThreads = new Set();
   bridge.unconfirmedThreads = new Set(["thread-1"]);
 
-  assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "unconfirmed" }]);
+  assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "notLoaded" }]);
 });
 
 test("does not restart an unconfirmed follow check when POST tracks the same thread", async () => {

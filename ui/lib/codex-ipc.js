@@ -13,7 +13,7 @@ const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"])
 const TERMINAL_TURN_STATUSES = new Set(["completed", "success", "failed", "interrupted", "cancelled", "canceled"]);
 const LOCAL_HOST_ID = "local";
 const FOLLOW_TIMEOUT_MS = 30000;
-const BRIDGE_VERSION = 10;
+const BRIDGE_VERSION = 12;
 const globalKey = Symbol.for("teamflow.codexBridge");
 
 export class CodexBridge extends EventEmitter {
@@ -309,9 +309,11 @@ export class CodexBridge extends EventEmitter {
 
   removeSourceRuntime(sourceClientId, threadId) {
     const sourceRuntime = this.runtimeBySource.get(sourceClientId);
-    if (!sourceRuntime?.delete(threadId)) {
+    const previous = sourceRuntime?.get(threadId);
+    if (!previous || previous.status === "notLoaded") {
       return;
     }
+    sourceRuntime.delete(threadId);
     if (sourceRuntime.size === 0) {
       this.runtimeBySource.delete(sourceClientId);
     }
@@ -338,7 +340,11 @@ export class CodexBridge extends EventEmitter {
       }
       this.pendingThreads.delete(threadId);
       this.unconfirmedThreads.add(threadId);
-      this.emit("event", { type: "runtime", threadId, status: "unconfirmed" });
+      this.emit("event", {
+        type: "runtime",
+        threadId,
+        status: this.connected ? "notLoaded" : "unconfirmed"
+      });
     }, FOLLOW_TIMEOUT_MS);
     timer.unref?.();
     this.followTimers.set(threadId, timer);
@@ -417,7 +423,10 @@ export class CodexBridge extends EventEmitter {
     }
     for (const threadId of this.unconfirmedThreads) {
       if (!byThread.has(threadId)) {
-        byThread.set(threadId, { threadId, status: "unconfirmed" });
+        byThread.set(threadId, {
+          threadId,
+          status: this.connected ? "notLoaded" : "unconfirmed"
+        });
       }
     }
     if (!this.connected) {
