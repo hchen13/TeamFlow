@@ -286,6 +286,27 @@ test("reports tracked threads as not loaded when no Codex IPC endpoint exists", 
   assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "notLoaded" }]);
 });
 
+test("reports tracked threads as checking while the IPC endpoint is being probed", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = false;
+  bridge.endpointState = "probing";
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map();
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+
+  assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "checking" }]);
+});
+
+test("distinguishes an absent IPC listener from a transport failure", async () => {
+  const { endpointStateForConnectionErrors } = await modulePromise;
+
+  assert.equal(endpointStateForConnectionErrors([{ code: "ECONNREFUSED" }]), "absent");
+  assert.equal(endpointStateForConnectionErrors([{ code: "ENOENT" }]), "absent");
+  assert.equal(endpointStateForConnectionErrors([{ code: "EACCES" }]), "unconfirmed");
+});
+
 test("refreshes the session catalog when Codex invalidates its task cache", async () => {
   const { CodexBridge } = await modulePromise;
   const bridge = Object.create(CodexBridge.prototype);

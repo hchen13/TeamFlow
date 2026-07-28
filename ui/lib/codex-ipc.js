@@ -12,8 +12,8 @@ const UNARCHIVED_VERSION = 1;
 const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"]);
 const TERMINAL_TURN_STATUSES = new Set(["completed", "success", "failed", "interrupted", "cancelled", "canceled"]);
 const LOCAL_HOST_ID = "local";
-const FOLLOW_TIMEOUT_MS = 30000;
-const BRIDGE_VERSION = 14;
+const FOLLOW_TIMEOUT_MS = 1000;
+const BRIDGE_VERSION = 16;
 const globalKey = Symbol.for("teamflow.codexBridge");
 
 export class CodexBridge extends EventEmitter {
@@ -99,18 +99,22 @@ export class CodexBridge extends EventEmitter {
       this.scheduleReconnect();
       return;
     }
+    if (this.endpointState === "unknown") {
+      this.updateEndpointState("probing");
+    }
+    const connectionErrors = [];
     for (const socketPath of socketPaths) {
       try {
         const socket = await openSocket(socketPath);
         this.attach(socket);
         this.connecting = false;
         return;
-      } catch {
-        // Try the next known Codex IPC location.
+      } catch (error) {
+        connectionErrors.push(error);
       }
     }
     this.connecting = false;
-    this.updateEndpointState("unconfirmed");
+    this.updateEndpointState(endpointStateForConnectionErrors(connectionErrors));
     this.scheduleReconnect();
   }
 
@@ -156,7 +160,7 @@ export class CodexBridge extends EventEmitter {
     this.clientId = null;
     this.initializeRequestId = null;
     this.socket = null;
-    this.endpointState = this.socketPaths().length === 0 ? "absent" : "unconfirmed";
+    this.endpointState = "probing";
     this.runtimeBySource.clear();
     this.pendingThreads.clear();
     this.unconfirmedThreads.clear();
@@ -165,7 +169,7 @@ export class CodexBridge extends EventEmitter {
     }
     this.followTimers.clear();
     this.emit("event", { type: "bridge", connected: false, sessions: this.snapshot().sessions });
-    this.scheduleReconnect();
+    this.scheduleReconnect(0);
   }
 
   updateEndpointState(endpointState) {
@@ -180,9 +184,9 @@ export class CodexBridge extends EventEmitter {
     });
   }
 
-  scheduleReconnect() {
+  scheduleReconnect(delay = 1000) {
     clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = setTimeout(() => this.connect(), 1000);
+    this.reconnectTimer = setTimeout(() => this.connect(), delay);
     this.reconnectTimer.unref?.();
   }
 
@@ -465,6 +469,9 @@ export class CodexBridge extends EventEmitter {
   }
 
   disconnectedRuntimeStatus() {
+    if (this.endpointState === "probing") {
+      return "checking";
+    }
     return this.connected || this.endpointState === "absent" ? "notLoaded" : "unconfirmed";
   }
 
@@ -530,10 +537,16 @@ function openSocket(socketPath) {
   });
 }
 
+export function endpointStateForConnectionErrors(errors) {
+  return errors.length > 0 && errors.every((error) => ["ECONNREFUSED", "ENOENT"].includes(error?.code))
+    ? "absent"
+    : "unconfirmed";
+}
+
 function ownedSocket(socketPath) {
   try {
     const stat = statSync(socketPath);
-    return process.getuid === undefined || stat.uid === process.getuid();
+    return stat.isSocket() && (process.getuid === undefined || stat.uid === process.getuid());
   } catch {
     return false;
   }
