@@ -23,6 +23,7 @@
 | 固定 MCP 映射与规则补丁语义 | `tests/test_workflow_contract.py` |
 | 生命周期权限、字段约束、状态转移、错误结构、幂等与冲突 | `tests/test_teamflow_tools.py` |
 | 飞书事件收件箱、去重、派发、后注册补发、串行、恢复、MCP 鉴权与 Hook | `tests/test_lark_events.py` |
+| 插件升级后旧 Session 的 Hook 运行时回退 | `tests/test_plugin_hooks.py` |
 | Codex IPC、未加载 Session 回退、长 turn 和 rollout 证据 | `tests/test_codex.py` |
 | 看板初始化、字段、身份与任务读写 | `tests/test_lark_board.py` |
 | UI Codex 状态聚合 | `ui/lib/codex-ipc.test.cjs` |
@@ -138,6 +139,7 @@ $tf inspect-agent-context --workspace "$ws" --role tl
 - UI 变为“已入职”。
 - `inspect-agent-context` 显示 `Onboarding: injected` 和已验证的 Codex rollout 证据。
 - `get_assignment` 返回该 Session 实际绑定的工作区、职责和 Agent ID。
+- 页面不能出现“Hook 已阻止此消息”；任何一次被 Hook 阻止的消息都必须单独判为失败，不能由后续成功消息覆盖。
 
 该用例证明实际 LLM turn 使用了隐藏职责上下文，而不只证明数据库状态发生变化。
 
