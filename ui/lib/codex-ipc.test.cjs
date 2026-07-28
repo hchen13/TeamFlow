@@ -264,12 +264,26 @@ test("reports tracked threads as unconfirmed while the IPC bridge is disconnecte
   const { CodexBridge } = await modulePromise;
   const bridge = Object.create(CodexBridge.prototype);
   bridge.connected = false;
+  bridge.endpointState = "unconfirmed";
   bridge.knownThreads = new Set(["thread-1"]);
   bridge.runtimeBySource = new Map();
   bridge.pendingThreads = new Set();
   bridge.unconfirmedThreads = new Set();
 
   assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "unconfirmed" }]);
+});
+
+test("reports tracked threads as not loaded when no Codex IPC endpoint exists", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = false;
+  bridge.endpointState = "absent";
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map();
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+
+  assert.deepEqual([...bridge.aggregateRuntime().values()], [{ threadId: "thread-1", status: "notLoaded" }]);
 });
 
 test("refreshes the session catalog when Codex invalidates its task cache", async () => {

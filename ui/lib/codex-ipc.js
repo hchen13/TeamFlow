@@ -13,7 +13,7 @@ const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"])
 const TERMINAL_TURN_STATUSES = new Set(["completed", "success", "failed", "interrupted", "cancelled", "canceled"]);
 const LOCAL_HOST_ID = "local";
 const FOLLOW_TIMEOUT_MS = 30000;
-const BRIDGE_VERSION = 13;
+const BRIDGE_VERSION = 14;
 const globalKey = Symbol.for("teamflow.codexBridge");
 
 export class CodexBridge extends EventEmitter {
@@ -24,6 +24,7 @@ export class CodexBridge extends EventEmitter {
     this.codexHome = path.resolve(process.env.CODEX_HOME || path.join(homedir(), ".codex"));
     this.connected = false;
     this.connecting = false;
+    this.endpointState = "unknown";
     this.clientId = null;
     this.initializeRequestId = null;
     this.buffer = Buffer.alloc(0);
@@ -91,7 +92,14 @@ export class CodexBridge extends EventEmitter {
       return;
     }
     this.connecting = true;
-    for (const socketPath of this.socketPaths()) {
+    const socketPaths = this.socketPaths();
+    if (socketPaths.length === 0) {
+      this.connecting = false;
+      this.updateEndpointState("absent");
+      this.scheduleReconnect();
+      return;
+    }
+    for (const socketPath of socketPaths) {
       try {
         const socket = await openSocket(socketPath);
         this.attach(socket);
@@ -102,6 +110,7 @@ export class CodexBridge extends EventEmitter {
       }
     }
     this.connecting = false;
+    this.updateEndpointState("unconfirmed");
     this.scheduleReconnect();
   }
 
@@ -120,6 +129,7 @@ export class CodexBridge extends EventEmitter {
     this.socket = socket;
     this.buffer = Buffer.alloc(0);
     this.connected = true;
+    this.endpointState = "connected";
     this.emit("event", { type: "bridge", connected: true });
     socket.on("data", (chunk) => this.onData(chunk));
     socket.on("close", () => this.disconnect());
@@ -146,6 +156,7 @@ export class CodexBridge extends EventEmitter {
     this.clientId = null;
     this.initializeRequestId = null;
     this.socket = null;
+    this.endpointState = this.socketPaths().length === 0 ? "absent" : "unconfirmed";
     this.runtimeBySource.clear();
     this.pendingThreads.clear();
     this.unconfirmedThreads.clear();
@@ -155,6 +166,18 @@ export class CodexBridge extends EventEmitter {
     this.followTimers.clear();
     this.emit("event", { type: "bridge", connected: false, sessions: this.snapshot().sessions });
     this.scheduleReconnect();
+  }
+
+  updateEndpointState(endpointState) {
+    if (this.endpointState === endpointState) {
+      return;
+    }
+    this.endpointState = endpointState;
+    this.emit("event", {
+      type: "bridge",
+      connected: false,
+      sessions: this.snapshot().sessions
+    });
   }
 
   scheduleReconnect() {
@@ -345,7 +368,7 @@ export class CodexBridge extends EventEmitter {
       this.emit("event", {
         type: "runtime",
         threadId,
-        status: this.connected ? "notLoaded" : "unconfirmed"
+        status: this.disconnectedRuntimeStatus()
       });
     }, FOLLOW_TIMEOUT_MS);
     timer.unref?.();
@@ -427,18 +450,22 @@ export class CodexBridge extends EventEmitter {
       if (!byThread.has(threadId)) {
         byThread.set(threadId, {
           threadId,
-          status: this.connected ? "notLoaded" : "unconfirmed"
+          status: this.disconnectedRuntimeStatus()
         });
       }
     }
     if (!this.connected) {
       for (const threadId of this.knownThreads) {
         if (!byThread.has(threadId)) {
-          byThread.set(threadId, { threadId, status: "unconfirmed" });
+          byThread.set(threadId, { threadId, status: this.disconnectedRuntimeStatus() });
         }
       }
     }
     return byThread;
+  }
+
+  disconnectedRuntimeStatus() {
+    return this.connected || this.endpointState === "absent" ? "notLoaded" : "unconfirmed";
   }
 
   respond(message, error) {
