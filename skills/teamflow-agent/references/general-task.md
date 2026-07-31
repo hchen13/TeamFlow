@@ -12,7 +12,7 @@
 
 - `submit_task` 的 `outcome`：`owner` 与 `executor` 用 `completed`；`reviewer` 用 `reviewed`。
 - `review_task` 的 `decision`：`approve`（→ `done`）、`rework`（→ `ready`，必须同时传 `role` 和 `result_evidence`）、`send_to_reviewer`（→ `ready`，`role` 被强制为 `reviewer`）。
-- `route_task` 只有 `prepare`（`backlog` → `ready`）、`resume`（`blocked` → `ready`）和 `recover`（`in_progress` → `ready`，需要执行 Session 确认不可用）。本协作模式**没有** `ready → ready` 的转交规则；要换职责需要走评审或先阻塞再解除。
+- `route_task` 只有 `prepare`（`backlog` → `ready`）、`resume`（`blocked` → `ready`）和 `recover`（`in_progress` → `ready`，需要执行 Session 确认不可用）。本协作模式**没有** `ready → ready` 的转交规则。不要为了换职责伪造阻塞；尚未执行且职责错误时，由负责人取消并按正确职责新建任务，已有真实交付时再通过评审决定下一步。
 - `block_task`：执行者与评审者只能把 `waiting_on` 设为 `owner`；只有负责人能设为 `stakeholder`。
 - 取消进行中的任务必须先 `stop_task_execution` 明确停止执行，再 `cancel_task`。
 
