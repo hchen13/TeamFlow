@@ -86,7 +86,7 @@ npm --prefix ui run build
 
 ## 4. 新增协作模式时的自动门禁
 
-新增 `skills/<workflow-key>/workflow.json` 后，至少确认：
+新增 `workflows/<workflow-key>/workflow.json` 后，至少确认：
 
 1. `key` 与目录名一致。
 2. 八类生命周期动作全部存在。
@@ -95,8 +95,9 @@ npm --prefix ui run build
 5. 角色、状态和任务类型名称没有进入核心分支。
 6. 定义能投影到新工作区并能被选择。
 7. 同一组固定 MCP 工具能按新定义返回正确权限和合法选项。
+8. `skills/teamflow-agent/references/` 下存在同名 reference，且 `SKILL.md` 的映射表已链接它。
 
-现有 Workflow 测试会自动扫描新目录，不需要复制一套按协作模式命名的测试框架。只有新定义引入了此前没有覆盖的语义时，才补充通用测试。
+现有 Workflow 测试会自动扫描新目录，不需要复制一套按协作模式命名的测试框架。`test_plugin_layout.py` 会检查插件暴露面与 reference 覆盖。只有新定义引入了此前没有覆盖的语义时，才补充通用测试。
 
 ## 5. 手工验收
 

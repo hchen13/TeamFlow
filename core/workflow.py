@@ -13,7 +13,7 @@ from .workflow_validation import (
     validate_workflow_definition,
 )
 
-DEFINITIONS_DIR = Path(__file__).resolve().parents[1] / "skills"
+DEFINITIONS_DIR = Path(__file__).resolve().parents[1] / "workflows"
 FIELD_DEFINITIONS = (
     ("task_id", {"zh-CN": "任务 ID", "en": "Task ID"}, "auto_number"),
     ("status", {"zh-CN": "状态", "en": "Status"}, "select"),

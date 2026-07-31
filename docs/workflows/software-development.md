@@ -348,17 +348,24 @@ PM 向项目决策人提问时，应给出：
 每一种内置协作模式由通用核心和一个自包含目录共同定义：
 
 ```text
-skills/
+workflows/
   software-development/
-    SKILL.md
     workflow.json
   general-task/
-    SKILL.md
     workflow.json
+
+skills/
+  teamflow-agent/
+    SKILL.md
+    references/
+      software-development.md
+      general-task.md
 
 core/
   workflow.py
 ```
+
+插件只暴露 `teamflow-setup` 和 `teamflow-agent` 两个顶层 Skill，不再按协作模式各暴露一个 Skill。机器定义放在 `workflows/<workflow-key>/workflow.json`，面向模型的职责指引放在 `skills/teamflow-agent/references/<workflow-key>.md`。
 
 协作模式相关信息分为以下层级：
 
@@ -366,12 +373,12 @@ core/
 | --- | --- | --- |
 | 定义源 | 通用核心 | 定义公共任务字段、业务动作类型、调用者身份语义和规则执行器 |
 | 定义源 | `workflow.json` | 定义当前协作模式的负责人、任务类型、等待对象、状态、事件路由、动作规则、字段约束和运行时动作 |
-| 定义源 | `SKILL.md` | 定义 PM、技术负责人、QA、设计如何工作和交付 |
+| 定义源 | `teamflow-agent` reference | 定义 PM、技术负责人、QA、设计如何工作和交付 |
 | 项目投影 | SQLite | 保存插件定义在当前项目中的查询投影，以及当前选择、智能体注册和身份绑定等实例状态 |
 | 任务事实源 | 飞书多维表格 | 保存具体任务、业务状态、进展和证据 |
 | 规则消费者 | MCP、后台调度程序和配置界面 | 读取同一套定义和项目状态，不各自维护规则 |
 
-SQLite 和飞书多维表格都不是协作模式定义源。一个协作模式的完整定义由“通用核心 + `workflow.json` + `SKILL.md`”组成。
+SQLite 和飞书多维表格都不是协作模式定义源。一个协作模式的完整定义由“通用核心 + `workflow.json` + `teamflow-agent` reference”组成。
 
 `core/workflow.py` 负责加载、校验和执行任意协作模式，不包含 `software-development` 专用分支。
 
@@ -381,7 +388,7 @@ SQLite 和飞书多维表格都不是协作模式定义源。一个协作模式�
 
 所有协作模式共同遵循的字段、动作和校验规则见 [`workflow-definition.md`](workflow-definition.md)。本节只说明软件开发协作模式如何使用该语法。
 
-完整内置定义见 [`skills/software-development/workflow.json`](../../skills/software-development/workflow.json)。除负责人、任务类型、等待对象和任务字段契约外，`lifecycle` 是 MCP 和后台调度程序共同读取的状态机定义：
+完整内置定义见 [`workflows/software-development/workflow.json`](../../workflows/software-development/workflow.json)。除负责人、任务类型、等待对象和任务字段契约外，`lifecycle` 是 MCP 和后台调度程序共同读取的状态机定义：
 
 ```json
 {
@@ -441,7 +448,7 @@ SQLite 和飞书多维表格都不是协作模式定义源。一个协作模式�
 ```text
 打开项目数据库
 → 执行数据库结构迁移
-→ 扫描 skills/*/workflow.json
+→ 扫描 workflows/*/workflow.json
 → 校验所有定义
 → 在一个事务内同步协作模式、负责人和任务类型
 → 加载工作区当前协作模式

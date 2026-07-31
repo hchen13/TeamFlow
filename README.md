@@ -353,7 +353,8 @@ core/                     Python 核心、数据库、飞书、Codex 与 daemon
 core/migrations/          项目 SQLite 迁移
 scripts/teamflow.py       CLI 实现
 teamflow                  基于 uv 的仓库入口
-skills/*/workflow.json    各协作模式的机器定义
+workflows/*/workflow.json 各协作模式的机器定义
+skills/                   插件暴露的 Codex Skill：teamflow-setup 与 teamflow-agent
 docs/workflows/           工作流产品规则与架构边界
 ui/                       Next.js 本地配置 UI
 tests/                    Python 单元测试
