@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { useRouter } from "next/navigation";
-import { acceptsRuntimeSequence, runtimeStatusAllowsMutation } from "../lib/agent-runtime-rules";
+import { acceptRuntimeSequence, createRuntimeSequence, runtimeStatusAllowsMutation } from "../lib/agent-runtime-rules";
 
 const FEISHU_APP_URL = "https://open.feishu.cn/app";
 const FEISHU_CREATE_APP_URL = "https://open.feishu.cn/page/launcher?from=backend_oneclick";
@@ -465,7 +465,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   const [runtimeBySession, setRuntimeBySession] = useState({});
   const [lifecycleBySession, setLifecycleBySession] = useState({});
   const refreshInFlight = useRef(null);
-  const runtimeSequence = useRef(null);
+  const runtimeSequence = useRef(createRuntimeSequence());
   const pendingOnboardingSessions = useRef(new Set());
   const t = text[lang];
   const board = state.lark_board || {};
@@ -478,13 +478,9 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   const createAppUrl = lang === "zh" ? FEISHU_CREATE_APP_URL : LARK_CREATE_APP_URL;
 
   const applyRuntime = useCallback((sequence, next) => {
-    if (!acceptsRuntimeSequence(runtimeSequence.current, sequence)) {
-      return;
+    if (acceptRuntimeSequence(runtimeSequence.current, sequence)) {
+      setRuntimeBySession(next);
     }
-    if (typeof sequence?.revision === "number") {
-      runtimeSequence.current = { epoch: sequence.epoch, revision: sequence.revision };
-    }
-    setRuntimeBySession(next);
   }, []);
 
   const refreshCodexState = useCallback(() => {

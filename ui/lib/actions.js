@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { agentForMutation, agentMutationAllowed } from "./agent-runtime-rules";
+import { planAgentMutation } from "./agent-mutations";
 import { getCodexBridge } from "./codex-ipc";
 import { getState, run, runJson, startLarkUserAuthFlow, workspaceArgs } from "./teamflow";
 
@@ -166,22 +166,11 @@ export async function registerAgent(formData) {
 }
 
 export async function unregisterAgent(formData) {
-  const args = ["unregister-agent", ...workspaceArgs()];
-  const lang = language(formData);
-  const agent = await guardedAgent(formData, lang);
-  add(args, "--agent-id", agent.id);
-  add(args, "--expected-revision", String(agent.assignment_revision));
-  await finish(args, {}, "agent", "agentRemoved", lang);
+  await mutateAgent("unregister-agent", formData, "agentRemoved");
 }
 
 export async function updateAgent(formData) {
-  const args = ["update-agent", ...workspaceArgs()];
-  const lang = language(formData);
-  const agent = await guardedAgent(formData, lang);
-  add(args, "--agent-id", agent.id);
-  add(args, "--session-id", field(formData, "session_id"));
-  add(args, "--expected-revision", String(agent.assignment_revision));
-  await finish(args, {}, "agent", "agentUpdated", lang);
+  await mutateAgent("update-agent", formData, "agentUpdated");
 }
 
 export async function selectWorkflow(formData) {
@@ -229,15 +218,18 @@ function localizedError(error, lang) {
   return /user token has expired|authorization expired/i.test(message) ? messages[lang].userAuthExpired : message;
 }
 
-// The form only names which agent to act on. Which session that agent owns, and which assignment
-// revision the check saw, both come from the workspace so a crafted or stale form cannot point the
-// safety check at a different session than the one the command will touch.
-async function guardedAgent(formData, lang) {
-  const agent = agentForMutation(await getState(), field(formData, "agent_id"));
-  if (!agent || !agentMutationAllowed(getCodexBridge().snapshot(), agent.session_id)) {
+const agentMutationDeps = {
+  readState: getState,
+  readSnapshot: () => getCodexBridge().snapshot(),
+};
+
+async function mutateAgent(command, formData, okMessage) {
+  const lang = language(formData);
+  const plan = await planAgentMutation(agentMutationDeps, command, formData);
+  if (plan.blocked) {
     redirect(redirectTarget("agent", lang, messages[lang].agentBusy, true));
   }
-  return agent;
+  await finish([command, ...workspaceArgs(), ...plan.args], {}, "agent", okMessage, lang);
 }
 
 function redirectTarget(tab, lang, message, error = false, step = "", authMode = "", extra = {}) {

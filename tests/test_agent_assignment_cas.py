@@ -102,6 +102,49 @@ class AgentAssignmentRevisionTest(unittest.TestCase):
                 conn.execute("SELECT 1 FROM agents WHERE id = ?", (self.agent_id,)).fetchone()
             )
 
+    def test_a_selector_removal_cannot_claim_a_revision(self):
+        update_agent(self.workspace, agent_id=self.agent_id, session_id="thread-two")
+        stale = self.revision() - 1
+
+        with self.assertRaises(ValueError) as failure:
+            unregister_agent(
+                self.workspace,
+                role="pm",
+                workflow="software-development",
+                harness_type="codex",
+                session_id="thread-two",
+                expected_revision=stale,
+            )
+
+        self.assertIn("expected_revision requires agent_id", str(failure.exception))
+        self.assertEqual(self.session(), "thread-two")
+
+        # The current revision is refused too: a selector may match a different agent than the one
+        # the caller checked, so the combination is rejected outright rather than guessed at.
+        with self.assertRaises(ValueError):
+            unregister_agent(
+                self.workspace,
+                role="pm",
+                workflow="software-development",
+                harness_type="codex",
+                session_id="thread-two",
+                expected_revision=self.revision(),
+            )
+        self.assertEqual(self.session(), "thread-two")
+
+    def test_a_selector_removal_without_a_revision_still_works(self):
+        update_agent(self.workspace, agent_id=self.agent_id, session_id="thread-two")
+
+        removed = unregister_agent(
+            self.workspace,
+            role="pm",
+            workflow="software-development",
+            harness_type="codex",
+            session_id="thread-two",
+        )
+
+        self.assertEqual(removed["deleted"], 1)
+
     def test_callers_that_pass_no_revision_keep_working(self):
         update_agent(self.workspace, agent_id=self.agent_id, session_id="thread-two")
         self.assertEqual(self.session(), "thread-two")

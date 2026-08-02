@@ -879,6 +879,10 @@ def unregister_agent(
     session_id: str | None = None,
     expected_revision: int | None = None,
 ) -> dict[str, Any]:
+    # A revision names one assignment, so the selector form cannot honour it: it may match several
+    # agents, or a different one than the caller checked. Refusing is the only safe reading.
+    if expected_revision is not None and not agent_id:
+        raise ValueError("expected_revision requires agent_id")
     paths = resolve_workspace_paths(workspace)
     if not paths.db_path.exists():
         return {"ok": True, "deleted": 0}

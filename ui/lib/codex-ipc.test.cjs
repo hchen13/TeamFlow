@@ -2,11 +2,23 @@ const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const test = require("node:test");
 
-const load = (specifier) => import(
-  `data:text/javascript;base64,${Buffer.from(readFileSync(require.resolve(specifier), "utf8")).toString("base64")}`
+// The UI package is CommonJS, so its ES modules are loaded as data: URLs. Those cannot resolve a
+// relative import, so a module's own dependencies are inlined as nested data: URLs first.
+const dataUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+const read = (specifier) => readFileSync(require.resolve(specifier), "utf8");
+const load = (specifier, imports = {}) => import(
+  dataUrl(
+    Object.entries(imports).reduce(
+      (source, [from, target]) => source.replaceAll(`"${from}"`, JSON.stringify(dataUrl(read(target)))),
+      read(specifier)
+    )
+  )
 );
 const modulePromise = load("./codex-ipc.js");
 const rulesPromise = load("./agent-runtime-rules.js");
+const mutationsPromise = load("./agent-mutations.js", {
+  "./agent-runtime-rules": "./agent-runtime-rules.js"
+});
 
 test("extracts snapshot and patch runtime metadata", async () => {
   const { codexThreadMetadata } = await modulePromise;
@@ -294,35 +306,43 @@ test("every published event and snapshot carries a monotonic revision", async ()
 });
 
 test("a stale polled snapshot never rolls back a newer streamed update", async () => {
-  const { acceptsRuntimeSequence } = await rulesPromise;
-  const applied = { epoch: "epoch-a", revision: 6 };
+  const { acceptRuntimeSequence, createRuntimeSequence } = await rulesPromise;
+  const tracker = createRuntimeSequence();
 
+  assert.equal(acceptRuntimeSequence(tracker, { epoch: "epoch-a", revision: 6 }), true);
   // The POST left at revision 4 and returned after the stream already delivered revision 6.
-  assert.equal(acceptsRuntimeSequence(applied, { epoch: "epoch-a", revision: 4 }), false);
-  assert.equal(acceptsRuntimeSequence(applied, { epoch: "epoch-a", revision: 6 }), true);
-  assert.equal(acceptsRuntimeSequence(applied, { epoch: "epoch-a", revision: 7 }), true);
-  assert.equal(acceptsRuntimeSequence(null, { epoch: "epoch-a", revision: 0 }), true);
-  // A rebuilt bridge restarts its counter, so its low revisions must not be discarded forever.
-  assert.equal(acceptsRuntimeSequence(applied, { epoch: "epoch-b", revision: 1 }), true);
-  // A payload from a bridge that predates the sequence must still be applied.
-  assert.equal(acceptsRuntimeSequence(applied, {}), true);
+  assert.equal(acceptRuntimeSequence(tracker, { epoch: "epoch-a", revision: 4 }), false);
+  assert.equal(acceptRuntimeSequence(tracker, { epoch: "epoch-a", revision: 6 }), true);
+  assert.equal(acceptRuntimeSequence(tracker, { epoch: "epoch-a", revision: 7 }), true);
+  // A payload from a bridge that predates the sequence carries no ordering claim.
+  assert.equal(acceptRuntimeSequence(tracker, {}), true);
+  assert.equal(tracker.epoch, "epoch-a");
+  assert.equal(tracker.revision, 7);
 });
 
-test("a rebuilt bridge is accepted and restarts the applied sequence", async () => {
-  const { acceptsRuntimeSequence } = await rulesPromise;
-  let applied = { epoch: "epoch-a", revision: 9 };
+test("a retired bridge epoch can never flow back over the current one", async () => {
+  const { acceptRuntimeSequence, createRuntimeSequence } = await rulesPromise;
+  const tracker = createRuntimeSequence();
+  const applied = [];
   const apply = (sequence) => {
-    if (!acceptsRuntimeSequence(applied, sequence)) {
-      return false;
+    if (acceptRuntimeSequence(tracker, sequence)) {
+      applied.push(sequence);
     }
-    applied = { epoch: sequence.epoch, revision: sequence.revision };
-    return true;
   };
 
-  assert.equal(apply({ epoch: "epoch-b", revision: 1 }), true);
-  assert.deepEqual(applied, { epoch: "epoch-b", revision: 1 });
-  assert.equal(apply({ epoch: "epoch-b", revision: 0 }), false);
-  assert.equal(apply({ epoch: "epoch-b", revision: 2 }), true);
+  apply({ epoch: "old", revision: 9 });
+  apply({ epoch: "new", revision: 1 });
+  // The rebuilt bridge is current, so a late payload from the retired instance is dropped even
+  // though its revision is higher than the one now applied.
+  apply({ epoch: "old", revision: 8 });
+  apply({ epoch: "old", revision: 99 });
+
+  assert.deepEqual(applied.at(-1), { epoch: "new", revision: 1 });
+  assert.equal(tracker.epoch, "new");
+  assert.equal(tracker.revision, 1);
+
+  apply({ epoch: "new", revision: 2 });
+  assert.deepEqual(applied.at(-1), { epoch: "new", revision: 2 });
 });
 
 test("agent mutations are allowed only for a bridge-confirmed idle or unloaded session", async () => {
@@ -426,16 +446,69 @@ test("a submitted session cannot redirect the check away from the acted-on agent
   assert.equal(agentForMutation({}, "agent-busy"), null);
 });
 
-test("the agent mutation guard never reads a session or status from the form", async () => {
-  const actions = readFileSync(require.resolve("./actions.js"), "utf8");
-  const guard = actions.slice(actions.indexOf("async function guardedAgent"));
-  const body = guard.slice(0, guard.indexOf("\n}\n"));
-  const client = readFileSync(require.resolve("../app/teamflow-client.jsx"), "utf8");
+test("a forged form cannot move the check or the revision off the server-side agent", async () => {
+  const { planAgentMutation } = await mutationsPromise;
+  const checked = [];
+  const deps = {
+    readState: async () => ({
+      agents: [
+        { id: "agent-busy", session_id: "thread-busy", assignment_revision: 7 },
+        { id: "agent-free", session_id: "thread-free", assignment_revision: 2 }
+      ]
+    }),
+    readSnapshot: () => {
+      checked.push("snapshot");
+      return {
+        sessions: [
+          { threadId: "thread-busy", status: "active" },
+          { threadId: "thread-free", status: "idle" }
+        ]
+      };
+    }
+  };
+  const forged = (agentId) => new Map([
+    ["agent_id", agentId],
+    ["session_id", "thread-free"],
+    ["current_session_id", "thread-free"],
+    ["runtime_status", "idle"],
+    ["expected_revision", "1"]
+  ]);
 
-  assert.match(body, /agentForMutation\(await getState\(\)/);
-  assert.doesNotMatch(body, /current_session_id|runtime_status/);
+  const blocked = await planAgentMutation(deps, "unregister-agent", forged("agent-busy"));
+  assert.equal(blocked.blocked, true);
+  assert.equal(blocked.checkedSession, "thread-busy", "the busy agent's own session must be checked");
+  assert.equal(blocked.args, undefined);
+  assert.equal(checked.length, 1);
+
+  const allowed = await planAgentMutation(deps, "unregister-agent", forged("agent-free"));
+  assert.equal(allowed.blocked, false);
+  assert.equal(allowed.checkedSession, "thread-free");
+  assert.deepEqual(allowed.args, ["--agent-id", "agent-free", "--expected-revision", "2"]);
+
+  const updated = await planAgentMutation(deps, "update-agent", forged("agent-free"));
+  assert.deepEqual(updated.args, [
+    "--agent-id",
+    "agent-free",
+    "--session-id",
+    "thread-free",
+    "--expected-revision",
+    "2"
+  ]);
+  // The submitted revision is never echoed back to the CLI.
+  assert.equal(updated.args.includes("1"), false);
+
+  const missing = await planAgentMutation(deps, "unregister-agent", forged("agent-gone"));
+  assert.deepEqual(missing, { blocked: true, checkedSession: null });
+});
+
+test("the agent actions delegate to the injectable mutation planner", async () => {
+  const actions = readFileSync(require.resolve("./actions.js"), "utf8");
+  const client = readFileSync(require.resolve("../app/teamflow-client.jsx"), "utf8");
+  const mutate = actions.slice(actions.indexOf("async function mutateAgent"));
+
+  assert.match(mutate.slice(0, mutate.indexOf("\n}\n")), /planAgentMutation\(agentMutationDeps/);
+  assert.doesNotMatch(actions, /current_session_id|runtime_status/);
   assert.doesNotMatch(client, /name="runtime_status"|name="current_session_id"/);
-  assert.match(actions, /--expected-revision/);
 });
 
 test("an outdated bridge singleton is replaced", async () => {
