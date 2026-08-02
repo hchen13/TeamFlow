@@ -26,6 +26,7 @@ from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_
 from .migrations import MIGRATIONS
 from .schema_guard import (
     database_data_version,
+    verified_commit,
     verify_installed_migrations,
     verify_migration_compatibility,
 )
@@ -499,7 +500,7 @@ def create_lark_board(workspace: str | None, *, identity_id: str, domain: str, n
                     """,
                     (status.get("tokenStatus") or "unavailable", timestamp, str(error), timestamp, identity["id"]),
                 )
-                conn.commit()
+                verified_commit(conn, MIGRATIONS)
                 raise
             base_payload = run_lark_cli_json(["base", "+base-create", "--as", "user", "--name", board_name])
         else:

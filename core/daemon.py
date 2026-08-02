@@ -128,6 +128,7 @@ class TeamFlowDaemon:
         self.active_sessions: set[str] = set()
         self.delivery_workers: dict[str, threading.Thread] = {}
         self.consumer_failure: dict[str, Any] = {}
+        self.on_fatal: Callable[[], None] = lambda: None
         self.monitor = DaemonMonitor(
             routes=self.routes,
             workers=self.workers,
@@ -151,6 +152,7 @@ class TeamFlowDaemon:
             stop_worker=lambda worker: self._stop_worker(worker),
             resolve=lambda name: globals()[name],
             consumer_failure=self.consumer_failure,
+            on_fatal=lambda: self.on_fatal(),
         )
         self.workspace_synchronizer = WorkspaceSynchronizer(
             routes=self.routes,
@@ -678,6 +680,13 @@ def run_daemon() -> int:
             socket_path.unlink()
         runtime = TeamFlowDaemon()
         server = DaemonServer(str(socket_path), runtime)
+        # A consumer that died leaves nothing draining the inbox, so the daemon exits and frees its
+        # socket instead of lingering as a listener that answers but never listens.
+        runtime.on_fatal = lambda: threading.Thread(
+            target=server.shutdown,
+            name="teamflow-daemon-fatal",
+            daemon=True,
+        ).start()
         os.chmod(socket_path, 0o600)
         pid_path.write_text(str(os.getpid()), encoding="utf-8")
         os.chmod(pid_path, 0o600)
@@ -701,8 +710,11 @@ def run_daemon() -> int:
 
 def ensure_daemon() -> dict[str, Any]:
     status = daemon_status()
-    if status["running"]:
+    if status["running"] and status.get("healthy", True):
         return status
+    if status["running"]:
+        # An unhealthy daemon cannot recover on its own, so it is replaced rather than reused.
+        stop_daemon()
     home = _ensure_home()
     log_path = home / "daemon.log"
     with log_path.open("ab", buffering=0) as log:
@@ -719,7 +731,7 @@ def ensure_daemon() -> dict[str, Any]:
     deadline = time.monotonic() + LISTENER_CONNECT_TIMEOUT
     while time.monotonic() < deadline:
         status = daemon_status()
-        if status["running"]:
+        if status["running"] and status.get("healthy", True):
             return status
         time.sleep(0.1)
     raise ValueError(f"TeamFlow daemon did not start; see {log_path}")

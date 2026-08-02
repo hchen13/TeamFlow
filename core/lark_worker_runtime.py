@@ -6,7 +6,6 @@ import time
 from typing import Any, Callable
 
 from .lark_events import LarkEventContext
-from .schema_guard import SchemaCompatibilityError
 
 
 class LarkWorkerRuntime:
@@ -25,6 +24,7 @@ class LarkWorkerRuntime:
         stop_worker: Callable[[dict[str, Any]], None],
         resolve: Callable[[str], Any],
         consumer_failure: dict[str, Any],
+        on_fatal: Callable[[], None],
     ) -> None:
         self.mp = mp
         self.event_queue = event_queue
@@ -38,6 +38,7 @@ class LarkWorkerRuntime:
         self.stop_worker_facade = stop_worker
         self.resolve = resolve
         self.consumer_failure = consumer_failure
+        self.on_fatal = on_fatal
         self.last_cleanup = 0.0
 
     def ensure_app(self, context: LarkEventContext) -> None:
@@ -98,16 +99,20 @@ class LarkWorkerRuntime:
     def consume_events(self) -> None:
         try:
             self._consume_events()
-        except SchemaCompatibilityError as error:
-            # Every listener path reads the global database, so this cannot be retried or routed
-            # around. Stop consuming and let the daemon report itself unhealthy rather than keep
-            # answering as if the board were still being watched.
-            self.consumer_failure["error"] = str(error)
+        except BaseException as error:
+            # Per-event business failures are already handled inside the event runtime, so anything
+            # reaching here broke the loop itself. Whatever it was, the inbox stops draining, and a
+            # daemon that keeps answering as a healthy listener would be lying about that.
+            self.consumer_failure["error"] = f"{type(error).__name__}: {error}"
             self.stopping.set()
             self.resolve("emit_log")(
                 self.resolve("style")("LISTENER FATAL", "1;31"),
-                fields={"reason": str(error).splitlines()[0]},
+                fields={
+                    "type": type(error).__name__,
+                    "reason": str(error).splitlines()[0] if str(error) else "",
+                },
             )
+            self.on_fatal()
 
     def _consume_events(self) -> None:
         while True:

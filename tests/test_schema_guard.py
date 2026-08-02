@@ -13,18 +13,25 @@ from unittest.mock import patch
 
 from core.config import resolve_workspace_paths
 from core.daemon_monitor import DaemonMonitor
+from core.event_runtime import EventRuntime
 from core.db import SCHEMA_VERSION, connect, init_workspace, inspect_workspace, now
 from core.global_db import (
     EVENT_RETRY_WINDOW,
     SCHEMA_RETRY_DELAY,
     connect_global,
+    due_lark_event_ids,
     global_database_path,
     record_lark_event,
+    register_workspace,
     retry_lark_event,
 )
 from core.lark_worker_runtime import LarkWorkerRuntime
 from core.migrations import MIGRATIONS
-from core.schema_guard import SchemaCompatibilityError, verify_migration_compatibility
+from core.schema_guard import (
+    SchemaCompatibilityError,
+    verified_commit,
+    verify_migration_compatibility,
+)
 from core.task_delivery_store import (
     finish_task_delivery,
     processing_task_delivery_sessions_for_workspace,
@@ -156,20 +163,21 @@ class SchemaGuardTest(unittest.TestCase):
                 0,
             )
 
-    def test_a_global_schema_mismatch_stops_the_consumer_and_the_health_report(self):
+    def consume_until_fatal(self, error: BaseException) -> tuple[dict[str, str], list[dict], bool]:
         failure: dict[str, str] = {}
         stopping = threading.Event()
-        logs: list[str] = []
+        logs: list[dict] = []
+        fatal = threading.Event()
         events: queue.Queue = queue.Queue()
         events.put("tick")
 
         def resolve(name):
             if name == "due_lark_event_ids":
-                def raise_mismatch():
-                    raise SchemaCompatibilityError("global ledger mismatch\ndetails follow")
-                return raise_mismatch
+                def raise_error():
+                    raise error
+                return raise_error
             if name == "emit_log":
-                return lambda message, **_: logs.append(message)
+                return lambda message, **fields: logs.append({"message": message, **fields})
             if name == "style":
                 return lambda message, _: message
             raise AssertionError(f"unexpected resolve: {name}")
@@ -187,27 +195,173 @@ class SchemaGuardTest(unittest.TestCase):
             stop_worker=lambda worker: None,
             resolve=resolve,
             consumer_failure=failure,
+            on_fatal=fatal.set,
         )
         runtime.routes_ready.set()
-        runtime.consume_events()
+        # The real daemon runs this loop on its own thread; an exception there is exactly the
+        # failure that used to disappear, so the test has to observe the thread actually ending.
+        thread = threading.Thread(target=runtime.consume_events, name="test-consumer")
+        thread.start()
+        thread.join(timeout=5)
 
-        self.assertIn("global ledger mismatch", failure["error"])
+        self.assertFalse(thread.is_alive(), "the consumer thread must terminate")
         self.assertTrue(stopping.is_set())
-        self.assertEqual(logs, ["LISTENER FATAL"])
+        self.assertTrue(fatal.wait(1), "the daemon must be asked to shut down")
+        return failure, logs, True
 
-        monitor = DaemonMonitor(
+    def health_of(self, failure: dict[str, str]) -> dict:
+        return DaemonMonitor(
             routes={},
             workers={},
             active_sessions=set(),
-            stopping=stopping,
+            stopping=threading.Event(),
             sync_lock=threading.RLock(),
             app_key=lambda context: "",
             consumer_failure=failure,
             resolve=lambda name: (lambda: {}),
+        ).status()
+
+    def test_a_global_schema_mismatch_stops_the_consumer_and_the_health_report(self):
+        failure, logs, _ = self.consume_until_fatal(
+            SchemaCompatibilityError("global ledger mismatch\ndetails follow")
         )
-        status = monitor.status()
+
+        self.assertIn("global ledger mismatch", failure["error"])
+        self.assertIn("SchemaCompatibilityError", failure["error"])
+        self.assertEqual(logs[0]["message"], "LISTENER FATAL")
+        self.assertEqual(logs[0]["fields"]["type"], "SchemaCompatibilityError")
+
+        status = self.health_of(failure)
         self.assertIs(status["healthy"], False)
         self.assertIn("global ledger mismatch", status["consumer_error"])
+
+    def test_any_consumer_exception_is_fatal_and_visible(self):
+        for error in (
+            sqlite3.DatabaseError("database disk image is malformed"),
+            RuntimeError("dictionary changed size during iteration"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                failure, logs, _ = self.consume_until_fatal(error)
+
+                self.assertIn(type(error).__name__, failure["error"])
+                self.assertIn(str(error), failure["error"])
+                self.assertEqual(logs[0]["fields"]["type"], type(error).__name__)
+                self.assertIs(self.health_of(failure)["healthy"], False)
+
+    def test_the_global_database_rolls_back_work_after_a_concurrent_migration(self):
+        register_workspace("/tmp/teamflow-schema-guard")
+
+        with self.assertRaises(SchemaCompatibilityError):
+            with connect_global() as conn:
+                apply_unknown_migration(global_database_path())
+                conn.execute("UPDATE workspaces SET enabled = 1")
+
+        with sqlite3.connect(global_database_path()) as after:
+            self.assertEqual(after.execute("SELECT enabled FROM workspaces").fetchone()[0], 0)
+
+    def test_an_early_commit_cannot_outrun_the_compatibility_check(self):
+        init_workspace(self.workspace)
+        db_path = resolve_workspace_paths(self.workspace).db_path
+
+        with self.assertRaises(SchemaCompatibilityError):
+            with connect(db_path) as conn:
+                apply_unknown_migration(db_path)
+                conn.execute("UPDATE workspaces SET display_name = 'early'")
+                verified_commit(conn, MIGRATIONS)
+
+        with sqlite3.connect(db_path) as after:
+            self.assertEqual(
+                after.execute(
+                    "SELECT COUNT(*) FROM workspaces WHERE display_name = 'early'"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_an_event_blocked_by_a_workspace_mismatch_is_delivered_after_the_fix(self):
+        context = SimpleNamespace(
+            workspace_root=self.workspace,
+            workspace_name="schema-guard",
+            workflow_key="software-development",
+            app_id="cli_test",
+            brand="feishu",
+            app_name="Test app",
+            public=lambda: {"file_token": "bascnTest", "table_id": "tblTest"},
+        )
+        attempts: list[str] = []
+
+        def process_workspace_event(_context, _payload):
+            attempts.append("attempt")
+            if len(attempts) == 1:
+                raise SchemaCompatibilityError("workspace ledger mismatch")
+            return [{"task": {}, "record_id": "recTest"}]
+
+        runtime = EventRuntime(
+            sync_lock=threading.RLock(),
+            routes={self.workspace: context},
+            workers={},
+            verifying_workspaces=set(),
+            probe_records={},
+            delivery_wakeup=threading.Event(),
+            get_task=lambda *args, **kwargs: {},
+            list_tasks=lambda *args, **kwargs: {},
+            log_received=lambda *args, **kwargs: None,
+            log_dispatch=lambda *args, **kwargs: None,
+        )
+        runtime.process_workspace_event = process_workspace_event
+        runtime.consume_workspace_task_events = lambda *args, **kwargs: None
+
+        record_lark_event(
+            event_id="event_recovery",
+            brand="feishu",
+            app_id="cli_test",
+            event_type="drive.file.bitable_record_changed_v1",
+            file_token="bascnTest",
+            table_id="tblTest",
+            source_revision="1",
+            payload={"event": {"file_token": "bascnTest", "table_id": "tblTest"}},
+        )
+        register_workspace(self.workspace, enabled=True)
+
+        with patch("core.event_runtime.event_matches_board", return_value=True):
+            runtime.process_event("event_recovery")
+            self.assertEqual(self.event_status("event_recovery"), "retry")
+            self.assertEqual(due_lark_event_ids(), [])
+
+            # The database was restored, so the event that was held back becomes due again and is
+            # delivered without ever having been discarded.
+            self.clear_backoff("event_recovery")
+            due = due_lark_event_ids()
+            self.assertEqual(due, ["event_recovery"])
+            runtime.process_event(due[0])
+
+        self.assertEqual(attempts, ["attempt", "attempt"])
+        self.assertEqual(self.event_status("event_recovery"), "processed")
+
+    def event_status(self, event_id: str) -> str:
+        with connect_global() as conn:
+            return str(
+                conn.execute(
+                    "SELECT status FROM lark_event_inbox WHERE event_id = ?", (event_id,)
+                ).fetchone()[0]
+            )
+
+    def clear_backoff(self, event_id: str) -> None:
+        with connect_global() as conn:
+            conn.execute(
+                "UPDATE lark_event_inbox SET next_attempt_at = NULL WHERE event_id = ?",
+                (event_id,),
+            )
+
+    def test_no_module_commits_without_the_verified_helper(self):
+        offenders = [
+            f"{path.name}:{number}"
+            for path in sorted((ROOT / "core").glob("*.py"))
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+            if (".commit()" in line or 'execute("COMMIT' in line)
+            and path.name != "schema_guard.py"
+        ]
+
+        self.assertEqual(offenders, [], "commit only through schema_guard.verified_commit")
 
     def test_a_workspace_schema_mismatch_keeps_the_event_recoverable(self):
         record_lark_event(

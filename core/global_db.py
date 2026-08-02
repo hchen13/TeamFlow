@@ -10,7 +10,12 @@ from typing import Any, Iterator
 
 from .config import resolve_workspace_paths
 from .global_migrations import MIGRATIONS
-from .schema_guard import SchemaCompatibilityError, verify_migration_compatibility
+from .schema_guard import (
+    SchemaCompatibilityError,
+    database_data_version,
+    verify_installed_migrations,
+    verify_migration_compatibility,
+)
 
 
 EVENT_RETRY_WINDOW = timedelta(days=1)
@@ -40,7 +45,12 @@ def connect_global() -> Iterator[sqlite3.Connection]:
     try:
         with conn:
             _run_migrations(conn)
+            observed = database_data_version(conn)
             yield conn
+            # The global database gets the same guarantee as a workspace: work verified against
+            # one ledger is rolled back rather than committed onto another build's schema.
+            if database_data_version(conn) != observed:
+                verify_installed_migrations(conn, MIGRATIONS)
     finally:
         conn.close()
 

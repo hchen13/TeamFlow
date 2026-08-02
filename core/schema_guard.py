@@ -56,6 +56,13 @@ def _pending_replacements(migrations: list[Any], applied: set[str]) -> set[str]:
     }
 
 
+def verified_commit(conn: sqlite3.Connection, migrations: Iterable[Any]) -> None:
+    # The only sanctioned way to commit early. The ledger is re-read inside the write transaction
+    # being committed, so work started under one schema can never be persisted onto another.
+    verify_installed_migrations(conn, migrations)
+    conn.commit()
+
+
 def database_data_version(conn: sqlite3.Connection) -> int:
     return int(conn.execute("PRAGMA data_version").fetchone()[0])
 
