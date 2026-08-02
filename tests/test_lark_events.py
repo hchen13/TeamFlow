@@ -68,6 +68,7 @@ from core.lark_events import (
     subscribe_lark_board_events,
     verify_lark_board_listener,
 )
+from tests.test_lark_write_visibility import READY_TASK, EventuallyConsistentBoard
 from core.task_dispatch import (
     claim_task_deliveries,
     due_processing_task_deliveries,
@@ -1863,6 +1864,75 @@ class LarkEventsTest(unittest.TestCase):
             read_task.assert_called_once()
         finally:
             runtime.close()
+
+    def test_a_claim_keeps_the_turn_open_and_records_the_execution(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_claim', ?, ?, ?, 'tl', 'codex', 'session_claim', 'Claim TL', ?, ?)
+                """,
+                (workspace["id"], workspace["current_workflow_id"], role["id"], now(), now()),
+            )
+        register_workspace(self.workspace, enabled=True)
+        board = EventuallyConsistentBoard(READY_TASK, stale_reads=3)
+        runtime = TeamFlowDaemon()
+        runtime.routes[self.workspace] = self.context()
+        read, write, sleeper = board.patches()
+        try:
+            with read, write, sleeper:
+                grant = runtime.authorize_tool(
+                    invocation_id="invocation_claim",
+                    session_id="session_claim",
+                    cwd=self.workspace,
+                    turn_id="turn_claim",
+                    tool_name="mcp__teamflow__claim_task",
+                    tool_input={"record_id": "recReady"},
+                )
+                claimed = runtime.invoke_tool(
+                    invocation_id="invocation_claim",
+                    grant=grant["grant"],
+                    tool_name="claim_task",
+                    arguments={"record_id": "recReady"},
+                )
+                # Claiming is not a handoff, so the same turn must still be able to work.
+                follow_up = runtime.authorize_tool(
+                    invocation_id="invocation_after_claim",
+                    session_id="session_claim",
+                    cwd=self.workspace,
+                    turn_id="turn_claim",
+                    tool_name="mcp__teamflow__get_assignment",
+                    tool_input={},
+                )
+                assignment_result = runtime.invoke_tool(
+                    invocation_id="invocation_after_claim",
+                    grant=follow_up["grant"],
+                    tool_name="get_assignment",
+                    arguments={},
+                )
+        finally:
+            runtime.close()
+
+        self.assertTrue(claimed["ok"], claimed.get("error"))
+        self.assertEqual(claimed["task"]["status"], "in_progress")
+        self.assertEqual(claimed["task"]["agent_id"], "agent_claim")
+        self.assertNotIn("turn_control", claimed)
+        self.assertEqual(assignment_result["assignment"]["agent_id"], "agent_claim")
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            execution = conn.execute(
+                "SELECT * FROM task_executions WHERE record_id = 'recReady' AND state = 'active'"
+            ).fetchone()
+        self.assertIsNotNone(execution, "a visible claim must open an execution")
+        self.assertEqual(execution["agent_id"], "agent_claim")
+        self.assertEqual(execution["turn_id"], "turn_claim")
 
     def test_successful_handoff_closes_further_teamflow_calls_in_the_turn(self):
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:

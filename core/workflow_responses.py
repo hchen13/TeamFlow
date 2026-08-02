@@ -79,6 +79,39 @@ def task_changed_error(
     )
 
 
+def write_not_visible_error(
+    assignment: dict[str, Any],
+    definition: dict[str, Any],
+    *,
+    action_key: str,
+    variant: str | None,
+    patch: dict[str, Any],
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    pending_fields = sorted(
+        field for field, value in patch.items() if not same_value(current.get(field), value)
+    )
+    return workflow_error(
+        assignment,
+        definition,
+        action_key=action_key,
+        variant=variant,
+        task=current,
+        category="conflict",
+        code="write_not_visible",
+        message=(
+            f"任务 {task_name(current)} 的 {ACTION_TO_TOOL[action_key]} 写入尚未在看板上可见，"
+            "本次操作不能视为成功。请调用 get_task 确认最新卡片，再根据返回的合法动作重试。"
+        ),
+        retryable=True,
+        details={
+            "pending_fields": pending_fields,
+            "expected_state": patch.get("status"),
+            "current_state": current.get("status"),
+        },
+    )
+
+
 def workflow_error(
     assignment: dict[str, Any],
     definition: dict[str, Any],

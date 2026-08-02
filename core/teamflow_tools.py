@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from .config import resolve_workspace_paths
 from .db import bootstrap_workspace, connect
 from .lark_board import get_lark_task, upsert_lark_task
-from .workflow import workflow_definition_for_assignment
+from .workflow import same_value, workflow_definition_for_assignment
 from .workflow_contract import (
     ACTION_TO_TOOL,
     LIFECYCLE_ACTION_TO_TOOL,
@@ -28,6 +29,7 @@ from .workflow_responses import (
     action_success,
     input_error,
     task_changed_error,
+    write_not_visible_error,
 )
 from .workflow_runtime import prepare_runtime_action, runtime_action_error
 
@@ -121,13 +123,23 @@ def create_task(
         task=prepared["patch"],
         client_token=invocation_id,
     )
+    written, visible = _visible_write(assignment, prepared["patch"], result["task"])
+    if not visible:
+        return write_not_visible_error(
+            assignment,
+            prepared["definition"],
+            action_key="create",
+            variant=None,
+            patch=prepared["patch"],
+            current=written,
+        )
     return action_success(
         assignment,
         prepared["definition"],
         action_key="create",
         rule=prepared["rule"],
         before=None,
-        task=result["task"],
+        task=written,
         already_applied=False,
     )
 
@@ -346,15 +358,66 @@ def _execute_existing_action(
         task=prepared["patch"],
         client_token=invocation_id,
     )
+    written, visible = _visible_write(assignment, prepared["patch"], result["task"])
+    if not visible:
+        return write_not_visible_error(
+            assignment,
+            prepared["definition"],
+            action_key=action_key,
+            variant=variant,
+            patch=prepared["patch"],
+            current=written,
+        )
     return action_success(
         assignment,
         prepared["definition"],
         action_key=action_key,
         rule=prepared["rule"],
         before=task,
-        task=result["task"],
+        task=written,
         already_applied=False,
     )
+
+
+# Lark is read-after-write eventually consistent, so a write response or an immediate reread can
+# still describe the record as it was. A mutation is only reported as successful once the fields it
+# wrote are actually observable, which is what the caller and the runtime both act on.
+WRITE_VISIBILITY_TIMEOUT = 10.0
+WRITE_VISIBILITY_INITIAL_DELAY = 0.25
+WRITE_VISIBILITY_MAX_DELAY = 1.0
+_sleep = time.sleep
+_monotonic = time.monotonic
+
+
+def _patch_visible(task: dict[str, Any], patch: dict[str, Any]) -> bool:
+    return all(same_value(task.get(field), value) for field, value in patch.items())
+
+
+def _visible_write(
+    assignment: dict[str, Any],
+    patch: dict[str, Any],
+    written: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Return the task once the patch is observable, and whether it ever became so.
+
+    The write response is trusted only when it already carries every written field; otherwise the
+    record is reread from Lark on a bounded backoff.
+    """
+    if _patch_visible(written, patch):
+        return written, True
+    record_id = str(written.get("record_id") or "")
+    if not record_id:
+        return written, False
+    latest = written
+    deadline = _monotonic() + WRITE_VISIBILITY_TIMEOUT
+    delay = WRITE_VISIBILITY_INITIAL_DELAY
+    while _monotonic() < deadline:
+        _sleep(delay)
+        latest = get_lark_task(assignment["workspace_root"], record_id=record_id)["task"]
+        if _patch_visible(latest, patch):
+            return latest, True
+        delay = min(delay * 2, WRITE_VISIBILITY_MAX_DELAY)
+    return latest, False
 
 
 def _definition(assignment: dict[str, Any]) -> dict[str, Any]:
