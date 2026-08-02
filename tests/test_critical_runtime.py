@@ -129,6 +129,37 @@ class WorkerCheckRaceTest(unittest.TestCase):
         self.assertIn(APP_KEY, str(failure.exception))
         self.assertIn("terminated on purpose", str(failure.exception))
 
+    def test_a_global_shutdown_during_the_liveness_check_is_not_a_worker_crash(self):
+        sync_lock = threading.RLock()
+        reached = threading.Barrier(2)
+        released = threading.Event()
+        worker = worker_for(BlockingProcess(reached, released))
+        runtime = worker_runtime({APP_KEY: worker}, {CONTEXT.workspace_root: CONTEXT}, sync_lock)
+        raised: list[BaseException] = []
+
+        def check() -> None:
+            try:
+                runtime.check_workers()
+            except BaseException as error:
+                raised.append(error)
+
+        def shut_down() -> None:
+            # The whole daemon starts stopping while the liveness question is unanswered; every
+            # worker goes down with it, on purpose.
+            reached.wait(timeout=5)
+            runtime.stopping.set()
+            released.set()
+
+        checker = threading.Thread(target=check)
+        stopper = threading.Thread(target=shut_down)
+        checker.start()
+        stopper.start()
+        checker.join(timeout=10)
+        stopper.join(timeout=10)
+
+        self.assertFalse(checker.is_alive())
+        self.assertEqual(raised, [], "a global shutdown is not a worker crash")
+
     def test_a_worker_replaced_while_the_check_ran_is_not_fatal(self):
         sync_lock = threading.RLock()
         reached = threading.Barrier(2)
@@ -159,6 +190,28 @@ class WorkerCheckRaceTest(unittest.TestCase):
         replacer.join(timeout=10)
 
         self.assertEqual(raised, [], "a replaced worker is not the one that failed")
+
+
+class RecordingFailure(dict):
+    """Lets a reader observe the exact moment the first half of a record is written."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_component = None
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if key == "component" and self.on_component:
+            self.on_component()
+
+
+def read_in_thread(monitor) -> dict:
+    captured: list[dict] = []
+    reader = threading.Thread(target=lambda: captured.append(monitor.status()))
+    reader.start()
+    reader.join(timeout=1)
+    # A reader blocked on the record lock is itself proof the boundary holds.
+    return captured[0] if captured else {"healthy": False, "failed_component": None}
 
 
 class CriticalComponentsTest(unittest.TestCase):
@@ -210,6 +263,45 @@ class CriticalComponentsTest(unittest.TestCase):
         self.assertEqual(failure, {"component": "probe", "error": "RuntimeError: consumer died"})
         self.assertTrue(stopping.is_set())
         self.assertTrue(fatal.is_set())
+
+    def test_a_failing_shutdown_request_never_replaces_the_component_failure(self):
+        critical, failure, stopping, _, _ = self.components()
+        critical.on_fatal = Mock(side_effect=RuntimeError("thread creation is unavailable"))
+        original = ValueError("the real component failure")
+
+        with self.assertRaises(ValueError) as raised:
+            critical.guard("lark-events", lambda: (_ for _ in ()).throw(original))()
+
+        self.assertIs(raised.exception, original, "the component failure must be what escapes")
+        self.assertEqual(failure["component"], "lark-events")
+        self.assertTrue(stopping.is_set())
+        critical.on_fatal.assert_called_once_with()
+
+    def test_a_status_read_never_sees_half_of_a_failure(self):
+        from core.daemon_monitor import DaemonMonitor
+
+        observed: list[dict] = []
+        critical, failure, _, _, _ = self.components(failure=RecordingFailure())
+        monitor = DaemonMonitor(
+            routes={},
+            workers={},
+            active_sessions=set(),
+            stopping=threading.Event(),
+            sync_lock=threading.RLock(),
+            app_key=lambda context: "",
+            read_failure=critical.snapshot,
+            resolve=lambda name: (lambda: {}),
+        )
+        # The reader runs on another thread the moment the first half of the record lands.
+        failure.on_component = lambda: observed.append(read_in_thread(monitor))
+
+        critical.fail("deliveries", RuntimeError("scheduler died"))
+
+        for status in [*observed, monitor.status()]:
+            self.assertIs(status["healthy"], False)
+            if status["failed_component"] is not None:
+                self.assertEqual(status["failed_component"], "deliveries")
+                self.assertEqual(status["consumer_error"], "RuntimeError: scheduler died")
 
     def test_the_first_failure_is_recorded_atomically(self):
         # A second component fails in the middle of the first one's record being written.

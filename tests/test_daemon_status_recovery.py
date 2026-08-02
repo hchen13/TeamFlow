@@ -98,7 +98,7 @@ class DaemonStatusRecoveryTest(unittest.TestCase):
             stopping=threading.Event(),
             sync_lock=threading.RLock(),
             app_key=lambda context: "",
-            consumer_failure={"component": "deliveries", "error": "SystemExit: 23"},
+            read_failure=lambda: {"component": "deliveries", "error": "SystemExit: 23"},
             resolve=lambda name: (lambda: (_ for _ in ()).throw(OSError("database is locked"))),
         )
 

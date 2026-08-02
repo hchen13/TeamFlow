@@ -113,12 +113,10 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 finally:
                     # Accepting a shutdown is irrevocable. The daemon already stopped calling
                     # itself healthy, so failing to describe that back to the caller must not
-                    # leave a process that serves forever and never releases its lock.
-                    threading.Thread(
-                        target=self.server.shutdown,
-                        name="teamflow-daemon-stop",
-                        daemon=True,
-                    ).start()
+                    # leave a process that serves forever and never releases its lock. The waiting
+                    # thread performs it, so the reply is written before the server goes away and
+                    # this handler never has to create a thread of its own.
+                    self.server.runtime.request_stop()
                 return
             else:
                 raise ValueError(f"unknown TeamFlow daemon action: {action}")

@@ -244,7 +244,7 @@ class SchemaGuardTest(unittest.TestCase):
             stopping=threading.Event(),
             sync_lock=threading.RLock(),
             app_key=lambda context: "",
-            consumer_failure=failure,
+            read_failure=lambda: dict(failure),
             resolve=lambda name: (lambda: {}),
         ).status()
 

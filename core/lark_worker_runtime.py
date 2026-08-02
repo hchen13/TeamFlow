@@ -98,7 +98,9 @@ class LarkWorkerRuntime:
             # can land in the meantime. The verdict is only taken once this is still the routed,
             # unstopped worker under the same lock the stop path takes.
             with self.sync_lock:
-                unexpected = self.watched_worker(app_key, worker)
+                # The daemon may have started shutting down while the question was unanswered;
+                # that stops every worker on purpose.
+                unexpected = not self.stopping.is_set() and self.watched_worker(app_key, worker)
             if unexpected:
                 raise RuntimeError(
                     f"the Lark event stream for {app_key} stopped: {self.worker_error(worker)}"

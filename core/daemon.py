@@ -146,7 +146,7 @@ class TeamFlowDaemon:
             stopping=self.stopping,
             sync_lock=self.sync_lock,
             app_key=self.app_key,
-            consumer_failure=self.consumer_failure,
+            read_failure=self.critical.snapshot,
             resolve=lambda name: globals()[name],
         )
         self.lark_workers = LarkWorkerRuntime(
@@ -315,6 +315,10 @@ class TeamFlowDaemon:
     def on_fatal(self) -> None:
         with self.fatal_lock:
             self.fatal_requested = True
+        self.request_stop()
+
+    def request_stop(self) -> None:
+        with self.fatal_lock:
             handler = self.fatal_handler
         if handler:
             handler()
@@ -719,13 +723,16 @@ def run_daemon() -> int:
             socket_path.unlink()
         runtime = TeamFlowDaemon()
         server = DaemonServer(str(socket_path), runtime)
-        # A consumer that died leaves nothing draining the inbox, so the daemon exits and frees its
-        # socket instead of lingering as a listener that answers but never listens.
-        runtime.set_fatal_shutdown(lambda: threading.Thread(
-            target=_stop_daemon_server(server, runtime),
-            name="teamflow-daemon-fatal",
+        # The thread that performs the shutdown exists before anything can need it. Creating one
+        # while handling a failure would make the exit depend on the runtime still being able to
+        # start threads, which is exactly what cannot be assumed at that moment.
+        stop_requested = threading.Event()
+        threading.Thread(
+            target=_await_daemon_stop(stop_requested, server, runtime),
+            name="teamflow-daemon-stop",
             daemon=True,
-        ).start())
+        ).start()
+        runtime.set_fatal_shutdown(stop_requested.set)
         os.chmod(socket_path, 0o600)
         pid_path.write_text(str(os.getpid()), encoding="utf-8")
         os.chmod(pid_path, 0o600)
@@ -740,6 +747,7 @@ def run_daemon() -> int:
         finally:
             # A close that fails must not keep the socket, the pid file, or the lifecycle lock:
             # whatever is left behind would make the next daemon unstartable.
+            stop_requested.set()
             try:
                 runtime.close()
             finally:
@@ -747,11 +755,18 @@ def run_daemon() -> int:
     return 130 if interrupted else 0
 
 
-def _stop_daemon_server(server: DaemonServer, runtime: TeamFlowDaemon) -> Callable[[], None]:
-    def stop() -> None:
+def _await_daemon_stop(
+    requested: threading.Event,
+    server: DaemonServer,
+    runtime: TeamFlowDaemon,
+) -> Callable[[], None]:
+    def wait() -> None:
+        requested.wait()
         runtime.begin_shutdown()
+        # Harmless once serve_forever has already returned, which is how normal teardown releases
+        # this thread.
         server.shutdown()
-    return stop
+    return wait
 
 
 def _release_daemon_lifecycle(server: DaemonServer, socket_path: Path, pid_path: Path) -> None:

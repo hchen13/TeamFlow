@@ -189,6 +189,37 @@ class DaemonLifecycleTest(unittest.TestCase):
         self.assertFalse((teamflow_home() / "daemon.pid").exists())
         self.hold_lock()
 
+    def test_a_fatal_consumer_exits_without_creating_a_thread(self):
+        socket_path = daemon_socket_path()
+        pid_path = teamflow_home() / "daemon.pid"
+        running = threading.Event()
+        real_start = threading.Thread.start
+
+        def refuse_new_threads(thread):
+            # Every thread the daemon needs was started before this point. Unrelated runtime
+            # internals keep working so the test isolates the shutdown path.
+            if running.is_set() and str(thread.name).startswith("teamflow-"):
+                raise RuntimeError("thread creation is unavailable")
+            return real_start(thread)
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            server = threading.Thread(target=run_daemon, daemon=True)
+            server.start()
+            self.until(lambda: socket_path.exists() and pid_path.exists())
+            time.sleep(0.3)
+            running.set()
+            with patch.object(threading.Thread, "start", refuse_new_threads), patch(
+                "core.daemon.due_lark_event_ids",
+                side_effect=RuntimeError("the inbox query failed"),
+            ):
+                server.join(timeout=20)
+
+        self.assertFalse(server.is_alive(), "the exit must not depend on starting a thread")
+        self.assertIn("COMPONENT FATAL", output.getvalue())
+        self.assertFalse(socket_path.exists(), "the daemon socket must be released")
+        self.assertFalse(pid_path.exists(), "the daemon pid file must be released")
+        self.hold_lock()
+
     def test_a_dead_delivery_scheduler_shuts_the_real_daemon_down(self):
         logged, exit_code, server = self.run_daemon_until_exit(
             patch.object(DeliveryRuntime, "consume", side_effect=SystemExit(23))

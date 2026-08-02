@@ -41,6 +41,12 @@ class CriticalComponents:
         self.on_fatal = on_fatal
         self.lock = threading.Lock()
 
+    def snapshot(self) -> dict[str, Any]:
+        # Readers take the same lock the record is written under, so they never see a component
+        # without the error that explains it.
+        with self.lock:
+            return dict(self.failure)
+
     def guard(self, component: str, run: Callable[[], None]) -> Callable[[], None]:
         def target() -> None:
             try:
@@ -82,4 +88,9 @@ class CriticalComponents:
             # Reporting is best effort; losing the log must not cost the shutdown or mask the
             # failure that caused it.
             pass
-        self.on_fatal()
+        try:
+            self.on_fatal()
+        except BaseException:
+            # Asking for the shutdown is best effort for the same reason: the component failure is
+            # what the caller has to see, not a failure of the machinery reacting to it.
+            pass
