@@ -10,6 +10,7 @@ from typing import Any, Iterator
 
 from .config import resolve_workspace_paths
 from .global_migrations import MIGRATIONS
+from .schema_guard import SchemaCompatibilityError, verify_migration_compatibility
 
 
 EVENT_RETRY_WINDOW = timedelta(days=1)
@@ -177,7 +178,8 @@ def retry_lark_event(event_id: str, error: Exception) -> str:
             if row
             else datetime.min.replace(tzinfo=timezone.utc)
         )
-        if datetime.now(timezone.utc) - received_at >= EVENT_RETRY_WINDOW:
+        expired = datetime.now(timezone.utc) - received_at >= EVENT_RETRY_WINDOW
+        if expired or isinstance(error, SchemaCompatibilityError):
             status = "failed"
             next_attempt_at = None
             processed_at = _now()
@@ -236,6 +238,7 @@ def cleanup_lark_events() -> int:
 def _run_migrations(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
     applied = {row["id"] for row in conn.execute("SELECT id FROM migrations")}
+    verify_migration_compatibility(conn, MIGRATIONS, applied)
     for migration in MIGRATIONS:
         if migration.ID in applied:
             continue

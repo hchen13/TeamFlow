@@ -24,6 +24,7 @@ from .codex import (
 )
 from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
 from .migrations import MIGRATIONS
+from .schema_guard import verify_migration_compatibility
 from .workflow import (
     load_workflow_definition,
     load_workflow_definitions,
@@ -916,6 +917,7 @@ def run_migrations(conn: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
     )
     applied = {row["id"] for row in conn.execute("SELECT id FROM migrations")}
+    verify_migration_compatibility(conn, MIGRATIONS, applied)
     for migration in MIGRATIONS:
         if migration.ID in applied:
             continue

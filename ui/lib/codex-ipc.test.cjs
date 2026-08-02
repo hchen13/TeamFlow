@@ -125,6 +125,77 @@ test("extracts snapshot and patch runtime metadata", async () => {
   }).error, "context window exceeded");
 });
 
+test("keeps a live active turn ahead of a racing not-loaded report", async () => {
+  const { codexThreadMetadata } = await modulePromise;
+  const turnPatch = (status) => ({
+    path: ["turnHistory", "history", "entitiesByKey", "turn-1", "status"],
+    value: status
+  });
+  const streamed = (patches) => codexThreadMetadata({
+    conversationId: "thread-1",
+    change: { type: "patches", patches }
+  }).status;
+
+  assert.equal(
+    streamed([{ path: ["threadRuntimeStatus", "type"], value: "notLoaded" }, turnPatch("inProgress")]),
+    "active"
+  );
+  assert.equal(
+    streamed([{ path: ["threadRuntimeStatus", "type"], value: "notLoaded" }, turnPatch("completed")]),
+    "notLoaded"
+  );
+  assert.equal(
+    streamed([{ path: ["threadRuntimeStatus", "type"], value: "systemError" }, turnPatch("inProgress")]),
+    "systemError"
+  );
+  assert.equal(streamed([turnPatch("inProgress")]), "active");
+  assert.equal(streamed([turnPatch("completed")]), "idle");
+  assert.equal(streamed([{ path: ["latestThreadSettings", "model"], value: "gpt-5.6-luna" }]), undefined);
+
+  assert.equal(codexThreadMetadata({
+    conversationId: "thread-1",
+    change: {
+      type: "snapshot",
+      conversationState: {
+        threadRuntimeStatus: { type: "notLoaded" },
+        turnHistory: { history: { entitiesByKey: { stale: { status: "inProgress", items: [] } } } }
+      }
+    }
+  }).status, "notLoaded");
+
+  assert.equal(codexThreadMetadata({
+    conversationId: "thread-1",
+    change: { type: "snapshot", conversationState: { threadRuntimeStatus: { type: "idle" } } }
+  }).status, "idle");
+});
+
+test("aggregates a live active turn over a not-loaded source", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.workspace = "/workspace";
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map([
+    ["vscode", new Map([["thread-1", { threadId: "thread-1", status: "notLoaded" }]])]
+  ]);
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+  bridge.followTimers = new Map();
+  bridge.emit = () => {};
+
+  bridge.updateRuntime("desktop", {
+    conversationId: "thread-1",
+    change: {
+      type: "patches",
+      patches: [
+        { path: ["threadRuntimeStatus", "type"], value: "notLoaded" },
+        { path: ["turnHistory", "history", "entitiesByKey", "turn-1", "status"], value: "inProgress" }
+      ]
+    }
+  });
+
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "active");
+});
+
 test("registers as a follower after IPC initialization", async () => {
   const { CodexBridge } = await modulePromise;
   const bridge = Object.create(CodexBridge.prototype);

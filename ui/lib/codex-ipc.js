@@ -564,7 +564,7 @@ export function codexThreadMetadata(value) {
     || runtimeObject?.id;
   const reportedStatus = runtimeStatus(runtimeObject?.threadRuntimeStatus) || findPatchStatus(value);
   const inferredTurnStatus = findTurnStatus(value);
-  const status = mergeRuntimeStatus(reportedStatus, inferredTurnStatus);
+  const status = mergeRuntimeStatus(reportedStatus, inferredTurnStatus, liveTurnEvidence(value));
   const metadata = {
     threadId: threadId || undefined,
     status,
@@ -578,17 +578,27 @@ export function codexThreadMetadata(value) {
   return Object.fromEntries(Object.entries(metadata).filter(([, item]) => item !== undefined));
 }
 
-function mergeRuntimeStatus(reportedStatus, inferredTurnStatus) {
+function mergeRuntimeStatus(reportedStatus, inferredTurnStatus, liveTurn) {
   if (reportedStatus === "systemError") {
     return reportedStatus;
+  }
+  if (inferredTurnStatus === "active" && (liveTurn || reportedStatus !== "notLoaded")) {
+    return "active";
   }
   if (reportedStatus === "notLoaded") {
     return reportedStatus;
   }
-  if (inferredTurnStatus === "active" || reportedStatus === "active") {
+  if (reportedStatus === "active") {
     return "active";
   }
   return inferredTurnStatus || reportedStatus;
+}
+
+// A patch stream reports turn transitions as they happen, so an active turn there outranks a
+// racing notLoaded report. A snapshot can still carry an in-progress turn left behind by a
+// client that died mid-turn, so there the reported runtime status stays authoritative.
+function liveTurnEvidence(value) {
+  return (value?.change || value)?.type === "patches";
 }
 
 function findTurnStatus(value) {

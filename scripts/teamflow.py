@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -33,7 +34,9 @@ from core.daemon import (
     stop_daemon,
     sync_daemon_workspace,
 )
+from core.config import resolve_workspace_paths
 from core.global_db import workspace_enabled
+from core.schema_guard import SchemaCompatibilityError
 from core.db import (
     DEFAULT_WORKFLOW_KEY,
     SCHEMA_VERSION,
@@ -44,6 +47,7 @@ from core.db import (
     init_workspace,
     inspect_workspace,
     list_codex_sessions,
+    now,
     refresh_lark_identity,
     register_agent,
     remove_lark_identity,
@@ -584,9 +588,29 @@ def cmd_mcp_server(args: argparse.Namespace) -> int:
     return 0
 
 
+def check_schema_compatibility_guard(checks_dir: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="schema-", dir=checks_dir) as workspace:
+        init_workspace(workspace, display_name="TeamFlow schema check")
+        db_path = resolve_workspace_paths(workspace).db_path
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO migrations (id, applied_at) VALUES (?, ?)",
+                ("999_unreleased_check", now()),
+            )
+        try:
+            inspect_workspace(workspace)
+        except SchemaCompatibilityError as error:
+            report = str(error)
+            for expected in (str(db_path), "999_unreleased_check", SCHEMA_VERSION):
+                assert expected in report, f"schema mismatch report omits {expected}"
+        else:
+            raise AssertionError("an unknown migration must fail the workspace schema check")
+
+
 def cmd_self_check(args: argparse.Namespace) -> int:
     checks_dir = ROOT / ".teamflow" / "checks"
     checks_dir.mkdir(parents=True, exist_ok=True)
+    check_schema_compatibility_guard(checks_dir)
     with tempfile.TemporaryDirectory(prefix="workspace-", dir=checks_dir) as workspace:
         init_workspace(workspace, display_name="TeamFlow check")
         with patch("core.db.fetch_lark_app_info", return_value=("Check app", "https://example.com/avatar.png", None)):
