@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.config import resolve_workspace_paths
+from core.critical_runtime import CriticalComponents
 from core.daemon_monitor import DaemonMonitor
 from core.event_runtime import EventRuntime
 from core.db import SCHEMA_VERSION, connect, init_workspace, inspect_workspace, now
@@ -195,13 +196,18 @@ class SchemaGuardTest(unittest.TestCase):
             process_event=lambda *args: None,
             stop_worker=lambda worker: None,
             resolve=resolve,
-            consumer_failure=failure,
-            on_fatal=fatal.set,
-            emit_log=emit_log,
-            style=lambda message, _: message,
+            sync_lock=threading.RLock(),
         )
         runtime.routes_ready.set()
-        return runtime, failure, logs, stopping, fatal
+        # The daemon wraps this loop in the same shared fatal path every critical component uses.
+        critical = CriticalComponents(
+            failure=failure,
+            stopping=stopping,
+            emit_log=emit_log,
+            style=lambda message, _: message,
+            on_fatal=fatal.set,
+        )
+        return critical.guard("lark-events", runtime.consume_events), failure, logs, stopping, fatal
 
     def consume_until_fatal(
         self,
@@ -209,10 +215,10 @@ class SchemaGuardTest(unittest.TestCase):
         *,
         log_error: Exception | None = None,
     ) -> tuple[dict[str, str], list[dict], bool]:
-        runtime, failure, logs, stopping, fatal = self.build_consumer(error, log_error)
+        consume, failure, logs, stopping, fatal = self.build_consumer(error, log_error)
         # The real daemon runs this loop on its own thread; an exception there is exactly the
         # failure that used to disappear, so the test has to observe the thread actually ending.
-        thread = threading.Thread(target=runtime.consume_events, name="test-consumer")
+        thread = threading.Thread(target=consume, name="test-consumer")
         escaped: list[type[BaseException]] = []
         previous_hook = threading.excepthook
         threading.excepthook = lambda args: escaped.append(args.exc_type)
@@ -249,7 +255,8 @@ class SchemaGuardTest(unittest.TestCase):
 
         self.assertIn("global ledger mismatch", failure["error"])
         self.assertIn("SchemaCompatibilityError", failure["error"])
-        self.assertEqual(logs[0]["message"], "LISTENER FATAL")
+        self.assertEqual(logs[0]["message"], "COMPONENT FATAL")
+        self.assertEqual(logs[0]["fields"]["component"], "lark-events")
         self.assertEqual(logs[0]["fields"]["type"], "SchemaCompatibilityError")
 
         status = self.health_of(failure)
@@ -276,21 +283,21 @@ class SchemaGuardTest(unittest.TestCase):
         )
 
         self.assertIn("RuntimeError: consumer died", failure["error"])
-        self.assertEqual(logs[0]["message"], "LISTENER FATAL")
+        self.assertEqual(logs[0]["message"], "COMPONENT FATAL")
         self.assertIs(self.health_of(failure)["healthy"], False)
 
     def test_an_interrupt_still_shuts_the_daemon_down_and_keeps_propagating(self):
         for error in (KeyboardInterrupt(), SystemExit(1), GeneratorExit()):
             with self.subTest(error=type(error).__name__):
-                runtime, failure, logs, stopping, fatal = self.build_consumer(error)
+                consume, failure, logs, stopping, fatal = self.build_consumer(error)
 
                 # The interrupt is never swallowed, but the daemon must not be left behind with a
                 # dead consumer either, so the same fatal path runs before it propagates.
                 with self.assertRaises(type(error)):
-                    runtime.consume_events()
+                    consume()
 
                 self.assertIn(type(error).__name__, failure["error"])
-                self.assertEqual(logs[0]["message"], "LISTENER FATAL")
+                self.assertEqual(logs[0]["message"], "COMPONENT FATAL")
                 self.assertTrue(fatal.is_set())
                 self.assertTrue(stopping.is_set())
                 self.assertIs(self.health_of(failure)["healthy"], False)

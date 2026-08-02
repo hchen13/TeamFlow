@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from core.daemon import (
     TeamFlowDaemon,
@@ -18,13 +18,46 @@ from core.daemon import (
     ensure_daemon,
     run_daemon,
 )
+from core.delivery_runtime import DeliveryRuntime
 from core.global_db import teamflow_home
+from core.lark_events import LarkEventContext
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEALTHY = {"running": True, "healthy": True, "consumer_error": None}
 UNHEALTHY = {"running": True, "healthy": False, "consumer_error": "SchemaCompatibilityError: x"}
 STOPPED = {"running": False, "healthy": False, "consumer_error": None}
+CONTEXT = LarkEventContext(
+    workspace_root="/workspace",
+    db_path="/workspace/.teamflow/teamflow.db",
+    identity_id="identity",
+    identity_name="Identity",
+    app_id="cli_test",
+    app_name="Test app",
+    app_secret="secret",
+    auth_mode="bot",
+    user_open_id="",
+    board_url="https://example.feishu.cn/base/bascnTest?table=tblTest",
+    file_token="bascnTest",
+    table_id="tblTest",
+    brand="feishu",
+    workspace_name="workspace",
+    workflow_key="software-development",
+)
+
+
+def dead_worker(reason: str) -> dict:
+    errors = Mock()
+    errors.get_nowait.return_value = reason
+    process = Mock()
+    process.is_alive.return_value = False
+    return {
+        "context": CONTEXT,
+        "credentials": (CONTEXT.app_id, CONTEXT.app_secret, CONTEXT.brand),
+        "process": process,
+        "ready": Mock(),
+        "errors": errors,
+    }
 
 
 class DaemonLifecycleTest(unittest.TestCase):
@@ -135,7 +168,7 @@ class DaemonLifecycleTest(unittest.TestCase):
         logged = output.getvalue()
         self.assertFalse(server.is_alive(), "run_daemon must return after a fatal consumer")
         self.assertEqual(exit_code, [0])
-        self.assertIn("LISTENER FATAL", logged)
+        self.assertIn("COMPONENT FATAL", logged)
         self.assertIn("RuntimeError", logged)
         self.assertIn("the inbox query failed", logged)
         self.assertFalse(socket_path.exists(), "the daemon socket must be removed")
@@ -150,11 +183,81 @@ class DaemonLifecycleTest(unittest.TestCase):
 
         self.assertFalse(server.is_alive())
         self.assertEqual(exit_code, [0])
-        self.assertIn("LISTENER FATAL", logged)
+        self.assertIn("COMPONENT FATAL", logged)
         self.assertIn("SystemExit", logged)
         self.assertFalse(daemon_socket_path().exists())
         self.assertFalse((teamflow_home() / "daemon.pid").exists())
         self.hold_lock()
+
+    def test_a_dead_delivery_scheduler_shuts_the_real_daemon_down(self):
+        logged, exit_code, server = self.run_daemon_until_exit(
+            patch.object(DeliveryRuntime, "consume", side_effect=SystemExit(23))
+        )
+
+        self.assertFalse(server.is_alive(), "a dead delivery scheduler must not be survivable")
+        self.assertEqual(exit_code, [0])
+        self.assertIn("COMPONENT FATAL", logged)
+        self.assertIn("component=deliveries", logged)
+        self.assertIn("SystemExit", logged)
+        self.assertFalse(daemon_socket_path().exists())
+        self.assertFalse((teamflow_home() / "daemon.pid").exists())
+        self.hold_lock()
+
+    def test_a_routed_lark_worker_that_dies_at_runtime_shuts_the_daemon_down(self):
+        created: list[TeamFlowDaemon] = []
+
+        class Recording(TeamFlowDaemon):
+            def __init__(self) -> None:
+                super().__init__()
+                created.append(self)
+
+        def route_a_dead_worker() -> None:
+            runtime = created[0]
+            # The worker connected and was routed, then its process exited on its own. Nothing in
+            # the daemon reads its error queue again after the initial handshake.
+            with runtime.sync_lock:
+                runtime.workers[runtime.app_key(CONTEXT)] = dead_worker("websocket closed")
+                runtime.routes[CONTEXT.workspace_root] = CONTEXT
+            runtime.routes_ready.set()
+
+        with patch("core.daemon.TeamFlowDaemon", Recording):
+            logged, exit_code, server = self.run_daemon_until_exit(
+                after_start=lambda: (self.until(lambda: bool(created)), route_a_dead_worker())
+            )
+
+        self.assertFalse(server.is_alive(), "a dead board listener must not be survivable")
+        self.assertEqual(exit_code, [0])
+        self.assertIn("COMPONENT FATAL", logged)
+        self.assertIn("component=lark-events", logged)
+        self.assertIn("websocket closed", logged)
+        self.assertFalse(daemon_socket_path().exists())
+        self.hold_lock()
+
+    def test_workers_this_daemon_stopped_on_purpose_are_not_fatal(self):
+        runtime = TeamFlowDaemon()
+        try:
+            worker = dead_worker("terminated on purpose")
+            with runtime.sync_lock:
+                runtime.workers[runtime.app_key(CONTEXT)] = worker
+                runtime.routes[CONTEXT.workspace_root] = CONTEXT
+
+            # Replacing credentials, disabling a workspace, and closing down all go through this.
+            runtime.lark_workers.stop_worker(worker)
+            runtime.lark_workers.check_workers()
+
+            # A worker that is no longer routed is not watched either.
+            with runtime.sync_lock:
+                runtime.workers[runtime.app_key(CONTEXT)] = dead_worker("unrouted")
+                runtime.routes.clear()
+            runtime.lark_workers.check_workers()
+
+            self.assertEqual(runtime.consumer_failure, {})
+            self.assertIs(runtime.status()["healthy"], True)
+        finally:
+            with runtime.sync_lock:
+                runtime.workers.clear()
+                runtime.routes.clear()
+            runtime.close()
 
     def test_a_daemon_that_accepted_a_shutdown_stops_reporting_itself_healthy(self):
         response: list[dict] = []

@@ -139,6 +139,7 @@ class DaemonMonitor:
             "running": True,
             "healthy": not consumer_error and not stopping,
             "stopping": stopping,
+            "failed_component": self.consumer_failure.get("component"),
             "consumer_error": consumer_error,
             "pid": os.getpid(),
             "apps": apps,

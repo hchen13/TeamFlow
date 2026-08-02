@@ -23,10 +23,7 @@ class LarkWorkerRuntime:
         process_event: Callable[[str], None],
         stop_worker: Callable[[dict[str, Any]], None],
         resolve: Callable[[str], Any],
-        consumer_failure: dict[str, Any],
-        on_fatal: Callable[[], None],
-        emit_log: Callable[..., None],
-        style: Callable[[str, str], str],
+        sync_lock: threading.RLock,
     ) -> None:
         self.mp = mp
         self.event_queue = event_queue
@@ -39,13 +36,7 @@ class LarkWorkerRuntime:
         self.process_event = process_event
         self.stop_worker_facade = stop_worker
         self.resolve = resolve
-        self.consumer_failure = consumer_failure
-        self.on_fatal = on_fatal
-        # Reporting a fatal consumer is passed in rather than looked up by name in the host module:
-        # a name that no longer resolves would only be discovered while handling the failure, which
-        # is exactly when the report matters most.
-        self.emit_log = emit_log
-        self.style = style
+        self.sync_lock = sync_lock
         self.last_cleanup = 0.0
 
     def ensure_app(self, context: LarkEventContext) -> None:
@@ -88,7 +79,35 @@ class LarkWorkerRuntime:
                 worker_error or "the Lark event stream stopped before synchronization"
             )
 
+    # A worker that stops on its own leaves the board unwatched, and nothing else notices. Workers
+    # this daemon stopped on purpose are marked, so replacing credentials, disabling a workspace,
+    # or closing down is never mistaken for that.
+    def check_workers(self) -> None:
+        if self.stopping.is_set():
+            return
+        with self.sync_lock:
+            routed = {self.app_key(context) for context in self.routes.values()}
+            watched = [
+                (app_key, worker)
+                for app_key, worker in self.workers.items()
+                if app_key in routed and not worker.get("stopped")
+            ]
+        for app_key, worker in watched:
+            if worker["process"].is_alive():
+                continue
+            raise RuntimeError(
+                f"the Lark event stream for {app_key} stopped: {self.worker_error(worker)}"
+            )
+
+    @staticmethod
+    def worker_error(worker: dict[str, Any]) -> str:
+        try:
+            return str(worker["errors"].get_nowait())
+        except Exception:
+            return "the worker exited without reporting a reason"
+
     def stop_worker(self, worker: dict[str, Any]) -> None:
+        worker["stopped"] = True
         process = worker["process"]
         if process.is_alive():
             process.terminate()
@@ -104,28 +123,6 @@ class LarkWorkerRuntime:
             self.stop_worker_facade(worker)
 
     def consume_events(self) -> None:
-        try:
-            self._consume_events()
-        except BaseException as error:
-            # Per-event business failures are already handled inside the event runtime, so anything
-            # reaching here broke the loop itself, including an interrupt aimed at this thread. The
-            # inbox stops draining either way, so every exit takes the same path: record, stop, ask
-            # the daemon to shut down, and re-raise so the thread still reports how it died.
-            self.consumer_failure["error"] = f"{type(error).__name__}: {error}"
-            self.stopping.set()
-            try:
-                self.emit_log(
-                    self.style("LISTENER FATAL", "1;31"),
-                    fields={
-                        "type": type(error).__name__,
-                        "reason": str(error).splitlines()[0] if str(error) else "",
-                    },
-                )
-            finally:
-                self.on_fatal()
-            raise
-
-    def _consume_events(self) -> None:
         while True:
             try:
                 message = self.event_queue.get(timeout=1)
@@ -140,6 +137,7 @@ class LarkWorkerRuntime:
                     self.process_event(str(message["event_id"]))
             if not self.routes_ready.is_set():
                 continue
+            self.check_workers()
             for event_id in self.resolve("due_lark_event_ids")():
                 self.process_event(event_id)
             if time.monotonic() - self.last_cleanup >= 86400:

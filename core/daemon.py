@@ -33,6 +33,7 @@ from .codex_permissions import (
     inspect_teamflow_mcp_authorization,
 )
 from .config import resolve_workspace_paths
+from .critical_runtime import CriticalComponents
 from .daemon_logging import (
     emit_log as _emit_log,
     log_dispatch,
@@ -128,6 +129,13 @@ class TeamFlowDaemon:
         self.active_sessions: set[str] = set()
         self.delivery_workers: dict[str, threading.Thread] = {}
         self.consumer_failure: dict[str, Any] = {}
+        self.critical = CriticalComponents(
+            failure=self.consumer_failure,
+            stopping=self.stopping,
+            emit_log=_emit_log,
+            style=_style,
+            on_fatal=lambda: self.on_fatal(),
+        )
         self.fatal_lock = threading.Lock()
         self.fatal_handler: Callable[[], None] | None = None
         self.fatal_requested = False
@@ -153,10 +161,7 @@ class TeamFlowDaemon:
             process_event=self._process_event,
             stop_worker=lambda worker: self._stop_worker(worker),
             resolve=lambda name: globals()[name],
-            consumer_failure=self.consumer_failure,
-            on_fatal=lambda: self.on_fatal(),
-            emit_log=_emit_log,
-            style=_style,
+            sync_lock=self.sync_lock,
         )
         self.workspace_synchronizer = WorkspaceSynchronizer(
             routes=self.routes,
@@ -289,8 +294,18 @@ class TeamFlowDaemon:
                 **kwargs,
             ),
         )
-        self.event_thread = threading.Thread(target=self._consume_events, name="teamflow-lark-events", daemon=True)
-        self.delivery_thread = threading.Thread(target=self._consume_deliveries, name="teamflow-deliveries", daemon=True)
+        # Both loops are critical: without either one the daemon stops doing the only thing it is
+        # for, so both exit through the same fail-fast path.
+        self.event_thread = threading.Thread(
+            target=self.critical.guard("lark-events", self._consume_events),
+            name="teamflow-lark-events",
+            daemon=True,
+        )
+        self.delivery_thread = threading.Thread(
+            target=self.critical.guard("deliveries", self._consume_deliveries),
+            name="teamflow-deliveries",
+            daemon=True,
+        )
         self.event_thread.start()
         self.delivery_thread.start()
 
@@ -814,6 +829,7 @@ def daemon_status() -> dict[str, Any]:
             "running": False,
             "healthy": False,
             "stopping": False,
+            "failed_component": None,
             "consumer_error": None,
             "pid": None,
             "apps": [],
