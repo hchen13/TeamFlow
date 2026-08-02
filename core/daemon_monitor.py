@@ -6,6 +6,7 @@ import time
 from collections import deque
 from typing import Any, Callable
 
+from .critical_runtime import describe_error
 from .lark_events import LarkEventContext
 
 
@@ -134,17 +135,28 @@ class DaemonMonitor:
         # A dead event consumer leaves the worker processes connected, so reporting only their
         # sockets would keep claiming the board is watched when nothing drains the inbox.
         consumer_error = self.consumer_failure.get("error")
+        failed_component = self.consumer_failure.get("component")
         stopping = self.stopping.is_set()
+        # Answering at all matters more than the counts. A global database this daemon can no
+        # longer read is itself a health problem, so it is reported rather than raised: a status
+        # query never writes, and never turns into another shutdown.
+        try:
+            inbox = self.resolve("lark_event_counts")()
+        except Exception as error:
+            inbox = {}
+            if not consumer_error:
+                consumer_error = describe_error(error)
+                failed_component = "global-database"
         return {
             "running": True,
             "healthy": not consumer_error and not stopping,
             "stopping": stopping,
-            "failed_component": self.consumer_failure.get("component"),
+            "failed_component": failed_component,
             "consumer_error": consumer_error,
             "pid": os.getpid(),
             "apps": apps,
             "workspaces": routes,
-            "inbox": self.resolve("lark_event_counts")(),
+            "inbox": inbox,
             "active_sessions": sorted(self.active_sessions),
         }
 

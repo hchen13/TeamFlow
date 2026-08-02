@@ -791,8 +791,9 @@ def ensure_daemon() -> dict[str, Any]:
     if status["running"] and status.get("healthy", True):
         return status
     home = _ensure_home()
-    if status["running"]:
-        # An unhealthy daemon cannot recover on its own, so it is replaced rather than reused.
+    if status["running"] and not status.get("stopping"):
+        # An unhealthy daemon cannot recover on its own, so it is replaced rather than reused. One
+        # that is already leaving needs no second request; waiting for its lock is enough.
         stop_daemon()
     running = await_daemon_lifecycle_lock(
         home / "daemon.lock",
@@ -834,14 +835,22 @@ def daemon_status() -> dict[str, Any]:
             "pid": None,
             "apps": [],
             "workspaces": [],
-            "inbox": lark_event_counts(),
+            # Reporting an offline daemon must not depend on the database it could not reach.
+            "inbox": {},
         }
 
 
 def stop_daemon() -> dict[str, Any]:
-    if not daemon_status()["running"]:
-        return {"running": False, "stopping": False}
-    return _daemon_request({"action": "shutdown"}, timeout=2)
+    status = daemon_status()
+    if not status["running"] or status.get("stopping"):
+        # Already gone, or already leaving: asking again would only race its own socket.
+        return status if status["running"] else {"running": False, "stopping": False}
+    try:
+        return _daemon_request({"action": "shutdown"}, timeout=2)
+    except (ConnectionRefusedError, FileNotFoundError):
+        # The daemon closed its socket between the status read and this request. That is the
+        # outcome this call wanted, not a failure the caller has to interpret.
+        return daemon_status()
 
 
 def sync_daemon_workspace(workspace: str | None, *, identity_id: str | None = None) -> dict[str, Any]:
