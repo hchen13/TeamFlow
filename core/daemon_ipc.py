@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import socket
 import socketserver
-import threading
 from pathlib import Path
 from typing import Any
 

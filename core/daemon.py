@@ -727,11 +727,12 @@ def run_daemon() -> int:
         # while handling a failure would make the exit depend on the runtime still being able to
         # start threads, which is exactly what cannot be assumed at that moment.
         stop_requested = threading.Event()
-        threading.Thread(
+        stop_thread = threading.Thread(
             target=_await_daemon_stop(stop_requested, server, runtime),
             name="teamflow-daemon-stop",
             daemon=True,
-        ).start()
+        )
+        stop_thread.start()
         runtime.set_fatal_shutdown(stop_requested.set)
         os.chmod(socket_path, 0o600)
         pid_path.write_text(str(os.getpid()), encoding="utf-8")
@@ -748,6 +749,7 @@ def run_daemon() -> int:
             # A close that fails must not keep the socket, the pid file, or the lifecycle lock:
             # whatever is left behind would make the next daemon unstartable.
             stop_requested.set()
+            stop_thread.join()
             try:
                 runtime.close()
             finally:

@@ -218,6 +218,10 @@ class DaemonLifecycleTest(unittest.TestCase):
         self.assertIn("COMPONENT FATAL", output.getvalue())
         self.assertFalse(socket_path.exists(), "the daemon socket must be released")
         self.assertFalse(pid_path.exists(), "the daemon pid file must be released")
+        self.assertFalse(
+            any(thread.name == "teamflow-daemon-stop" for thread in threading.enumerate()),
+            "the shutdown watcher must finish with the daemon",
+        )
         self.hold_lock()
 
     def test_a_dead_delivery_scheduler_shuts_the_real_daemon_down(self):
