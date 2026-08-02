@@ -708,14 +708,43 @@ def run_daemon() -> int:
     return 130 if interrupted else 0
 
 
+def await_daemon_lifecycle_lock(lock_path: Path, deadline: float) -> dict[str, Any] | None:
+    # A daemon holds this lock for its whole life, so acquiring it is the only proof that the
+    # previous process is gone. Its socket disappears earlier than that, which is why waiting on
+    # the socket would start a replacement that then loses the lock and exits.
+    while True:
+        with lock_path.open("a+", encoding="utf-8") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                return None
+        # Someone else holds the lock. If they are already serving a healthy daemon, that is the
+        # daemon this call wanted.
+        status = daemon_status()
+        if status["running"] and status.get("healthy", True):
+            return status
+        if time.monotonic() >= deadline:
+            raise ValueError("TeamFlow daemon is still shutting down; try again")
+        time.sleep(0.05)
+
+
 def ensure_daemon() -> dict[str, Any]:
     status = daemon_status()
     if status["running"] and status.get("healthy", True):
         return status
+    home = _ensure_home()
     if status["running"]:
         # An unhealthy daemon cannot recover on its own, so it is replaced rather than reused.
         stop_daemon()
-    home = _ensure_home()
+    running = await_daemon_lifecycle_lock(
+        home / "daemon.lock",
+        time.monotonic() + LISTENER_CONNECT_TIMEOUT,
+    )
+    if running:
+        return running
     log_path = home / "daemon.log"
     with log_path.open("ab", buffering=0) as log:
         subprocess.Popen(

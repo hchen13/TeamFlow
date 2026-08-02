@@ -99,20 +99,24 @@ class LarkWorkerRuntime:
     def consume_events(self) -> None:
         try:
             self._consume_events()
-        except BaseException as error:
+        except Exception as error:
             # Per-event business failures are already handled inside the event runtime, so anything
             # reaching here broke the loop itself. Whatever it was, the inbox stops draining, and a
-            # daemon that keeps answering as a healthy listener would be lying about that.
+            # daemon that keeps answering as a healthy listener would be lying about that. The
+            # failure is recorded before anything else, and the shutdown is owed even if reporting
+            # it fails.
             self.consumer_failure["error"] = f"{type(error).__name__}: {error}"
             self.stopping.set()
-            self.resolve("emit_log")(
-                self.resolve("style")("LISTENER FATAL", "1;31"),
-                fields={
-                    "type": type(error).__name__,
-                    "reason": str(error).splitlines()[0] if str(error) else "",
-                },
-            )
-            self.on_fatal()
+            try:
+                self.resolve("emit_log")(
+                    self.resolve("style")("LISTENER FATAL", "1;31"),
+                    fields={
+                        "type": type(error).__name__,
+                        "reason": str(error).splitlines()[0] if str(error) else "",
+                    },
+                )
+            finally:
+                self.on_fatal()
 
     def _consume_events(self) -> None:
         while True:

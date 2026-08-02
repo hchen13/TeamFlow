@@ -163,7 +163,7 @@ class SchemaGuardTest(unittest.TestCase):
                 0,
             )
 
-    def consume_until_fatal(self, error: BaseException) -> tuple[dict[str, str], list[dict], bool]:
+    def build_consumer(self, error: BaseException, log_error: Exception | None = None):
         failure: dict[str, str] = {}
         stopping = threading.Event()
         logs: list[dict] = []
@@ -171,13 +171,18 @@ class SchemaGuardTest(unittest.TestCase):
         events: queue.Queue = queue.Queue()
         events.put("tick")
 
+        def emit_log(message, **fields):
+            logs.append({"message": message, **fields})
+            if log_error:
+                raise log_error
+
         def resolve(name):
             if name == "due_lark_event_ids":
                 def raise_error():
                     raise error
                 return raise_error
             if name == "emit_log":
-                return lambda message, **fields: logs.append({"message": message, **fields})
+                return emit_log
             if name == "style":
                 return lambda message, _: message
             raise AssertionError(f"unexpected resolve: {name}")
@@ -198,15 +203,31 @@ class SchemaGuardTest(unittest.TestCase):
             on_fatal=fatal.set,
         )
         runtime.routes_ready.set()
+        return runtime, failure, logs, stopping, fatal
+
+    def consume_until_fatal(
+        self,
+        error: BaseException,
+        *,
+        log_error: Exception | None = None,
+    ) -> tuple[dict[str, str], list[dict], bool]:
+        runtime, failure, logs, stopping, fatal = self.build_consumer(error, log_error)
         # The real daemon runs this loop on its own thread; an exception there is exactly the
         # failure that used to disappear, so the test has to observe the thread actually ending.
         thread = threading.Thread(target=runtime.consume_events, name="test-consumer")
-        thread.start()
-        thread.join(timeout=5)
+        escaped: list[type[BaseException]] = []
+        previous_hook = threading.excepthook
+        threading.excepthook = lambda args: escaped.append(args.exc_type)
+        try:
+            thread.start()
+            thread.join(timeout=5)
+        finally:
+            threading.excepthook = previous_hook
 
         self.assertFalse(thread.is_alive(), "the consumer thread must terminate")
         self.assertTrue(stopping.is_set())
         self.assertTrue(fatal.wait(1), "the daemon must be asked to shut down")
+        self.assertEqual(escaped, [type(log_error)] if log_error else [])
         return failure, logs, True
 
     def health_of(self, failure: dict[str, str]) -> dict:
@@ -248,6 +269,29 @@ class SchemaGuardTest(unittest.TestCase):
                 self.assertEqual(logs[0]["fields"]["type"], type(error).__name__)
                 self.assertIs(self.health_of(failure)["healthy"], False)
 
+    def test_the_shutdown_is_owed_even_when_reporting_the_failure_fails(self):
+        failure, logs, _ = self.consume_until_fatal(
+            RuntimeError("consumer died"),
+            log_error=OSError("the log stream is gone"),
+        )
+
+        self.assertIn("RuntimeError: consumer died", failure["error"])
+        self.assertEqual(logs[0]["message"], "LISTENER FATAL")
+        self.assertIs(self.health_of(failure)["healthy"], False)
+
+    def test_an_interrupt_is_not_swallowed_as_a_consumer_failure(self):
+        for error in (KeyboardInterrupt(), SystemExit(1), GeneratorExit()):
+            with self.subTest(error=type(error).__name__):
+                runtime, failure, logs, stopping, fatal = self.build_consumer(error)
+
+                with self.assertRaises(type(error)):
+                    runtime.consume_events()
+
+                self.assertEqual(failure, {})
+                self.assertEqual(logs, [])
+                self.assertFalse(fatal.is_set())
+                self.assertFalse(stopping.is_set())
+
     def test_the_global_database_rolls_back_work_after_a_concurrent_migration(self):
         register_workspace("/tmp/teamflow-schema-guard")
 
@@ -287,12 +331,17 @@ class SchemaGuardTest(unittest.TestCase):
             app_name="Test app",
             public=lambda: {"file_token": "bascnTest", "table_id": "tblTest"},
         )
+        init_workspace(self.workspace)
+        db_path = resolve_workspace_paths(self.workspace).db_path
+        apply_unknown_migration(db_path)
         attempts: list[str] = []
 
         def process_workspace_event(_context, _payload):
+            # The workspace database is the real one, so the first attempt fails inside the guard
+            # rather than on a hand-written exception.
             attempts.append("attempt")
-            if len(attempts) == 1:
-                raise SchemaCompatibilityError("workspace ledger mismatch")
+            with connect(db_path) as conn:
+                conn.execute("SELECT COUNT(*) FROM workspaces").fetchone()
             return [{"task": {}, "record_id": "recTest"}]
 
         runtime = EventRuntime(
@@ -327,8 +376,9 @@ class SchemaGuardTest(unittest.TestCase):
             self.assertEqual(self.event_status("event_recovery"), "retry")
             self.assertEqual(due_lark_event_ids(), [])
 
-            # The database was restored, so the event that was held back becomes due again and is
-            # delivered without ever having been discarded.
+            # The database was restored to a ledger this build supports, so the event that was
+            # held back becomes due again and is delivered without ever having been discarded.
+            self.restore_ledger(db_path)
             self.clear_backoff("event_recovery")
             due = due_lark_event_ids()
             self.assertEqual(due, ["event_recovery"])
@@ -344,6 +394,12 @@ class SchemaGuardTest(unittest.TestCase):
                     "SELECT status FROM lark_event_inbox WHERE event_id = ?", (event_id,)
                 ).fetchone()[0]
             )
+
+    def restore_ledger(self, db_path: Path) -> None:
+        conn = sqlite3.connect(db_path)
+        with conn:
+            conn.execute("DELETE FROM migrations WHERE id = ?", (UNKNOWN_MIGRATION,))
+        conn.close()
 
     def clear_backoff(self, event_id: str) -> None:
         with connect_global() as conn:
