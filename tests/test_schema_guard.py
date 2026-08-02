@@ -181,10 +181,6 @@ class SchemaGuardTest(unittest.TestCase):
                 def raise_error():
                     raise error
                 return raise_error
-            if name == "emit_log":
-                return emit_log
-            if name == "style":
-                return lambda message, _: message
             raise AssertionError(f"unexpected resolve: {name}")
 
         runtime = LarkWorkerRuntime(
@@ -201,6 +197,8 @@ class SchemaGuardTest(unittest.TestCase):
             resolve=resolve,
             consumer_failure=failure,
             on_fatal=fatal.set,
+            emit_log=emit_log,
+            style=lambda message, _: message,
         )
         runtime.routes_ready.set()
         return runtime, failure, logs, stopping, fatal

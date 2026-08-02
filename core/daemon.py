@@ -153,6 +153,8 @@ class TeamFlowDaemon:
             resolve=lambda name: globals()[name],
             consumer_failure=self.consumer_failure,
             on_fatal=lambda: self.on_fatal(),
+            emit_log=_emit_log,
+            style=_style,
         )
         self.workspace_synchronizer = WorkspaceSynchronizer(
             routes=self.routes,

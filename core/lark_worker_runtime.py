@@ -25,6 +25,8 @@ class LarkWorkerRuntime:
         resolve: Callable[[str], Any],
         consumer_failure: dict[str, Any],
         on_fatal: Callable[[], None],
+        emit_log: Callable[..., None],
+        style: Callable[[str, str], str],
     ) -> None:
         self.mp = mp
         self.event_queue = event_queue
@@ -39,6 +41,11 @@ class LarkWorkerRuntime:
         self.resolve = resolve
         self.consumer_failure = consumer_failure
         self.on_fatal = on_fatal
+        # Reporting a fatal consumer is passed in rather than looked up by name in the host module:
+        # a name that no longer resolves would only be discovered while handling the failure, which
+        # is exactly when the report matters most.
+        self.emit_log = emit_log
+        self.style = style
         self.last_cleanup = 0.0
 
     def ensure_app(self, context: LarkEventContext) -> None:
@@ -108,8 +115,8 @@ class LarkWorkerRuntime:
             self.consumer_failure["error"] = f"{type(error).__name__}: {error}"
             self.stopping.set()
             try:
-                self.resolve("emit_log")(
-                    self.resolve("style")("LISTENER FATAL", "1;31"),
+                self.emit_log(
+                    self.style("LISTENER FATAL", "1;31"),
                     fields={
                         "type": type(error).__name__,
                         "reason": str(error).splitlines()[0] if str(error) else "",

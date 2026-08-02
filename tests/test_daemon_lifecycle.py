@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
+import io
 import os
 import tempfile
 import threading
@@ -108,6 +110,36 @@ class DaemonLifecycleTest(unittest.TestCase):
             self.assertEqual(ensure_daemon(), HEALTHY)
 
         popen.assert_not_called()
+
+    def test_a_real_consumer_failure_is_reported_and_shuts_the_daemon_down(self):
+        # Nothing here is stubbed except the call that fails: the daemon builds its own worker
+        # runtime, so a report that only works with a hand-made resolver would not be logged.
+        socket_path = daemon_socket_path()
+        pid_path = teamflow_home() / "daemon.pid"
+        output = io.StringIO()
+        exit_code: list[int] = []
+
+        with patch(
+            "core.daemon.due_lark_event_ids",
+            side_effect=RuntimeError("the inbox query failed"),
+        ):
+            with contextlib.redirect_stdout(output):
+                server = threading.Thread(
+                    target=lambda: exit_code.append(run_daemon()),
+                    daemon=True,
+                )
+                server.start()
+                server.join(timeout=20)
+
+        logged = output.getvalue()
+        self.assertFalse(server.is_alive(), "run_daemon must return after a fatal consumer")
+        self.assertEqual(exit_code, [0])
+        self.assertIn("LISTENER FATAL", logged)
+        self.assertIn("RuntimeError", logged)
+        self.assertIn("the inbox query failed", logged)
+        self.assertFalse(socket_path.exists(), "the daemon socket must be removed")
+        self.assertFalse(pid_path.exists(), "the daemon pid file must be removed")
+        self.hold_lock()
 
     def test_a_fatal_consumer_stops_the_real_daemon_and_frees_its_lifecycle_files(self):
         created: list[TeamFlowDaemon] = []
