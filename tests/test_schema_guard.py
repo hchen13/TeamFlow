@@ -231,9 +231,9 @@ class SchemaGuardTest(unittest.TestCase):
         self.assertFalse(thread.is_alive(), "the consumer thread must terminate")
         self.assertTrue(stopping.is_set())
         self.assertTrue(fatal.wait(1), "the daemon must be asked to shut down")
-        # Every fatal exit re-raises so the thread still reports how it died. A failure inside the
-        # report replaces the original on the way out, after the shutdown was already requested.
-        self.assertEqual(escaped, [type(log_error) if log_error else type(error)])
+        # Every fatal exit re-raises the original failure so the thread reports how it really died,
+        # even when reporting it went wrong; the report is best effort and never masks it.
+        self.assertEqual(escaped, [type(error)])
         return failure, logs, True
 
     def health_of(self, failure: dict[str, str]) -> dict:

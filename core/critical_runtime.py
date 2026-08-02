@@ -4,10 +4,24 @@ import threading
 from typing import Any, Callable
 
 
+def describe_error(error: BaseException) -> str:
+    """Describe a failure without ever failing. An exception whose own repr raises must still be
+    recorded, because that record is what stops the daemon."""
+    try:
+        name = type(error).__name__
+    except BaseException:
+        name = "UnknownError"
+    try:
+        message = str(error)
+    except BaseException:
+        message = "<error description unavailable>"
+    return f"{name}: {message}"
+
+
 class CriticalComponents:
     """The single fail-fast path shared by every background unit the daemon cannot serve without.
 
-    A component that exits unexpectedly leaves the daemon unable to do its job, so the first such
+    A component that stops running leaves the daemon unable to do its job, so the first such
     failure is recorded, reported, and turned into the same shutdown, whatever the component was.
     """
 
@@ -25,6 +39,7 @@ class CriticalComponents:
         self.emit_log = emit_log
         self.style = style
         self.on_fatal = on_fatal
+        self.lock = threading.Lock()
 
     def guard(self, component: str, run: Callable[[], None]) -> Callable[[], None]:
         def target() -> None:
@@ -32,17 +47,27 @@ class CriticalComponents:
                 run()
             except BaseException as error:
                 # Interrupts count too: the component is just as gone, and the daemon must not be
-                # left reporting itself healthy. The failure still propagates so the thread reports
-                # how it died.
+                # left reporting itself healthy. The original failure still propagates so the
+                # thread reports how it died.
                 self.fail(component, error)
                 raise
+            if not self.stopping.is_set():
+                # Returning is only legitimate while the daemon is shutting down. Any other return
+                # is a component that quietly stopped working.
+                error = RuntimeError(f"the {component} loop returned while the daemon was running")
+                self.fail(component, error)
+                raise error
 
         return target
 
     def fail(self, component: str, error: BaseException) -> None:
-        # Only the first failure is kept: it is the one that explains the shutdown.
-        self.failure.setdefault("component", component)
-        self.failure.setdefault("error", f"{type(error).__name__}: {error}")
+        description = describe_error(error)
+        with self.lock:
+            # Both halves of the first failure are committed together so they always describe the
+            # same component.
+            if "component" not in self.failure:
+                self.failure["component"] = component
+                self.failure["error"] = description
         self.stopping.set()
         try:
             self.emit_log(
@@ -50,9 +75,11 @@ class CriticalComponents:
                 fields={
                     "component": component,
                     "type": type(error).__name__,
-                    "reason": str(error).splitlines()[0] if str(error) else "",
+                    "reason": description.splitlines()[0],
                 },
             )
-        finally:
-            # The shutdown is owed even when reporting the failure fails.
-            self.on_fatal()
+        except BaseException:
+            # Reporting is best effort; losing the log must not cost the shutdown or mask the
+            # failure that caused it.
+            pass
+        self.on_fatal()

@@ -86,18 +86,28 @@ class LarkWorkerRuntime:
         if self.stopping.is_set():
             return
         with self.sync_lock:
-            routed = {self.app_key(context) for context in self.routes.values()}
             watched = [
                 (app_key, worker)
                 for app_key, worker in self.workers.items()
-                if app_key in routed and not worker.get("stopped")
+                if self.watched_worker(app_key, worker)
             ]
         for app_key, worker in watched:
             if worker["process"].is_alive():
                 continue
-            raise RuntimeError(
-                f"the Lark event stream for {app_key} stopped: {self.worker_error(worker)}"
-            )
+            # Asking a process whether it is alive happens outside the lock, so a deliberate stop
+            # can land in the meantime. The verdict is only taken once this is still the routed,
+            # unstopped worker under the same lock the stop path takes.
+            with self.sync_lock:
+                unexpected = self.watched_worker(app_key, worker)
+            if unexpected:
+                raise RuntimeError(
+                    f"the Lark event stream for {app_key} stopped: {self.worker_error(worker)}"
+                )
+
+    def watched_worker(self, app_key: str, worker: dict[str, Any]) -> bool:
+        if worker.get("stopped") or self.workers.get(app_key) is not worker:
+            return False
+        return any(self.app_key(context) == app_key for context in self.routes.values())
 
     @staticmethod
     def worker_error(worker: dict[str, Any]) -> str:
@@ -107,7 +117,11 @@ class LarkWorkerRuntime:
             return "the worker exited without reporting a reason"
 
     def stop_worker(self, worker: dict[str, Any]) -> None:
-        worker["stopped"] = True
+        # Marking happens under the same lock the runtime check re-validates with, so a deliberate
+        # stop can never be read as a worker that died on its own. Terminating and joining the
+        # process stay outside it.
+        with self.sync_lock:
+            worker["stopped"] = True
         process = worker["process"]
         if process.is_alive():
             process.terminate()
