@@ -171,6 +171,48 @@ class DaemonLifecycleTest(unittest.TestCase):
         # A concurrent ensure_daemon reading this reply must not adopt a daemon on its way out.
         self.assertIs(response[0]["healthy"], False)
 
+    def test_an_accepted_shutdown_still_exits_when_its_response_fails(self):
+        created: list[TeamFlowDaemon] = []
+
+        class Recording(TeamFlowDaemon):
+            def __init__(self) -> None:
+                super().__init__()
+                created.append(self)
+
+        socket_path = daemon_socket_path()
+        pid_path = teamflow_home() / "daemon.pid"
+        response: list[str] = []
+        exit_code: list[int] = []
+
+        with patch("core.daemon.TeamFlowDaemon", Recording):
+            with contextlib.redirect_stdout(io.StringIO()):
+                server = threading.Thread(
+                    target=lambda: exit_code.append(run_daemon()),
+                    daemon=True,
+                )
+                server.start()
+                self.until(lambda: bool(created) and socket_path.exists())
+                # Only reading the status back fails. The shutdown was already accepted, so the
+                # process still owes its exit; nothing here calls server.shutdown directly.
+                with patch.object(
+                    Recording,
+                    "status",
+                    side_effect=ValueError("status failed after shutdown began"),
+                ):
+                    try:
+                        _daemon_request({"action": "shutdown"}, timeout=5)
+                    except Exception as error:
+                        response.append(str(error))
+                server.join(timeout=20)
+
+        self.assertEqual(response, ["status failed after shutdown began"])
+        self.assertFalse(server.is_alive(), "an accepted shutdown must still exit")
+        self.assertEqual(exit_code, [0])
+        self.assertTrue(created[0].stopping.is_set())
+        self.assertFalse(socket_path.exists(), "the daemon socket must be removed")
+        self.assertFalse(pid_path.exists(), "the daemon pid file must be removed")
+        self.hold_lock()
+
     def test_a_stopping_daemon_is_never_adopted_while_it_holds_the_lock(self):
         self.hold_lock()
         stopping = {"running": True, "healthy": False, "stopping": True, "consumer_error": None}
