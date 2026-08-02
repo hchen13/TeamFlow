@@ -15,6 +15,10 @@ class PluginHookCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         hooks = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         self.command = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        self.runtime_commands = [
+            hooks["hooks"][event][0]["hooks"][0]["command"]
+            for event in ("SessionStart", "SessionEnd", "Stop")
+        ]
 
     def test_uses_the_configured_plugin_runtime_when_it_exists(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -50,20 +54,41 @@ class PluginHookCommandTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("TeamFlow hook runtime is unavailable", result.stderr)
 
+    def test_runtime_hooks_fall_back_to_the_latest_valid_cached_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_root = Path(temporary) / "teamflow"
+            self._runtime(cache_root, "0.1.0+codex.20260728000000")
+            latest = self._runtime(cache_root, "0.1.0+codex.20260729000000")
+
+            results = [
+                self._run(cache_root / "0.1.0+codex.removed", Path(temporary), command)
+                for command in self.runtime_commands
+            ]
+
+        for result in results:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"--project\n{latest}\n", result.stdout)
+
     def _runtime(self, cache_root: Path, version: str) -> Path:
         runtime = cache_root / version
         script = runtime / "hooks" / "user_prompt_submit.py"
         script.parent.mkdir(parents=True)
         script.touch()
+        (runtime / "hooks" / "session_runtime.py").touch()
         return runtime
 
-    def _run(self, plugin_root: Path, temporary: Path) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self,
+        plugin_root: Path,
+        temporary: Path,
+        command_template: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         fake_bin = temporary / "bin"
         fake_bin.mkdir(exist_ok=True)
         uv = fake_bin / "uv"
         uv.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
         uv.chmod(0o755)
-        command = self.command.replace("${PLUGIN_ROOT}", str(plugin_root))
+        command = (command_template or self.command).replace("${PLUGIN_ROOT}", str(plugin_root))
         env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
         return subprocess.run(command, shell=True, capture_output=True, text=True, env=env)
 

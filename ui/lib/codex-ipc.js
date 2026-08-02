@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync, statSync, unwatchFile, watch, watchFile } from "node:fs";
+import { existsSync, mkdirSync, statSync, unwatchFile, watch, watchFile } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { createConnection } from "node:net";
+import { codexRuntimeRoot, readCodexHookRuntime } from "./codex-runtime-state";
 
 const STREAM_VERSION = 11;
 const FOLLOWING_VERSION = 1;
@@ -13,7 +14,7 @@ const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"])
 const TERMINAL_TURN_STATUSES = new Set(["completed", "success", "failed", "interrupted", "cancelled", "canceled"]);
 const LOCAL_HOST_ID = "local";
 const FOLLOW_TIMEOUT_MS = 1000;
-export const BRIDGE_VERSION = 17;
+export const BRIDGE_VERSION = 18;
 const globalKey = Symbol.for("teamflow.codexBridge");
 
 export class CodexBridge extends EventEmitter {
@@ -35,9 +36,13 @@ export class CodexBridge extends EventEmitter {
     this.pendingThreads = new Set();
     this.unconfirmedThreads = new Set();
     this.followTimers = new Map();
+    this.hookRuntime = new Map();
+    this.hookProcessCache = new Map();
+    this.hookRuntimeRoot = codexRuntimeRoot();
     this.watchers = [];
     this.watchedFiles = [];
     this.startWatchers();
+    this.startHookRuntime();
     this.connect();
   }
 
@@ -45,6 +50,7 @@ export class CodexBridge extends EventEmitter {
     this.disposed = true;
     clearTimeout(this.catalogTimer);
     clearTimeout(this.reconnectTimer);
+    clearInterval(this.hookRuntimeTimer);
     for (const threadId of this.knownThreads) {
       this.sendFollowing(threadId, false);
     }
@@ -89,6 +95,7 @@ export class CodexBridge extends EventEmitter {
     }
     const previous = this.knownThreads;
     this.knownThreads = next;
+    this.refreshHookRuntime();
     if (!this.clientId) {
       return;
     }
@@ -448,7 +455,7 @@ export class CodexBridge extends EventEmitter {
   aggregateRuntime() {
     const byThread = new Map();
     const rank = { active: 4, systemError: 3, idle: 2, notLoaded: 1 };
-    for (const sessions of this.runtimeBySource.values()) {
+    for (const sessions of [...this.runtimeBySource.values(), this.hookRuntime || new Map()]) {
       for (const [threadId, metadata] of sessions) {
         const current = byThread.get(threadId) || {};
         const merged = { ...current };
@@ -538,6 +545,45 @@ export class CodexBridge extends EventEmitter {
       }
     });
     this.watchedFiles.push(sessionIndex);
+  }
+
+  startHookRuntime() {
+    try {
+      mkdirSync(this.hookRuntimeRoot, { recursive: true, mode: 0o700 });
+      const watcher = watch(this.hookRuntimeRoot, () => this.refreshHookRuntime(true));
+      watcher.unref?.();
+      this.watchers.push(watcher);
+    } catch {
+      // Polling below still handles a temporarily unavailable runtime directory.
+    }
+    this.refreshHookRuntime();
+    this.hookRuntimeTimer = setInterval(() => this.refreshHookRuntime(true), 1000);
+    this.hookRuntimeTimer.unref?.();
+  }
+
+  refreshHookRuntime(publish = false) {
+    const previous = this.hookRuntime;
+    this.hookRuntime = readCodexHookRuntime({
+      root: this.hookRuntimeRoot,
+      threadIds: this.knownThreads,
+      workspace: this.workspace,
+      processCache: this.hookProcessCache
+    });
+    if (!publish) {
+      return;
+    }
+    const threadIds = new Set([...previous.keys(), ...this.hookRuntime.keys()]);
+    for (const threadId of threadIds) {
+      const before = previous.get(threadId);
+      const after = this.hookRuntime.get(threadId);
+      if (JSON.stringify(before) === JSON.stringify(after)) {
+        continue;
+      }
+      const runtime = this.aggregateRuntime().get(threadId);
+      this.publish(runtime
+        ? { type: "runtime", ...runtime }
+        : { type: "runtime", threadId, status: this.disconnectedRuntimeStatus() });
+    }
   }
 
   scheduleCatalogRefresh() {

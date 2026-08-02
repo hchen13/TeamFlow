@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from codex_runtime import record_runtime_event
 from teamflow_hook import daemon_request, read_input, write_output
 
 
 def main() -> None:
     hook = read_input()
+    record_runtime_event(hook)
     session_id = str(hook.get("session_id") or "")
     if not session_id:
         return

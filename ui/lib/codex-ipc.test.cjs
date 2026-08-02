@@ -14,7 +14,10 @@ const load = (specifier, imports = {}) => import(
     )
   )
 );
-const modulePromise = load("./codex-ipc.js");
+const runtimePromise = load("./codex-runtime-state.js");
+const modulePromise = load("./codex-ipc.js", {
+  "./codex-runtime-state": "./codex-runtime-state.js"
+});
 const rulesPromise = load("./agent-runtime-rules.js");
 const mutationsPromise = load("./agent-mutations.js", {
   "./agent-runtime-rules": "./agent-runtime-rules.js"
@@ -208,6 +211,62 @@ test("aggregates a live active turn over a not-loaded source", async () => {
     }
   });
 
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "active");
+});
+
+test("hook runtime accepts only registered workspace sessions owned by a live Codex process", async () => {
+  const { aggregateCodexHookRuntime } = await runtimePromise;
+  const record = (overrides = {}) => ({
+    schema_version: 1,
+    session_id: "thread-1",
+    owner_pid: 4100,
+    owner_started_at: "owner-start",
+    status: "idle",
+    cwd: "/workspace/project",
+    updated_at_ms: 10,
+    ...overrides
+  });
+  const owners = new Map([
+    [4100, "owner-start"],
+    [4200, "different-start"]
+  ]);
+
+  const runtime = aggregateCodexHookRuntime([
+    record(),
+    record({ status: "active", updated_at_ms: 5 }),
+    record({ owner_pid: 4200, owner_started_at: "stale-start" }),
+    record({ session_id: "unregistered" }),
+    record({ cwd: "/other/project" })
+  ], {
+    threadIds: ["thread-1"],
+    workspace: "/workspace",
+    inspectProcess: (pid) => owners.get(pid) || null
+  });
+
+  assert.deepEqual([...runtime.values()], [{
+    threadId: "thread-1",
+    status: "active",
+    cwd: "/workspace/project"
+  }]);
+});
+
+test("official hook lifecycle state overrides a stale private IPC not-loaded report", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = true;
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map([
+    ["desktop", new Map([["thread-1", { threadId: "thread-1", status: "notLoaded" }]])]
+  ]);
+  bridge.hookRuntime = new Map([
+    ["thread-1", { threadId: "thread-1", status: "idle" }]
+  ]);
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "idle");
+
+  bridge.hookRuntime.set("thread-1", { threadId: "thread-1", status: "active" });
   assert.equal(bridge.aggregateRuntime().get("thread-1").status, "active");
 });
 
