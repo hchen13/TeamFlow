@@ -208,12 +208,14 @@ def main() -> int:
     unregister_parser.add_argument("--role", help="Role key used when agent-id is omitted.")
     unregister_parser.add_argument("--harness-type", help="Harness type used when agent-id is omitted.")
     unregister_parser.add_argument("--session-id", help="Session ID used when agent-id is omitted.")
+    unregister_parser.add_argument("--expected-revision", type=int, help="Reject the change when the agent assignment revision no longer matches.")
     unregister_parser.set_defaults(func=cmd_unregister_agent)
 
     update_agent_parser = subparsers.add_parser("update-agent", help="Assign a different session to a registered agent.")
     add_workspace_args(update_agent_parser)
     update_agent_parser.add_argument("--agent-id", required=True, help="Registered agent ID.")
     update_agent_parser.add_argument("--session-id", required=True, help="Replacement harness session/thread ID.")
+    update_agent_parser.add_argument("--expected-revision", type=int, help="Reject the change when the agent assignment revision no longer matches.")
     update_agent_parser.set_defaults(func=cmd_update_agent)
 
     verify_agent_parser = subparsers.add_parser("verify-agent", help="Verify registered Codex agent sessions.")
@@ -470,6 +472,7 @@ def cmd_unregister_agent(args: argparse.Namespace) -> int:
         role=args.role,
         harness_type=args.harness_type,
         session_id=args.session_id,
+        expected_revision=args.expected_revision,
     )
     result["daemon_sync"] = sync_agent_change(args.workspace)
     print_json(result)
@@ -478,7 +481,12 @@ def cmd_unregister_agent(args: argparse.Namespace) -> int:
 
 def cmd_update_agent(args: argparse.Namespace) -> int:
     require_teamflow_mcp_authorization()
-    result = update_agent(args.workspace, agent_id=args.agent_id, session_id=args.session_id)
+    result = update_agent(
+        args.workspace,
+        agent_id=args.agent_id,
+        session_id=args.session_id,
+        expected_revision=args.expected_revision,
+    )
     result["daemon_sync"] = sync_agent_change(args.workspace)
     print_json(result)
     return 0

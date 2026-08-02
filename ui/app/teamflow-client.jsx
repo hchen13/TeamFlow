@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { useRouter } from "next/navigation";
-import { acceptsRuntimeRevision } from "../lib/runtime-revision";
+import { acceptsRuntimeSequence, runtimeStatusAllowsMutation } from "../lib/agent-runtime-rules";
 
 const FEISHU_APP_URL = "https://open.feishu.cn/app";
 const FEISHU_CREATE_APP_URL = "https://open.feishu.cn/page/launcher?from=backend_oneclick";
@@ -465,7 +465,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   const [runtimeBySession, setRuntimeBySession] = useState({});
   const [lifecycleBySession, setLifecycleBySession] = useState({});
   const refreshInFlight = useRef(null);
-  const runtimeRevision = useRef(-1);
+  const runtimeSequence = useRef(null);
   const pendingOnboardingSessions = useRef(new Set());
   const t = text[lang];
   const board = state.lark_board || {};
@@ -477,12 +477,12 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   const appUrl = lang === "zh" ? FEISHU_APP_URL : LARK_APP_URL;
   const createAppUrl = lang === "zh" ? FEISHU_CREATE_APP_URL : LARK_CREATE_APP_URL;
 
-  const applyRuntime = useCallback((revision, next) => {
-    if (!acceptsRuntimeRevision(runtimeRevision.current, revision)) {
+  const applyRuntime = useCallback((sequence, next) => {
+    if (!acceptsRuntimeSequence(runtimeSequence.current, sequence)) {
       return;
     }
-    if (typeof revision === "number") {
-      runtimeRevision.current = revision;
+    if (typeof sequence?.revision === "number") {
+      runtimeSequence.current = { epoch: sequence.epoch, revision: sequence.revision };
     }
     setRuntimeBySession(next);
   }, []);
@@ -505,7 +505,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
         setLiveCodexSessionError(Boolean(payload.sessionError));
         // This snapshot was taken when the request reached the server; a stream event that landed
         // since then is newer and must not be rolled back by it.
-        applyRuntime(payload.runtime?.revision, () => sessionMap(payload.runtime?.sessions || []));
+        applyRuntime(payload.runtime, () => sessionMap(payload.runtime?.sessions || []));
         setLifecycleBySession((current) => settledLifecycle(current, agents));
       })
       .catch(() => setLiveCodexSessionError(true))
@@ -541,9 +541,9 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
         return;
       }
       if (event.type === "snapshot") {
-        applyRuntime(event.revision, sessionMap(event.sessions || []));
+        applyRuntime(event, sessionMap(event.sessions || []));
       } else if (event.type === "runtime") {
-        applyRuntime(event.revision, (current) => updateRuntime(current, event));
+        applyRuntime(event, (current) => updateRuntime(current, event));
         if (pendingOnboardingSessions.current.has(event.threadId) && ONBOARDING_REFRESH_STATUSES.has(event.status)) {
           refreshCodexState();
         }
@@ -566,7 +566,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
       } else if (event.type === "catalog") {
         refreshCodexState();
       } else if (event.type === "bridge" && !event.connected) {
-        applyRuntime(event.revision, sessionMap(event.sessions || []));
+        applyRuntime(event, sessionMap(event.sessions || []));
       }
     };
     return () => source.close();
@@ -1745,7 +1745,7 @@ function AgentPanel({ actions, agentFormOpen, agents, codexMcpAuthorization, cod
               const active = runtimeStatus === "active";
               const checking = runtimeStatus === "checking";
               const unconfirmed = runtimeStatus === "unconfirmed";
-              const mutationBlocked = active || checking || unconfirmed;
+              const mutationBlocked = !runtimeStatusAllowsMutation(runtimeStatus);
               const actionHint = active
                 ? t.agentBusyActionHint
                 : checking
@@ -1761,7 +1761,6 @@ function AgentPanel({ actions, agentFormOpen, agents, codexMcpAuthorization, cod
                   <form action={actions.updateAgent} className="agentRow agentRowEditing" key={agent.id}>
                     <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
                     <input name="agent_id" type="hidden" value={agent.id} suppressHydrationWarning />
-                    <input name="current_session_id" type="hidden" value={agent.session_id} suppressHydrationWarning />
                     <div className="agentIdentity">
                       <strong>{agent.display_name || assignedRole}</strong>
                       <div className="agentIdentityMeta">
@@ -1812,8 +1811,7 @@ function AgentPanel({ actions, agentFormOpen, agents, codexMcpAuthorization, cod
                     <form action={actions.unregisterAgent}>
                       <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
                       <input name="agent_id" type="hidden" value={agent.id} suppressHydrationWarning />
-                      <input name="current_session_id" type="hidden" value={agent.session_id} suppressHydrationWarning />
-                        <button className="ghost mini" disabled={mutationBlocked} type="submit">{t.remove}</button>
+                          <button className="ghost mini" disabled={mutationBlocked} type="submit">{t.remove}</button>
                     </form>
                   </div>
                 </div>

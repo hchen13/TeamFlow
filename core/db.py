@@ -746,7 +746,20 @@ def verify_agent(workspace: str | None, *, agent_id: str) -> dict[str, Any]:
     return verify_agents(workspace, agent_id=agent_id)["results"][0]
 
 
-def update_agent(workspace: str | None, *, agent_id: str, session_id: str) -> dict[str, Any]:
+def require_expected_revision(agent: sqlite3.Row, expected_revision: int | None) -> None:
+    # A caller that checked the agent before acting passes the revision it checked, so a binding
+    # that changed in between is rejected instead of being overwritten from a stale view.
+    if expected_revision is not None and int(agent["assignment_revision"]) != expected_revision:
+        raise ValueError("agent assignment changed since it was read")
+
+
+def update_agent(
+    workspace: str | None,
+    *,
+    agent_id: str,
+    session_id: str,
+    expected_revision: int | None = None,
+) -> dict[str, Any]:
     paths = resolve_workspace_paths(workspace)
     if not paths.db_path.exists():
         raise ValueError("TeamFlow workspace is not initialized")
@@ -763,6 +776,7 @@ def update_agent(workspace: str | None, *, agent_id: str, session_id: str) -> di
         ).fetchone()
         if agent is None:
             raise ValueError("agent not found")
+        require_expected_revision(agent, expected_revision)
         duplicate = conn.execute(
             """
             SELECT id FROM agents
@@ -862,6 +876,7 @@ def unregister_agent(
     workflow: str | None = None,
     harness_type: str | None = None,
     session_id: str | None = None,
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
     paths = resolve_workspace_paths(workspace)
     if not paths.db_path.exists():
@@ -871,6 +886,16 @@ def unregister_agent(
         bootstrap_workspace(conn)
         workspace_id = workspace_id_for_root(conn, paths.root)
         if agent_id:
+            # Removing an unknown agent stays idempotent, but a caller that checked a specific
+            # revision is told the binding moved rather than silently succeeding.
+            if expected_revision is not None:
+                current = conn.execute(
+                    "SELECT * FROM agents WHERE workspace_id = ? AND id = ?",
+                    (workspace_id, agent_id),
+                ).fetchone()
+                if current is None:
+                    raise ValueError("agent assignment changed since it was read")
+                require_expected_revision(current, expected_revision)
             active = conn.execute(
                 "SELECT 1 FROM task_event_deliveries WHERE agent_id = ? AND status = 'processing' LIMIT 1",
                 (agent_id,),

@@ -10,11 +10,10 @@ const FOLLOWING_VERSION = 1;
 const ARCHIVED_VERSION = 2;
 const UNARCHIVED_VERSION = 1;
 const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"]);
-const MUTABLE_RUNTIME_STATUSES = new Set(["idle", "notLoaded", "systemError"]);
 const TERMINAL_TURN_STATUSES = new Set(["completed", "success", "failed", "interrupted", "cancelled", "canceled"]);
 const LOCAL_HOST_ID = "local";
 const FOLLOW_TIMEOUT_MS = 1000;
-const BRIDGE_VERSION = 16;
+export const BRIDGE_VERSION = 17;
 const globalKey = Symbol.for("teamflow.codexBridge");
 
 export class CodexBridge extends EventEmitter {
@@ -29,6 +28,7 @@ export class CodexBridge extends EventEmitter {
     this.clientId = null;
     this.initializeRequestId = null;
     this.buffer = Buffer.alloc(0);
+    this.epoch = randomUUID();
     this.revision = 0;
     this.runtimeBySource = new Map();
     this.knownThreads = new Set();
@@ -60,16 +60,18 @@ export class CodexBridge extends EventEmitter {
   snapshot() {
     return {
       connected: this.connected,
+      epoch: this.epoch,
       revision: this.revision,
       sessions: [...this.aggregateRuntime().values()]
     };
   }
 
-  // Every observable state change carries a monotonic revision so a consumer can tell a stale
-  // snapshot from a newer streamed update, no matter which of the two arrives first.
+  // Every observable state change carries the bridge instance epoch and a revision that is only
+  // monotonic within it, so a consumer can order a snapshot against a streamed update and still
+  // accept the restarted sequence of a rebuilt bridge.
   publish(event) {
     this.revision += 1;
-    this.emit("event", { ...event, revision: this.revision });
+    this.emit("event", { ...event, epoch: this.epoch, revision: this.revision });
   }
 
   subscribe(listener) {
@@ -445,7 +447,7 @@ export class CodexBridge extends EventEmitter {
 
   aggregateRuntime() {
     const byThread = new Map();
-    const rank = { systemError: 4, active: 3, idle: 2, notLoaded: 1 };
+    const rank = { active: 4, systemError: 3, idle: 2, notLoaded: 1 };
     for (const sessions of this.runtimeBySource.values()) {
       for (const [threadId, metadata] of sessions) {
         const current = byThread.get(threadId) || {};
@@ -553,14 +555,6 @@ function openSocket(socketPath) {
   });
 }
 
-// Switching or removing an agent is only safe while the bridge positively reports the session as
-// not working. A missing entry, a check still in flight, and an unconfirmed bridge are all states
-// where a running turn cannot be ruled out, so they block the mutation.
-export function agentMutationAllowed(snapshot, sessionId) {
-  const runtime = (snapshot?.sessions || []).find((session) => session.threadId === sessionId);
-  return MUTABLE_RUNTIME_STATUSES.has(runtime?.status);
-}
-
 export function endpointStateForConnectionErrors(errors) {
   return errors.length > 0 && errors.every((error) => ["ECONNREFUSED", "ENOENT"].includes(error?.code))
     ? "absent"
@@ -603,11 +597,11 @@ export function codexThreadMetadata(value) {
 }
 
 function mergeRuntimeStatus(reportedStatus, inferredTurnStatus, liveTurn) {
-  if (reportedStatus === "systemError") {
-    return reportedStatus;
-  }
   if (inferredTurnStatus === "active" && (liveTurn || reportedStatus !== "notLoaded")) {
     return "active";
+  }
+  if (reportedStatus === "systemError") {
+    return reportedStatus;
   }
   if (reportedStatus === "notLoaded") {
     return reportedStatus;
@@ -790,8 +784,14 @@ function findValue(value, keys, depth = 0) {
   return null;
 }
 
+// Next keeps the singleton on globalThis across dev reloads, so a build whose runtime contract
+// changed must be able to recognize and replace an older instance.
+export function bridgeNeedsReplacement(existing) {
+  return !existing || existing.version !== BRIDGE_VERSION || typeof existing.track !== "function";
+}
+
 export function getCodexBridge() {
-  if (!globalThis[globalKey] || globalThis[globalKey].version !== BRIDGE_VERSION || typeof globalThis[globalKey].track !== "function") {
+  if (bridgeNeedsReplacement(globalThis[globalKey])) {
     globalThis[globalKey]?.dispose?.();
     globalThis[globalKey] = new CodexBridge();
   }

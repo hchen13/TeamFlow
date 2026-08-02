@@ -2,8 +2,11 @@ const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const test = require("node:test");
 
-const source = readFileSync(require.resolve("./codex-ipc.js"), "utf8");
-const modulePromise = import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+const load = (specifier) => import(
+  `data:text/javascript;base64,${Buffer.from(readFileSync(require.resolve(specifier), "utf8")).toString("base64")}`
+);
+const modulePromise = load("./codex-ipc.js");
+const rulesPromise = load("./agent-runtime-rules.js");
 
 test("extracts snapshot and patch runtime metadata", async () => {
   const { codexThreadMetadata } = await modulePromise;
@@ -145,7 +148,7 @@ test("keeps a live active turn ahead of a racing not-loaded report", async () =>
     "notLoaded"
   );
   assert.equal(
-    streamed([{ path: ["threadRuntimeStatus", "type"], value: "systemError" }, turnPatch("inProgress")]),
+    streamed([{ path: ["threadRuntimeStatus", "type"], value: "systemError" }, turnPatch("completed")]),
     "systemError"
   );
   assert.equal(streamed([turnPatch("inProgress")]), "active");
@@ -291,41 +294,158 @@ test("every published event and snapshot carries a monotonic revision", async ()
 });
 
 test("a stale polled snapshot never rolls back a newer streamed update", async () => {
-  const { acceptsRuntimeRevision } = await import(
-    `data:text/javascript;base64,${Buffer.from(readFileSync(require.resolve("./runtime-revision.js"), "utf8")).toString("base64")}`
-  );
+  const { acceptsRuntimeSequence } = await rulesPromise;
+  const applied = { epoch: "epoch-a", revision: 6 };
+
   // The POST left at revision 4 and returned after the stream already delivered revision 6.
-  assert.equal(acceptsRuntimeRevision(6, 4), false);
-  assert.equal(acceptsRuntimeRevision(6, 6), true);
-  assert.equal(acceptsRuntimeRevision(6, 7), true);
-  assert.equal(acceptsRuntimeRevision(-1, 0), true);
-  // A payload from a bridge that predates revisions must still be applied.
-  assert.equal(acceptsRuntimeRevision(6, undefined), true);
+  assert.equal(acceptsRuntimeSequence(applied, { epoch: "epoch-a", revision: 4 }), false);
+  assert.equal(acceptsRuntimeSequence(applied, { epoch: "epoch-a", revision: 6 }), true);
+  assert.equal(acceptsRuntimeSequence(applied, { epoch: "epoch-a", revision: 7 }), true);
+  assert.equal(acceptsRuntimeSequence(null, { epoch: "epoch-a", revision: 0 }), true);
+  // A rebuilt bridge restarts its counter, so its low revisions must not be discarded forever.
+  assert.equal(acceptsRuntimeSequence(applied, { epoch: "epoch-b", revision: 1 }), true);
+  // A payload from a bridge that predates the sequence must still be applied.
+  assert.equal(acceptsRuntimeSequence(applied, {}), true);
 });
 
-test("agent mutations are allowed only for a bridge-confirmed safe status", async () => {
-  const { agentMutationAllowed } = await modulePromise;
+test("a rebuilt bridge is accepted and restarts the applied sequence", async () => {
+  const { acceptsRuntimeSequence } = await rulesPromise;
+  let applied = { epoch: "epoch-a", revision: 9 };
+  const apply = (sequence) => {
+    if (!acceptsRuntimeSequence(applied, sequence)) {
+      return false;
+    }
+    applied = { epoch: sequence.epoch, revision: sequence.revision };
+    return true;
+  };
+
+  assert.equal(apply({ epoch: "epoch-b", revision: 1 }), true);
+  assert.deepEqual(applied, { epoch: "epoch-b", revision: 1 });
+  assert.equal(apply({ epoch: "epoch-b", revision: 0 }), false);
+  assert.equal(apply({ epoch: "epoch-b", revision: 2 }), true);
+});
+
+test("agent mutations are allowed only for a bridge-confirmed idle or unloaded session", async () => {
+  const { agentMutationAllowed, runtimeStatusAllowsMutation } = await rulesPromise;
   const snapshotFor = (status) => ({ sessions: [{ threadId: "thread-1", status }] });
 
-  for (const status of ["idle", "notLoaded", "systemError"]) {
+  for (const status of ["idle", "notLoaded"]) {
+    assert.equal(runtimeStatusAllowsMutation(status), true, status);
     assert.equal(agentMutationAllowed(snapshotFor(status), "thread-1"), true, status);
   }
-  for (const status of ["active", "checking", "unconfirmed", "", undefined]) {
+  for (const status of ["active", "systemError", "checking", "unconfirmed", "", undefined]) {
+    assert.equal(runtimeStatusAllowsMutation(status), false, String(status));
     assert.equal(agentMutationAllowed(snapshotFor(status), "thread-1"), false, String(status));
   }
   assert.equal(agentMutationAllowed({ sessions: [] }, "thread-1"), false);
   assert.equal(agentMutationAllowed({}, "thread-1"), false);
   assert.equal(agentMutationAllowed(snapshotFor("idle"), "thread-other"), false);
+  assert.equal(agentMutationAllowed(snapshotFor("idle"), ""), false);
 });
 
-test("the agent mutation guard reads the bridge instead of the submitted form", async () => {
-  const actions = readFileSync(require.resolve("./actions.js"), "utf8");
-  const guard = actions.slice(actions.indexOf("function blockActiveAgent"));
-  const body = guard.slice(0, guard.indexOf("\n}\n"));
+test("a running turn outranks a systemError from another source", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = true;
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map([
+    ["vscode", new Map([["thread-1", { threadId: "thread-1", status: "systemError" }]])],
+    ["desktop", new Map([["thread-1", { threadId: "thread-1", status: "active" }]])]
+  ]);
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
 
-  assert.match(body, /agentMutationAllowed\(getCodexBridge\(\)\.snapshot\(\)/);
-  assert.doesNotMatch(body, /runtime_status/);
-  assert.doesNotMatch(readFileSync(require.resolve("../app/teamflow-client.jsx"), "utf8"), /name="runtime_status"/);
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "active");
+
+  bridge.runtimeBySource = new Map([
+    ["desktop", new Map([["thread-1", { threadId: "thread-1", status: "systemError" }]])],
+    ["vscode", new Map([["thread-1", { threadId: "thread-1", status: "idle" }]])]
+  ]);
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "systemError");
+});
+
+test("a systemError reported alongside a running turn still reads as active", async () => {
+  const { codexThreadMetadata } = await modulePromise;
+
+  assert.equal(codexThreadMetadata({
+    conversationId: "thread-1",
+    change: {
+      type: "patches",
+      patches: [
+        { path: ["threadRuntimeStatus", "type"], value: "systemError" },
+        { path: ["turnHistory", "history", "entitiesByKey", "turn-1", "status"], value: "inProgress" }
+      ]
+    }
+  }).status, "active");
+
+  assert.equal(codexThreadMetadata({
+    conversationId: "thread-1",
+    change: {
+      type: "snapshot",
+      conversationState: {
+        threadRuntimeStatus: { type: "systemError" },
+        turnHistory: { history: { entitiesByKey: { running: { status: "inProgress" } } } }
+      }
+    }
+  }).status, "active");
+
+  assert.equal(codexThreadMetadata({
+    conversationId: "thread-1",
+    change: {
+      type: "snapshot",
+      conversationState: { threadRuntimeStatus: { type: "systemError" } }
+    }
+  }).status, "systemError");
+});
+
+test("a submitted session cannot redirect the check away from the acted-on agent", async () => {
+  const { agentForMutation, agentMutationAllowed } = await rulesPromise;
+  const state = {
+    agents: [
+      { id: "agent-busy", session_id: "thread-busy", assignment_revision: 4 },
+      { id: "agent-free", session_id: "thread-free", assignment_revision: 2 }
+    ]
+  };
+  const snapshot = {
+    sessions: [
+      { threadId: "thread-busy", status: "active" },
+      { threadId: "thread-free", status: "idle" }
+    ]
+  };
+
+  // A forged form names the busy agent while pointing the check at the idle session.
+  const acted = agentForMutation(state, "agent-busy");
+  assert.equal(acted.session_id, "thread-busy");
+  assert.equal(acted.assignment_revision, 4);
+  assert.equal(agentMutationAllowed(snapshot, acted.session_id), false);
+
+  const free = agentForMutation(state, "agent-free");
+  assert.equal(free.session_id, "thread-free");
+  assert.equal(agentMutationAllowed(snapshot, free.session_id), true);
+  assert.equal(agentForMutation(state, "agent-missing"), null);
+  assert.equal(agentForMutation({}, "agent-busy"), null);
+});
+
+test("the agent mutation guard never reads a session or status from the form", async () => {
+  const actions = readFileSync(require.resolve("./actions.js"), "utf8");
+  const guard = actions.slice(actions.indexOf("async function guardedAgent"));
+  const body = guard.slice(0, guard.indexOf("\n}\n"));
+  const client = readFileSync(require.resolve("../app/teamflow-client.jsx"), "utf8");
+
+  assert.match(body, /agentForMutation\(await getState\(\)/);
+  assert.doesNotMatch(body, /current_session_id|runtime_status/);
+  assert.doesNotMatch(client, /name="runtime_status"|name="current_session_id"/);
+  assert.match(actions, /--expected-revision/);
+});
+
+test("an outdated bridge singleton is replaced", async () => {
+  const { BRIDGE_VERSION, bridgeNeedsReplacement } = await modulePromise;
+
+  assert.ok(BRIDGE_VERSION > 16, "BRIDGE_VERSION must move past the previous runtime contract");
+  assert.equal(bridgeNeedsReplacement(undefined), true);
+  assert.equal(bridgeNeedsReplacement({ version: BRIDGE_VERSION - 1, track: () => {} }), true);
+  assert.equal(bridgeNeedsReplacement({ version: BRIDGE_VERSION }), true);
+  assert.equal(bridgeNeedsReplacement({ version: BRIDGE_VERSION, track: () => {} }), false);
 });
 
 test("registers as a follower after IPC initialization", async () => {
@@ -369,6 +489,7 @@ test("removes stale runtime state when a source stops following", async () => {
   const { CodexBridge } = await modulePromise;
   const bridge = Object.create(CodexBridge.prototype);
   const events = [];
+  bridge.epoch = "epoch-test";
   bridge.revision = 0;
   bridge.knownThreads = new Set(["thread-1"]);
   bridge.runtimeBySource = new Map([
@@ -395,7 +516,7 @@ test("removes stale runtime state when a source stops following", async () => {
   assert.equal(bridge.aggregateRuntime().get("thread-1").status, "idle");
   assert.deepEqual(events.at(-1), [
     "event",
-    { type: "runtime", threadId: "thread-1", status: "idle", revision: 1 }
+    { type: "runtime", threadId: "thread-1", status: "idle", epoch: "epoch-test", revision: 1 }
   ]);
 });
 

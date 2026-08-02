@@ -2,8 +2,9 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { agentMutationAllowed, getCodexBridge } from "./codex-ipc";
-import { run, runJson, startLarkUserAuthFlow, workspaceArgs } from "./teamflow";
+import { agentForMutation, agentMutationAllowed } from "./agent-runtime-rules";
+import { getCodexBridge } from "./codex-ipc";
+import { getState, run, runJson, startLarkUserAuthFlow, workspaceArgs } from "./teamflow";
 
 const messages = {
   zh: {
@@ -12,6 +13,7 @@ const messages = {
     agentRemoved: "Agent 已移除",
     agentUpdated: "Agent Session 已切换",
     agentBusy: "Agent 正在工作，完成后才能切换或移除。",
+    agentAssignmentChanged: "Agent 绑定已被更新，请刷新后重试。",
     authGenerated: "授权链接已生成，打开后完成确认",
     boardCreated: "多维表格已创建",
     boardNotFound: "找不到这个多维表格。它可能已被删除，或当前身份无权访问。请恢复原表并检查权限；也可以粘贴新的多维表格链接，或在下方选择身份创建新表。",
@@ -33,6 +35,7 @@ const messages = {
     agentRemoved: "Agent removed",
     agentUpdated: "Agent session updated",
     agentBusy: "This agent is working. Wait until it finishes before switching or removing it.",
+    agentAssignmentChanged: "This agent binding changed. Refresh the page and try again.",
     authGenerated: "Authorization link generated. Open it to confirm.",
     boardCreated: "Bitable created",
     boardNotFound: "This Bitable could not be found. It may have been deleted, or the current identity may not have access. Restore it and check access, paste a new Bitable link, or choose an identity to create one below.",
@@ -165,17 +168,19 @@ export async function registerAgent(formData) {
 export async function unregisterAgent(formData) {
   const args = ["unregister-agent", ...workspaceArgs()];
   const lang = language(formData);
-  blockActiveAgent(formData, lang);
-  add(args, "--agent-id", field(formData, "agent_id"));
+  const agent = await guardedAgent(formData, lang);
+  add(args, "--agent-id", agent.id);
+  add(args, "--expected-revision", String(agent.assignment_revision));
   await finish(args, {}, "agent", "agentRemoved", lang);
 }
 
 export async function updateAgent(formData) {
   const args = ["update-agent", ...workspaceArgs()];
   const lang = language(formData);
-  blockActiveAgent(formData, lang);
-  add(args, "--agent-id", field(formData, "agent_id"));
+  const agent = await guardedAgent(formData, lang);
+  add(args, "--agent-id", agent.id);
   add(args, "--session-id", field(formData, "session_id"));
+  add(args, "--expected-revision", String(agent.assignment_revision));
   await finish(args, {}, "agent", "agentUpdated", lang);
 }
 
@@ -218,15 +223,21 @@ function localizedError(error, lang) {
   if (/session is already registered for the role/i.test(message)) {
     return messages[lang].sessionAlreadyAssigned;
   }
+  if (/agent assignment changed/i.test(message)) {
+    return messages[lang].agentAssignmentChanged;
+  }
   return /user token has expired|authorization expired/i.test(message) ? messages[lang].userAuthExpired : message;
 }
 
-function blockActiveAgent(formData, lang) {
-  // The submitted status is a client hint a stale page or a crafted form can lie about, so the
-  // bridge is the only source consulted here.
-  if (!agentMutationAllowed(getCodexBridge().snapshot(), field(formData, "current_session_id"))) {
+// The form only names which agent to act on. Which session that agent owns, and which assignment
+// revision the check saw, both come from the workspace so a crafted or stale form cannot point the
+// safety check at a different session than the one the command will touch.
+async function guardedAgent(formData, lang) {
+  const agent = agentForMutation(await getState(), field(formData, "agent_id"));
+  if (!agent || !agentMutationAllowed(getCodexBridge().snapshot(), agent.session_id)) {
     redirect(redirectTarget("agent", lang, messages[lang].agentBusy, true));
   }
+  return agent;
 }
 
 function redirectTarget(tab, lang, message, error = false, step = "", authMode = "", extra = {}) {
