@@ -225,7 +225,9 @@ class SchemaGuardTest(unittest.TestCase):
         self.assertFalse(thread.is_alive(), "the consumer thread must terminate")
         self.assertTrue(stopping.is_set())
         self.assertTrue(fatal.wait(1), "the daemon must be asked to shut down")
-        self.assertEqual(escaped, [type(log_error)] if log_error else [])
+        # Every fatal exit re-raises so the thread still reports how it died. A failure inside the
+        # report replaces the original on the way out, after the shutdown was already requested.
+        self.assertEqual(escaped, [type(log_error) if log_error else type(error)])
         return failure, logs, True
 
     def health_of(self, failure: dict[str, str]) -> dict:
@@ -277,18 +279,21 @@ class SchemaGuardTest(unittest.TestCase):
         self.assertEqual(logs[0]["message"], "LISTENER FATAL")
         self.assertIs(self.health_of(failure)["healthy"], False)
 
-    def test_an_interrupt_is_not_swallowed_as_a_consumer_failure(self):
+    def test_an_interrupt_still_shuts_the_daemon_down_and_keeps_propagating(self):
         for error in (KeyboardInterrupt(), SystemExit(1), GeneratorExit()):
             with self.subTest(error=type(error).__name__):
                 runtime, failure, logs, stopping, fatal = self.build_consumer(error)
 
+                # The interrupt is never swallowed, but the daemon must not be left behind with a
+                # dead consumer either, so the same fatal path runs before it propagates.
                 with self.assertRaises(type(error)):
                     runtime.consume_events()
 
-                self.assertEqual(failure, {})
-                self.assertEqual(logs, [])
-                self.assertFalse(fatal.is_set())
-                self.assertFalse(stopping.is_set())
+                self.assertIn(type(error).__name__, failure["error"])
+                self.assertEqual(logs[0]["message"], "LISTENER FATAL")
+                self.assertTrue(fatal.is_set())
+                self.assertTrue(stopping.is_set())
+                self.assertIs(self.health_of(failure)["healthy"], False)
 
     def test_the_global_database_rolls_back_work_after_a_concurrent_migration(self):
         register_workspace("/tmp/teamflow-schema-guard")

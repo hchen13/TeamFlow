@@ -128,7 +128,9 @@ class TeamFlowDaemon:
         self.active_sessions: set[str] = set()
         self.delivery_workers: dict[str, threading.Thread] = {}
         self.consumer_failure: dict[str, Any] = {}
-        self.on_fatal: Callable[[], None] = lambda: None
+        self.fatal_lock = threading.Lock()
+        self.fatal_handler: Callable[[], None] | None = None
+        self.fatal_requested = False
         self.monitor = DaemonMonitor(
             routes=self.routes,
             workers=self.workers,
@@ -291,6 +293,26 @@ class TeamFlowDaemon:
         self.delivery_thread = threading.Thread(target=self._consume_deliveries, name="teamflow-deliveries", daemon=True)
         self.event_thread.start()
         self.delivery_thread.start()
+
+    # The consumer threads start inside __init__, before the server that knows how to shut the
+    # daemon down exists. A fatal consumer in that window records the request instead of calling a
+    # placeholder, and installing the handler honours anything already pending.
+    def on_fatal(self) -> None:
+        with self.fatal_lock:
+            self.fatal_requested = True
+            handler = self.fatal_handler
+        if handler:
+            handler()
+
+    def set_fatal_shutdown(self, handler: Callable[[], None]) -> None:
+        with self.fatal_lock:
+            self.fatal_handler = handler
+            pending = self.fatal_requested
+        if pending:
+            handler()
+
+    def begin_shutdown(self) -> None:
+        self.stopping.set()
 
     @staticmethod
     def app_key(context: LarkEventContext) -> str:
@@ -684,11 +706,11 @@ def run_daemon() -> int:
         server = DaemonServer(str(socket_path), runtime)
         # A consumer that died leaves nothing draining the inbox, so the daemon exits and frees its
         # socket instead of lingering as a listener that answers but never listens.
-        runtime.on_fatal = lambda: threading.Thread(
-            target=server.shutdown,
+        runtime.set_fatal_shutdown(lambda: threading.Thread(
+            target=_stop_daemon_server(server, runtime),
             name="teamflow-daemon-fatal",
             daemon=True,
-        ).start()
+        ).start())
         os.chmod(socket_path, 0o600)
         pid_path.write_text(str(os.getpid()), encoding="utf-8")
         os.chmod(pid_path, 0o600)
@@ -701,13 +723,29 @@ def run_daemon() -> int:
             interrupted = True
             _emit_log("DAEMON STOPPING")
         finally:
-            runtime.close()
-            server.server_close()
-            if socket_path.exists():
-                socket_path.unlink()
-            if pid_path.exists():
-                pid_path.unlink()
+            # A close that fails must not keep the socket, the pid file, or the lifecycle lock:
+            # whatever is left behind would make the next daemon unstartable.
+            try:
+                runtime.close()
+            finally:
+                _release_daemon_lifecycle(server, socket_path, pid_path)
     return 130 if interrupted else 0
+
+
+def _stop_daemon_server(server: DaemonServer, runtime: TeamFlowDaemon) -> Callable[[], None]:
+    def stop() -> None:
+        runtime.begin_shutdown()
+        server.shutdown()
+    return stop
+
+
+def _release_daemon_lifecycle(server: DaemonServer, socket_path: Path, pid_path: Path) -> None:
+    try:
+        server.server_close()
+    finally:
+        for path in (socket_path, pid_path):
+            if path.exists():
+                path.unlink()
 
 
 def await_daemon_lifecycle_lock(lock_path: Path, deadline: float) -> dict[str, Any] | None:
@@ -775,6 +813,7 @@ def daemon_status() -> dict[str, Any]:
         return {
             "running": False,
             "healthy": False,
+            "stopping": False,
             "consumer_error": None,
             "pid": None,
             "apps": [],

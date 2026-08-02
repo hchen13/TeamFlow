@@ -134,9 +134,11 @@ class DaemonMonitor:
         # A dead event consumer leaves the worker processes connected, so reporting only their
         # sockets would keep claiming the board is watched when nothing drains the inbox.
         consumer_error = self.consumer_failure.get("error")
+        stopping = self.stopping.is_set()
         return {
             "running": True,
-            "healthy": not consumer_error,
+            "healthy": not consumer_error and not stopping,
+            "stopping": stopping,
             "consumer_error": consumer_error,
             "pid": os.getpid(),
             "apps": apps,

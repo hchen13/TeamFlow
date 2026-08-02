@@ -100,6 +100,10 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     arguments=arguments if isinstance(arguments, dict) else {},
                 )
             elif action == "shutdown":
+                # The status in this reply, and any status a concurrent caller reads next, has to
+                # already show the daemon leaving. Otherwise it looks reusable right up to the
+                # moment its socket closes.
+                self.server.runtime.begin_shutdown()
                 result = {
                     "stopping": True,
                     **self.server.runtime.status(),

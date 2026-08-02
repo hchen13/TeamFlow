@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from core.daemon import (
     TeamFlowDaemon,
+    _daemon_request,
     daemon_socket_path,
     ensure_daemon,
     run_daemon,
@@ -140,6 +141,103 @@ class DaemonLifecycleTest(unittest.TestCase):
         self.assertFalse(socket_path.exists(), "the daemon socket must be removed")
         self.assertFalse(pid_path.exists(), "the daemon pid file must be removed")
         self.hold_lock()
+
+    def test_an_interrupt_in_the_consumer_still_shuts_the_real_daemon_down(self):
+        # SystemExit is not an Exception, but it leaves the inbox just as undrained.
+        logged, exit_code, server = self.run_daemon_until_exit(
+            patch("core.daemon.due_lark_event_ids", side_effect=SystemExit(1))
+        )
+
+        self.assertFalse(server.is_alive())
+        self.assertEqual(exit_code, [0])
+        self.assertIn("LISTENER FATAL", logged)
+        self.assertIn("SystemExit", logged)
+        self.assertFalse(daemon_socket_path().exists())
+        self.assertFalse((teamflow_home() / "daemon.pid").exists())
+        self.hold_lock()
+
+    def test_a_daemon_that_accepted_a_shutdown_stops_reporting_itself_healthy(self):
+        response: list[dict] = []
+
+        def request_shutdown() -> None:
+            response.append(_daemon_request({"action": "shutdown"}, timeout=5))
+
+        logged, exit_code, server = self.run_daemon_until_exit(after_start=request_shutdown)
+
+        self.assertFalse(server.is_alive())
+        self.assertEqual(exit_code, [0])
+        self.assertIs(response[0]["stopping"], True)
+        self.assertIs(response[0]["running"], True)
+        # A concurrent ensure_daemon reading this reply must not adopt a daemon on its way out.
+        self.assertIs(response[0]["healthy"], False)
+
+    def test_a_stopping_daemon_is_never_adopted_while_it_holds_the_lock(self):
+        self.hold_lock()
+        stopping = {"running": True, "healthy": False, "stopping": True, "consumer_error": None}
+
+        with patch("core.daemon.daemon_status", return_value=stopping), patch(
+            "core.daemon.stop_daemon", return_value={"stopping": True}
+        ), patch("core.daemon.LISTENER_CONNECT_TIMEOUT", 0.3), patch(
+            "core.daemon.subprocess.Popen"
+        ) as popen:
+            with self.assertRaises(ValueError) as failure:
+                ensure_daemon()
+
+        self.assertIn("still shutting down", str(failure.exception))
+        popen.assert_not_called()
+
+    def test_a_fatal_before_the_shutdown_handler_exists_is_not_lost(self):
+        runtime = TeamFlowDaemon()
+        try:
+            # This is the window between the consumer threads starting and run_daemon installing
+            # the handler that knows how to stop the server.
+            runtime.on_fatal()
+            installed: list[str] = []
+            runtime.set_fatal_shutdown(lambda: installed.append("shutdown"))
+
+            self.assertEqual(installed, ["shutdown"], "a pending fatal must be honoured")
+        finally:
+            runtime.close()
+
+    def test_lifecycle_files_are_released_even_when_close_fails(self):
+        socket_path = daemon_socket_path()
+        pid_path = teamflow_home() / "daemon.pid"
+        failures: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                run_daemon()
+            except BaseException as error:
+                failures.append(error)
+
+        with patch.object(TeamFlowDaemon, "close", side_effect=RuntimeError("close failed")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                server = threading.Thread(target=run, daemon=True)
+                server.start()
+                self.until(lambda: socket_path.exists() and pid_path.exists())
+                _daemon_request({"action": "shutdown"}, timeout=5)
+                server.join(timeout=20)
+
+        self.assertFalse(server.is_alive())
+        self.assertEqual([str(error) for error in failures], ["close failed"])
+        self.assertFalse(socket_path.exists(), "the socket must be removed even when close fails")
+        self.assertFalse(pid_path.exists(), "the pid file must be removed even when close fails")
+        self.hold_lock()
+
+    def run_daemon_until_exit(self, patched=None, *, after_start=None):
+        output = io.StringIO()
+        exit_code: list[int] = []
+        with contextlib.ExitStack() as stack:
+            if patched:
+                stack.enter_context(patched)
+            stack.enter_context(contextlib.redirect_stdout(output))
+            server = threading.Thread(target=lambda: exit_code.append(run_daemon()), daemon=True)
+            server.start()
+            if after_start:
+                self.until(lambda: daemon_socket_path().exists())
+                after_start()
+            server.join(timeout=20)
+        return output.getvalue(), exit_code, server
 
     def test_a_fatal_consumer_stops_the_real_daemon_and_frees_its_lifecycle_files(self):
         created: list[TeamFlowDaemon] = []

@@ -106,12 +106,11 @@ class LarkWorkerRuntime:
     def consume_events(self) -> None:
         try:
             self._consume_events()
-        except Exception as error:
+        except BaseException as error:
             # Per-event business failures are already handled inside the event runtime, so anything
-            # reaching here broke the loop itself. Whatever it was, the inbox stops draining, and a
-            # daemon that keeps answering as a healthy listener would be lying about that. The
-            # failure is recorded before anything else, and the shutdown is owed even if reporting
-            # it fails.
+            # reaching here broke the loop itself, including an interrupt aimed at this thread. The
+            # inbox stops draining either way, so every exit takes the same path: record, stop, ask
+            # the daemon to shut down, and re-raise so the thread still reports how it died.
             self.consumer_failure["error"] = f"{type(error).__name__}: {error}"
             self.stopping.set()
             try:
@@ -124,6 +123,7 @@ class LarkWorkerRuntime:
                 )
             finally:
                 self.on_fatal()
+            raise
 
     def _consume_events(self) -> None:
         while True:
