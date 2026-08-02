@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { useRouter } from "next/navigation";
+import { acceptsRuntimeRevision } from "../lib/runtime-revision";
 
 const FEISHU_APP_URL = "https://open.feishu.cn/app";
 const FEISHU_CREATE_APP_URL = "https://open.feishu.cn/page/launcher?from=backend_oneclick";
@@ -464,6 +465,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   const [runtimeBySession, setRuntimeBySession] = useState({});
   const [lifecycleBySession, setLifecycleBySession] = useState({});
   const refreshInFlight = useRef(null);
+  const runtimeRevision = useRef(-1);
   const pendingOnboardingSessions = useRef(new Set());
   const t = text[lang];
   const board = state.lark_board || {};
@@ -474,6 +476,16 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   const tabMessage = message && ((tab === "agent") === (initialTab === "agent"));
   const appUrl = lang === "zh" ? FEISHU_APP_URL : LARK_APP_URL;
   const createAppUrl = lang === "zh" ? FEISHU_CREATE_APP_URL : LARK_CREATE_APP_URL;
+
+  const applyRuntime = useCallback((revision, next) => {
+    if (!acceptsRuntimeRevision(runtimeRevision.current, revision)) {
+      return;
+    }
+    if (typeof revision === "number") {
+      runtimeRevision.current = revision;
+    }
+    setRuntimeBySession(next);
+  }, []);
 
   const refreshCodexState = useCallback(() => {
     if (refreshInFlight.current) {
@@ -491,7 +503,9 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
         setLiveAgents(agents);
         setLiveCodexSessions(payload.sessions || []);
         setLiveCodexSessionError(Boolean(payload.sessionError));
-        setRuntimeBySession(sessionMap(payload.runtime?.sessions || []));
+        // This snapshot was taken when the request reached the server; a stream event that landed
+        // since then is newer and must not be rolled back by it.
+        applyRuntime(payload.runtime?.revision, () => sessionMap(payload.runtime?.sessions || []));
         setLifecycleBySession((current) => settledLifecycle(current, agents));
       })
       .catch(() => setLiveCodexSessionError(true))
@@ -500,7 +514,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
       });
     refreshInFlight.current = request;
     return request;
-  }, []);
+  }, [applyRuntime]);
 
   useEffect(() => setLiveAgents(state.agents || []), [state.agents]);
   useEffect(() => setLiveCodexSessions(codexSessions), [codexSessions]);
@@ -527,9 +541,9 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
         return;
       }
       if (event.type === "snapshot") {
-        setRuntimeBySession(sessionMap(event.sessions || []));
+        applyRuntime(event.revision, sessionMap(event.sessions || []));
       } else if (event.type === "runtime") {
-        setRuntimeBySession((current) => updateRuntime(current, event));
+        applyRuntime(event.revision, (current) => updateRuntime(current, event));
         if (pendingOnboardingSessions.current.has(event.threadId) && ONBOARDING_REFRESH_STATUSES.has(event.status)) {
           refreshCodexState();
         }
@@ -552,11 +566,11 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
       } else if (event.type === "catalog") {
         refreshCodexState();
       } else if (event.type === "bridge" && !event.connected) {
-        setRuntimeBySession(sessionMap(event.sessions || []));
+        applyRuntime(event.revision, sessionMap(event.sessions || []));
       }
     };
     return () => source.close();
-  }, [refreshCodexState, tab]);
+  }, [applyRuntime, refreshCodexState, tab]);
 
   useEffect(() => {
     setNoticeVisible(Boolean(message));
@@ -1748,7 +1762,6 @@ function AgentPanel({ actions, agentFormOpen, agents, codexMcpAuthorization, cod
                     <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
                     <input name="agent_id" type="hidden" value={agent.id} suppressHydrationWarning />
                     <input name="current_session_id" type="hidden" value={agent.session_id} suppressHydrationWarning />
-                    <input name="runtime_status" type="hidden" value={runtimeStatus || ""} suppressHydrationWarning />
                     <div className="agentIdentity">
                       <strong>{agent.display_name || assignedRole}</strong>
                       <div className="agentIdentityMeta">
@@ -1800,8 +1813,7 @@ function AgentPanel({ actions, agentFormOpen, agents, codexMcpAuthorization, cod
                       <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
                       <input name="agent_id" type="hidden" value={agent.id} suppressHydrationWarning />
                       <input name="current_session_id" type="hidden" value={agent.session_id} suppressHydrationWarning />
-                      <input name="runtime_status" type="hidden" value={runtimeStatus || ""} suppressHydrationWarning />
-                      <button className="ghost mini" disabled={mutationBlocked} type="submit">{t.remove}</button>
+                        <button className="ghost mini" disabled={mutationBlocked} type="submit">{t.remove}</button>
                     </form>
                   </div>
                 </div>

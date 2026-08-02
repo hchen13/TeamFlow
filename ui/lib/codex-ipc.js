@@ -10,6 +10,7 @@ const FOLLOWING_VERSION = 1;
 const ARCHIVED_VERSION = 2;
 const UNARCHIVED_VERSION = 1;
 const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"]);
+const MUTABLE_RUNTIME_STATUSES = new Set(["idle", "notLoaded", "systemError"]);
 const TERMINAL_TURN_STATUSES = new Set(["completed", "success", "failed", "interrupted", "cancelled", "canceled"]);
 const LOCAL_HOST_ID = "local";
 const FOLLOW_TIMEOUT_MS = 1000;
@@ -28,6 +29,7 @@ export class CodexBridge extends EventEmitter {
     this.clientId = null;
     this.initializeRequestId = null;
     this.buffer = Buffer.alloc(0);
+    this.revision = 0;
     this.runtimeBySource = new Map();
     this.knownThreads = new Set();
     this.pendingThreads = new Set();
@@ -58,8 +60,16 @@ export class CodexBridge extends EventEmitter {
   snapshot() {
     return {
       connected: this.connected,
+      revision: this.revision,
       sessions: [...this.aggregateRuntime().values()]
     };
+  }
+
+  // Every observable state change carries a monotonic revision so a consumer can tell a stale
+  // snapshot from a newer streamed update, no matter which of the two arrives first.
+  publish(event) {
+    this.revision += 1;
+    this.emit("event", { ...event, revision: this.revision });
   }
 
   subscribe(listener) {
@@ -134,7 +144,7 @@ export class CodexBridge extends EventEmitter {
     this.buffer = Buffer.alloc(0);
     this.connected = true;
     this.endpointState = "connected";
-    this.emit("event", { type: "bridge", connected: true });
+    this.publish({ type: "bridge", connected: true });
     socket.on("data", (chunk) => this.onData(chunk));
     socket.on("close", () => this.disconnect());
     socket.on("error", () => socket.destroy());
@@ -168,7 +178,7 @@ export class CodexBridge extends EventEmitter {
       clearTimeout(timer);
     }
     this.followTimers.clear();
-    this.emit("event", { type: "bridge", connected: false, sessions: this.snapshot().sessions });
+    this.publish({ type: "bridge", connected: false, sessions: this.snapshot().sessions });
     this.scheduleReconnect(0);
   }
 
@@ -177,7 +187,7 @@ export class CodexBridge extends EventEmitter {
       return;
     }
     this.endpointState = endpointState;
-    this.emit("event", {
+    this.publish({
       type: "bridge",
       connected: false,
       sessions: this.snapshot().sessions
@@ -300,7 +310,7 @@ export class CodexBridge extends EventEmitter {
     this.runtimeBySource.set(sourceClientId, sourceRuntime);
     const runtime = this.aggregateRuntime().get(metadata.threadId);
     if (runtime) {
-      this.emit("event", { type: "runtime", ...runtime });
+      this.publish({ type: "runtime", ...runtime });
     }
   }
 
@@ -314,7 +324,7 @@ export class CodexBridge extends EventEmitter {
     } else {
       this.requestFollow(threadId);
     }
-    this.emit("event", { type: "lifecycle", threadId, status });
+    this.publish({ type: "lifecycle", threadId, status });
   }
 
   updateClientStatus(params) {
@@ -329,7 +339,7 @@ export class CodexBridge extends EventEmitter {
     for (const threadId of affected) {
       const runtime = aggregate.get(threadId);
       if (runtime) {
-        this.emit("event", { type: "runtime", ...runtime });
+        this.publish({ type: "runtime", ...runtime });
       } else {
         this.requestFollow(threadId);
       }
@@ -348,7 +358,7 @@ export class CodexBridge extends EventEmitter {
     }
     const runtime = this.aggregateRuntime().get(threadId);
     if (runtime) {
-      this.emit("event", { type: "runtime", ...runtime });
+      this.publish({ type: "runtime", ...runtime });
     } else if (this.knownThreads.has(threadId)) {
       this.requestFollow(threadId);
     }
@@ -358,9 +368,15 @@ export class CodexBridge extends EventEmitter {
     if (!this.clientId || !this.knownThreads.has(threadId)) {
       return;
     }
+    // A targeted re-announce only answers one client's following probe. Other sources still hold
+    // valid state for this thread, so it must not be dropped or masked behind another check.
+    if (targetClientIds?.length && this.hasRuntime(threadId)) {
+      this.sendFollowing(threadId, true, targetClientIds);
+      return;
+    }
     this.clearThreadRuntime(threadId);
     this.pendingThreads.add(threadId);
-    this.emit("event", { type: "runtime", threadId, status: "checking" });
+    this.publish({ type: "runtime", threadId, status: "checking" });
     clearTimeout(this.followTimers.get(threadId));
     const timer = setTimeout(() => {
       this.followTimers.delete(threadId);
@@ -369,7 +385,7 @@ export class CodexBridge extends EventEmitter {
       }
       this.pendingThreads.delete(threadId);
       this.unconfirmedThreads.add(threadId);
-      this.emit("event", {
+      this.publish({
         type: "runtime",
         threadId,
         status: this.disconnectedRuntimeStatus()
@@ -524,7 +540,7 @@ export class CodexBridge extends EventEmitter {
 
   scheduleCatalogRefresh() {
     clearTimeout(this.catalogTimer);
-    this.catalogTimer = setTimeout(() => this.emit("event", { type: "catalog" }), 300);
+    this.catalogTimer = setTimeout(() => this.publish({ type: "catalog" }), 300);
     this.catalogTimer.unref?.();
   }
 }
@@ -535,6 +551,14 @@ function openSocket(socketPath) {
     socket.once("connect", () => resolve(socket));
     socket.once("error", reject);
   });
+}
+
+// Switching or removing an agent is only safe while the bridge positively reports the session as
+// not working. A missing entry, a check still in flight, and an unconfirmed bridge are all states
+// where a running turn cannot be ruled out, so they block the mutation.
+export function agentMutationAllowed(snapshot, sessionId) {
+  const runtime = (snapshot?.sessions || []).find((session) => session.threadId === sessionId);
+  return MUTABLE_RUNTIME_STATUSES.has(runtime?.status);
 }
 
 export function endpointStateForConnectionErrors(errors) {

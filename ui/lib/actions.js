@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { getCodexBridge } from "./codex-ipc";
+import { agentMutationAllowed, getCodexBridge } from "./codex-ipc";
 import { run, runJson, startLarkUserAuthFlow, workspaceArgs } from "./teamflow";
 
 const messages = {
@@ -222,10 +222,9 @@ function localizedError(error, lang) {
 }
 
 function blockActiveAgent(formData, lang) {
-  const sessionId = field(formData, "current_session_id");
-  const active = field(formData, "runtime_status") === "active"
-    || getCodexBridge().snapshot().sessions.some((session) => session.threadId === sessionId && session.status === "active");
-  if (active) {
+  // The submitted status is a client hint a stale page or a crafted form can lie about, so the
+  // bridge is the only source consulted here.
+  if (!agentMutationAllowed(getCodexBridge().snapshot(), field(formData, "current_session_id"))) {
     redirect(redirectTarget("agent", lang, messages[lang].agentBusy, true));
   }
 }

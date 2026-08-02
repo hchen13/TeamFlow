@@ -196,6 +196,138 @@ test("aggregates a live active turn over a not-loaded source", async () => {
   assert.equal(bridge.aggregateRuntime().get("thread-1").status, "active");
 });
 
+test("a targeted re-follow keeps runtime other sources already reported", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  const sent = [];
+  const events = [];
+  bridge.clientId = "teamflow";
+  bridge.revision = 0;
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map([
+    ["desktop", new Map([["thread-1", { threadId: "thread-1", status: "active" }]])]
+  ]);
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+  bridge.followTimers = new Map();
+  bridge.emit = (...args) => events.push(args);
+  bridge.send = (payload) => sent.push(payload);
+
+  bridge.onMessage({
+    method: "thread-stream-following-status-requested",
+    version: 1,
+    sourceClientId: "vscode",
+    params: { conversationId: "thread-1", hostId: "local" }
+  });
+
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "active");
+  assert.equal(bridge.runtimeBySource.get("desktop").get("thread-1").status, "active");
+  assert.equal(bridge.pendingThreads.size, 0);
+  assert.equal(bridge.followTimers.size, 0);
+  assert.deepEqual(events, []);
+  assert.deepEqual(sent.at(-1).targetClientIds, ["vscode"]);
+  assert.equal(sent.at(-1).params.following, true);
+});
+
+test("a targeted re-follow still checks a thread no source reported", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  const events = [];
+  bridge.clientId = "teamflow";
+  bridge.revision = 0;
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map();
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+  bridge.followTimers = new Map();
+  bridge.emit = (...args) => events.push(args);
+  bridge.send = () => {};
+
+  bridge.onMessage({
+    method: "thread-stream-following-status-requested",
+    version: 1,
+    sourceClientId: "vscode",
+    params: { conversationId: "thread-1", hostId: "local" }
+  });
+
+  assert.equal(bridge.pendingThreads.has("thread-1"), true);
+  assert.equal(events.at(-1)[1].status, "checking");
+  for (const timer of bridge.followTimers.values()) {
+    clearTimeout(timer);
+  }
+});
+
+test("every published event and snapshot carries a monotonic revision", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  const events = [];
+  bridge.connected = true;
+  bridge.revision = 0;
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map();
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+  bridge.followTimers = new Map();
+  bridge.emit = (...args) => events.push(args);
+
+  bridge.updateRuntime("desktop", {
+    conversationId: "thread-1",
+    change: { patches: [{ path: ["threadRuntimeStatus", "type"], value: "idle" }] }
+  });
+  const stale = bridge.snapshot();
+  bridge.updateRuntime("desktop", {
+    conversationId: "thread-1",
+    change: { patches: [{ path: ["threadRuntimeStatus", "type"], value: "active" }] }
+  });
+  const fresh = bridge.snapshot();
+
+  assert.equal(events[0][1].revision, 1);
+  assert.equal(events[1][1].revision, 2);
+  assert.equal(stale.revision, 1);
+  assert.equal(fresh.revision, 2);
+  assert.ok(fresh.revision > stale.revision);
+  assert.equal(stale.sessions[0].status, "idle");
+  assert.equal(fresh.sessions[0].status, "active");
+});
+
+test("a stale polled snapshot never rolls back a newer streamed update", async () => {
+  const { acceptsRuntimeRevision } = await import(
+    `data:text/javascript;base64,${Buffer.from(readFileSync(require.resolve("./runtime-revision.js"), "utf8")).toString("base64")}`
+  );
+  // The POST left at revision 4 and returned after the stream already delivered revision 6.
+  assert.equal(acceptsRuntimeRevision(6, 4), false);
+  assert.equal(acceptsRuntimeRevision(6, 6), true);
+  assert.equal(acceptsRuntimeRevision(6, 7), true);
+  assert.equal(acceptsRuntimeRevision(-1, 0), true);
+  // A payload from a bridge that predates revisions must still be applied.
+  assert.equal(acceptsRuntimeRevision(6, undefined), true);
+});
+
+test("agent mutations are allowed only for a bridge-confirmed safe status", async () => {
+  const { agentMutationAllowed } = await modulePromise;
+  const snapshotFor = (status) => ({ sessions: [{ threadId: "thread-1", status }] });
+
+  for (const status of ["idle", "notLoaded", "systemError"]) {
+    assert.equal(agentMutationAllowed(snapshotFor(status), "thread-1"), true, status);
+  }
+  for (const status of ["active", "checking", "unconfirmed", "", undefined]) {
+    assert.equal(agentMutationAllowed(snapshotFor(status), "thread-1"), false, String(status));
+  }
+  assert.equal(agentMutationAllowed({ sessions: [] }, "thread-1"), false);
+  assert.equal(agentMutationAllowed({}, "thread-1"), false);
+  assert.equal(agentMutationAllowed(snapshotFor("idle"), "thread-other"), false);
+});
+
+test("the agent mutation guard reads the bridge instead of the submitted form", async () => {
+  const actions = readFileSync(require.resolve("./actions.js"), "utf8");
+  const guard = actions.slice(actions.indexOf("function blockActiveAgent"));
+  const body = guard.slice(0, guard.indexOf("\n}\n"));
+
+  assert.match(body, /agentMutationAllowed\(getCodexBridge\(\)\.snapshot\(\)/);
+  assert.doesNotMatch(body, /runtime_status/);
+  assert.doesNotMatch(readFileSync(require.resolve("../app/teamflow-client.jsx"), "utf8"), /name="runtime_status"/);
+});
+
 test("registers as a follower after IPC initialization", async () => {
   const { CodexBridge } = await modulePromise;
   const bridge = Object.create(CodexBridge.prototype);
@@ -237,6 +369,7 @@ test("removes stale runtime state when a source stops following", async () => {
   const { CodexBridge } = await modulePromise;
   const bridge = Object.create(CodexBridge.prototype);
   const events = [];
+  bridge.revision = 0;
   bridge.knownThreads = new Set(["thread-1"]);
   bridge.runtimeBySource = new Map([
     ["desktop", new Map([["thread-1", { threadId: "thread-1", status: "active" }]])],
@@ -262,7 +395,7 @@ test("removes stale runtime state when a source stops following", async () => {
   assert.equal(bridge.aggregateRuntime().get("thread-1").status, "idle");
   assert.deepEqual(events.at(-1), [
     "event",
-    { type: "runtime", threadId: "thread-1", status: "idle" }
+    { type: "runtime", threadId: "thread-1", status: "idle", revision: 1 }
   ]);
 });
 
