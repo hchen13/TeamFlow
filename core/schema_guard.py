@@ -8,6 +8,16 @@ class SchemaCompatibilityError(RuntimeError):
     """A database carries migrations that this build does not know about."""
 
 
+def verify_installed_migrations(conn: sqlite3.Connection, migrations: Iterable[Any]) -> None:
+    installed = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'migrations'"
+    ).fetchone()
+    if not installed:
+        return
+    applied = {row[0] for row in conn.execute("SELECT id FROM migrations")}
+    verify_migration_compatibility(conn, migrations, applied)
+
+
 def verify_migration_compatibility(
     conn: sqlite3.Connection,
     migrations: Iterable[Any],

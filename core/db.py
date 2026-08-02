@@ -24,7 +24,7 @@ from .codex import (
 )
 from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
 from .migrations import MIGRATIONS
-from .schema_guard import verify_migration_compatibility
+from .schema_guard import verify_installed_migrations, verify_migration_compatibility
 from .workflow import (
     load_workflow_definition,
     load_workflow_definitions,
@@ -50,6 +50,7 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA busy_timeout = 30000")
     try:
+        verify_installed_migrations(conn, MIGRATIONS)
         with conn:
             yield conn
     finally:
