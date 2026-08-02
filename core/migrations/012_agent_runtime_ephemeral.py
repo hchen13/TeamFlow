@@ -4,6 +4,7 @@ import sqlite3
 
 
 ID = "012_agent_runtime_ephemeral"
+REPLACES = ("012_agent_health", "013_agent_session_name")
 
 
 def apply(conn: sqlite3.Connection) -> None:
@@ -11,4 +12,5 @@ def apply(conn: sqlite3.Connection) -> None:
     for column in ("status", "last_verified_at", "last_error", "session_name"):
         if column in columns:
             conn.execute(f"ALTER TABLE agents DROP COLUMN {column}")
-    conn.execute("DELETE FROM migrations WHERE id IN ('012_agent_health', '013_agent_session_name')")
+    placeholders = ", ".join("?" for _ in REPLACES)
+    conn.execute(f"DELETE FROM migrations WHERE id IN ({placeholders})", REPLACES)

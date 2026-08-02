@@ -24,7 +24,11 @@ from .codex import (
 )
 from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
 from .migrations import MIGRATIONS
-from .schema_guard import verify_installed_migrations, verify_migration_compatibility
+from .schema_guard import (
+    database_data_version,
+    verify_installed_migrations,
+    verify_migration_compatibility,
+)
 from .workflow import (
     load_workflow_definition,
     load_workflow_definitions,
@@ -51,8 +55,14 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     conn.execute("PRAGMA busy_timeout = 30000")
     try:
         verify_installed_migrations(conn, MIGRATIONS)
+        observed = database_data_version(conn)
         with conn:
             yield conn
+            # data_version only moves when another connection commits. If one did, this work was
+            # verified against a ledger that is no longer the one it would commit onto, so the
+            # check is repeated and a mismatch rolls the whole transaction back.
+            if database_data_version(conn) != observed:
+                verify_installed_migrations(conn, MIGRATIONS)
     finally:
         conn.close()
 

@@ -127,6 +127,7 @@ class TeamFlowDaemon:
         self.delivery_wakeup = threading.Event()
         self.active_sessions: set[str] = set()
         self.delivery_workers: dict[str, threading.Thread] = {}
+        self.consumer_failure: dict[str, Any] = {}
         self.monitor = DaemonMonitor(
             routes=self.routes,
             workers=self.workers,
@@ -134,6 +135,7 @@ class TeamFlowDaemon:
             stopping=self.stopping,
             sync_lock=self.sync_lock,
             app_key=self.app_key,
+            consumer_failure=self.consumer_failure,
             resolve=lambda name: globals()[name],
         )
         self.lark_workers = LarkWorkerRuntime(
@@ -148,6 +150,7 @@ class TeamFlowDaemon:
             process_event=self._process_event,
             stop_worker=lambda worker: self._stop_worker(worker),
             resolve=lambda name: globals()[name],
+            consumer_failure=self.consumer_failure,
         )
         self.workspace_synchronizer = WorkspaceSynchronizer(
             routes=self.routes,
@@ -728,6 +731,8 @@ def daemon_status() -> dict[str, Any]:
     except (OSError, ValueError, TimeoutError):
         return {
             "running": False,
+            "healthy": False,
+            "consumer_error": None,
             "pid": None,
             "apps": [],
             "workspaces": [],

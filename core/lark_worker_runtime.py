@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable
 
 from .lark_events import LarkEventContext
+from .schema_guard import SchemaCompatibilityError
 
 
 class LarkWorkerRuntime:
@@ -23,6 +24,7 @@ class LarkWorkerRuntime:
         process_event: Callable[[str], None],
         stop_worker: Callable[[dict[str, Any]], None],
         resolve: Callable[[str], Any],
+        consumer_failure: dict[str, Any],
     ) -> None:
         self.mp = mp
         self.event_queue = event_queue
@@ -35,6 +37,7 @@ class LarkWorkerRuntime:
         self.process_event = process_event
         self.stop_worker_facade = stop_worker
         self.resolve = resolve
+        self.consumer_failure = consumer_failure
         self.last_cleanup = 0.0
 
     def ensure_app(self, context: LarkEventContext) -> None:
@@ -93,6 +96,20 @@ class LarkWorkerRuntime:
             self.stop_worker_facade(worker)
 
     def consume_events(self) -> None:
+        try:
+            self._consume_events()
+        except SchemaCompatibilityError as error:
+            # Every listener path reads the global database, so this cannot be retried or routed
+            # around. Stop consuming and let the daemon report itself unhealthy rather than keep
+            # answering as if the board were still being watched.
+            self.consumer_failure["error"] = str(error)
+            self.stopping.set()
+            self.resolve("emit_log")(
+                self.resolve("style")("LISTENER FATAL", "1;31"),
+                fields={"reason": str(error).splitlines()[0]},
+            )
+
+    def _consume_events(self) -> None:
         while True:
             try:
                 message = self.event_queue.get(timeout=1)

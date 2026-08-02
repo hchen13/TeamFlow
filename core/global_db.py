@@ -14,6 +14,7 @@ from .schema_guard import SchemaCompatibilityError, verify_migration_compatibili
 
 
 EVENT_RETRY_WINDOW = timedelta(days=1)
+SCHEMA_RETRY_DELAY = 300
 
 
 def teamflow_home() -> Path:
@@ -178,14 +179,18 @@ def retry_lark_event(event_id: str, error: Exception) -> str:
             if row
             else datetime.min.replace(tzinfo=timezone.utc)
         )
+        # A workspace schema mismatch says nothing about the event. Letting it expire would drop
+        # board changes that a version rollback or a restore can still deliver, so it keeps
+        # retrying on a fixed bounded interval instead of aging out or spinning.
+        recoverable = isinstance(error, SchemaCompatibilityError)
         expired = datetime.now(timezone.utc) - received_at >= EVENT_RETRY_WINDOW
-        if expired or isinstance(error, SchemaCompatibilityError):
+        if expired and not recoverable:
             status = "failed"
             next_attempt_at = None
             processed_at = _now()
         else:
             status = "retry"
-            delay = min(2 ** max(attempts - 1, 0), 300)
+            delay = SCHEMA_RETRY_DELAY if recoverable else min(2 ** max(attempts - 1, 0), 300)
             next_attempt_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
             processed_at = None
         conn.execute(

@@ -567,7 +567,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     if args.action == "status":
         status = daemon_status()
         print_json(status)
-        return 0 if status["running"] else 1
+        # An older daemon answers without the health field; only a reported failure fails here.
+        return 0 if status["running"] and status.get("healthy", True) else 1
     if args.action == "stop":
         print_json(stop_daemon())
         return 0

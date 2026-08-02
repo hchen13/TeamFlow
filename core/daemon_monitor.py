@@ -19,6 +19,7 @@ class DaemonMonitor:
         stopping: threading.Event,
         sync_lock: threading.RLock,
         app_key: Callable[[LarkEventContext], str],
+        consumer_failure: dict[str, Any],
         resolve: Callable[[str], Any],
     ) -> None:
         self.routes = routes
@@ -27,6 +28,7 @@ class DaemonMonitor:
         self.stopping = stopping
         self.sync_lock = sync_lock
         self.app_key = app_key
+        self.consumer_failure = consumer_failure
         self.resolve = resolve
         self.recent: deque[tuple[int, str, dict[str, Any]]] = deque(maxlen=1000)
         self.sequence = 0
@@ -129,8 +131,13 @@ class DaemonMonitor:
                 }
                 for root, context in self.routes.items()
             ]
+        # A dead event consumer leaves the worker processes connected, so reporting only their
+        # sockets would keep claiming the board is watched when nothing drains the inbox.
+        consumer_error = self.consumer_failure.get("error")
         return {
             "running": True,
+            "healthy": not consumer_error,
+            "consumer_error": consumer_error,
             "pid": os.getpid(),
             "apps": apps,
             "workspaces": routes,
