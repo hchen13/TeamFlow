@@ -56,6 +56,34 @@ class CodexRuntimeHookTests(unittest.TestCase):
         record_runtime_event({**base, "hook_event_name": "SessionEnd"}, process_info=process_info)
         self.assertEqual(list((self.teamflow_home / "codex-runtime").glob("*.json")), [])
 
+    def test_a_compact_session_start_never_overwrites_the_running_turn_state(self) -> None:
+        process_info = self._process_info()
+        base = {"session_id": "thread-1", "cwd": "/workspace", "model": "gpt-5.6-sol"}
+        compact = {**base, "hook_event_name": "SessionStart", "source": "compact"}
+
+        record_runtime_event(compact, process_info=process_info)
+        self.assertFalse((self.teamflow_home / "codex-runtime").exists())
+
+        record_runtime_event({**base, "hook_event_name": "UserPromptSubmit"}, process_info=process_info)
+        record_runtime_event(compact, process_info=process_info)
+        self.assertEqual(self._only_record()["status"], "active")
+
+        record_runtime_event({**base, "hook_event_name": "Stop"}, process_info=process_info)
+        record_runtime_event(compact, process_info=process_info)
+        self.assertEqual(self._only_record()["status"], "idle")
+
+    def test_a_session_start_outside_a_compact_still_reports_idle(self) -> None:
+        process_info = self._process_info()
+        base = {"session_id": "thread-1", "cwd": "/workspace", "model": "gpt-5.6-sol"}
+
+        record_runtime_event({**base, "hook_event_name": "UserPromptSubmit"}, process_info=process_info)
+        for source in ("startup", "resume", "clear"):
+            record_runtime_event(
+                {**base, "hook_event_name": "SessionStart", "source": source},
+                process_info=process_info,
+            )
+            self.assertEqual(self._only_record()["status"], "idle")
+
     def test_ignores_events_without_a_codex_owner(self) -> None:
         record_runtime_event(
             {"session_id": "thread-1", "hook_event_name": "SessionStart"},

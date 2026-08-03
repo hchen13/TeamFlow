@@ -26,6 +26,10 @@ def record_runtime_event(
     event = str(hook.get("hook_event_name") or "")
     if event not in {*RUNTIME_STATUSES, "SessionEnd"}:
         return
+    # An automatic compact raises SessionStart in the middle of a running turn, so the
+    # session keeps whatever state it already had until that turn reaches Stop.
+    if event == "SessionStart" and str(hook.get("source") or "") == "compact":
+        return
     session_id = str(hook.get("session_id") or "").strip()
     if not session_id:
         return

@@ -13,12 +13,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PluginHookCommandTests(unittest.TestCase):
     def setUp(self) -> None:
-        hooks = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        self.hooks = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        hooks = self.hooks
         self.command = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
         self.runtime_commands = [
             hooks["hooks"][event][0]["hooks"][0]["command"]
             for event in ("SessionStart", "SessionEnd", "Stop")
         ]
+
+    def test_compaction_recovery_is_driven_by_session_start_alone(self):
+        events = self.hooks["hooks"]
+
+        self.assertNotIn("PostCompact", events)
+        self.assertIn("compact", events["SessionStart"][0]["matcher"])
+        self.assertGreaterEqual(events["SessionStart"][0]["hooks"][0]["timeout"], 60)
 
     def test_uses_the_configured_plugin_runtime_when_it_exists(self):
         with tempfile.TemporaryDirectory() as temporary:

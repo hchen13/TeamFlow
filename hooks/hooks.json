@@ -8,7 +8,7 @@
           {
             "type": "command",
             "command": "sh -c 'root=$1; if [ ! -f \"$root/hooks/session_runtime.py\" ]; then parent=$(dirname \"$root\"); root=; for candidate in \"$parent\"/*; do if [ -f \"$candidate/hooks/session_runtime.py\" ]; then root=$candidate; fi; done; fi; if [ -z \"$root\" ]; then exit 0; fi; exec uv run --project \"$root\" --locked python \"$root/hooks/session_runtime.py\"' teamflow-hook \"${PLUGIN_ROOT}\"",
-            "timeout": 15
+            "timeout": 60
           }
         ]
       }
@@ -20,19 +20,6 @@
             "type": "command",
             "command": "sh -c 'root=$1; if [ ! -f \"$root/hooks/session_runtime.py\" ]; then parent=$(dirname \"$root\"); root=; for candidate in \"$parent\"/*; do if [ -f \"$candidate/hooks/session_runtime.py\" ]; then root=$candidate; fi; done; fi; if [ -z \"$root\" ]; then exit 0; fi; exec uv run --project \"$root\" --locked python \"$root/hooks/session_runtime.py\"' teamflow-hook \"${PLUGIN_ROOT}\"",
             "timeout": 3
-          }
-        ]
-      }
-    ],
-    "PostCompact": [
-      {
-        "matcher": "manual|auto",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'root=$1; if [ ! -f \"$root/hooks/user_prompt_submit.py\" ]; then parent=$(dirname \"$root\"); root=; for candidate in \"$parent\"/*; do if [ -f \"$candidate/hooks/user_prompt_submit.py\" ]; then root=$candidate; fi; done; fi; if [ -z \"$root\" ]; then echo \"TeamFlow hook runtime is unavailable; reinstall the plugin and restart Codex.\" >&2; exit 1; fi; exec uv run --project \"$root\" --locked python \"$root/hooks/user_prompt_submit.py\"' teamflow-hook \"${PLUGIN_ROOT}\"",
-            "timeout": 60,
-            "statusMessage": "Preparing TeamFlow context recovery"
           }
         ]
       }

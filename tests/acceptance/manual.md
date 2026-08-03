@@ -63,7 +63,7 @@ ws=/absolute/path/to/test-workspace
 4. PM、技术负责人和 QA 分别绑定不同 Codex Session。
 5. 当前插件代码已刷新到本机插件缓存，并重启 Codex Desktop。
 6. TeamFlow MCP 可在 Agent Session 中调用。
-7. `UserPromptSubmit` 与 `PostCompact` Hook 已授权。
+7. `UserPromptSubmit` 与 `SessionStart` Hook 已授权。
 
 终端一启动后台调度程序：
 
@@ -315,21 +315,37 @@ DISPATCH NOT-REQUIRED reason="当前变更不通知 Agent"
 
 ## 11. 用例七：压缩恢复
 
+手动压缩与真实自动压缩必须分别验收，两者都通过才算通过。
+
+场景 A：手动压缩
+
 1. 选择一个已经入职的 Agent Session。
 2. 【人工】执行 `/compact`。
-3. 在下一条用户消息或 TeamFlow 派发后观察后台。
+3. 先不要发送任何新消息，直接观察后台。
 4. 再调用 `get_assignment`。
 
-通过条件：
+场景 B：turn 执行中的自动压缩
 
-- `PostCompact` 被授权并实际触发。
-- 后台先出现 `AGENT CONTEXT RECOVERY PENDING`。
-- 下一条真实 turn 注入恢复上下文后出现 `AGENT CONTEXT RESTORED`。
-- Session 中没有可见的重复入职消息。
-- `inspect-agent-context` 显示 `Evidence kind: recovery` 和实际 turn ID。
+1. 给一个已入职 Agent 派发足以触发自动压缩的长任务。
+2. 【人工】等待该 turn 在执行过程中自动压缩，全程不发送新消息。
+3. 观察从压缩发生到该 turn 结束之间的后台与 UI。
+4. turn 结束后再调用 `get_assignment`。
+
+共同通过条件：
+
+- `SessionStart` 被授权并在压缩后实际触发；插件清单中不再存在 `PostCompact`。
+- 后台在同一个压缩边界内先出现 `AGENT CONTEXT RECOVERY PENDING`，紧接着出现 `AGENT CONTEXT RESTORED`，其间不需要任何新的用户消息。
+- Session 中没有可见的入职或恢复消息。
+- `inspect-agent-context` 显示 `Evidence kind: recovery`，并最终记录真实 turn ID。
 - MCP 仍识别同一职责。
+- UI 不停留在“待恢复”。
 
-若没有任何 Hook 日志，也没有授权提示，应判为失败，不得把“执行了 `/compact`”本身判为通过。
+场景 B 追加通过条件：
+
+- 压缩后该 turn 继续执行期间 UI 仍显示“正在运行”，不得变成“空闲”。
+- 恢复上下文对同一个 turn 的后续模型调用生效，不需要等到下一条用户消息。
+
+若没有任何 Hook 日志，也没有授权提示，应判为失败，不得把“执行了 `/compact`”或“发生过自动压缩”本身判为通过。若即时恢复没有发生、直到下一条 `UserPromptSubmit` 才恢复，同样记为失败并保留后台日志。
 
 ## 12. 用例八：UI 真实状态
 

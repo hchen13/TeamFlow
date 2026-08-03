@@ -2822,29 +2822,33 @@ class LarkEventsTest(unittest.TestCase):
             )
             self.assertEqual(repeated_prompt_hook.stdout, "")
             compact_hook = subprocess.run(
-                ["python3", str(ROOT / "hooks" / "user_prompt_submit.py")],
+                ["python3", str(ROOT / "hooks" / "session_runtime.py")],
                 input=json.dumps({
                     "session_id": "session_hook",
                     "cwd": self.workspace,
-                    "turn_id": "turn_compact",
-                    "hook_event_name": "PostCompact",
-                    "trigger": "manual",
+                    "hook_event_name": "SessionStart",
+                    "source": "compact",
                 }),
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            self.assertEqual(compact_hook.stdout, "")
-            compacted = agent_context(
+            recovery_output = json.loads(compact_hook.stdout)
+            self.assertEqual(
+                recovery_output["hookSpecificOutput"]["hookEventName"],
+                "SessionStart",
+            )
+            self.assertIn(
+                "会话压缩后恢复",
+                recovery_output["hookSpecificOutput"]["additionalContext"],
+            )
+            restored = agent_context(
                 self.workspace,
                 session_id="session_hook",
                 consume=False,
             )
-            self.assertEqual(
-                compacted["context_status"],
-                "recovery_pending",
-            )
-            recovery_hook = subprocess.run(
+            self.assertEqual(restored["context_status"], "injected")
+            settled_prompt_hook = subprocess.run(
                 ["python3", str(ROOT / "hooks" / "user_prompt_submit.py")],
                 input=json.dumps({
                     "session_id": "session_hook",
@@ -2856,15 +2860,7 @@ class LarkEventsTest(unittest.TestCase):
                 text=True,
                 check=True,
             )
-            recovery_output = json.loads(recovery_hook.stdout)
-            self.assertEqual(
-                recovery_output["hookSpecificOutput"]["hookEventName"],
-                "UserPromptSubmit",
-            )
-            self.assertIn(
-                "会话压缩后恢复",
-                recovery_output["hookSpecificOutput"]["additionalContext"],
-            )
+            self.assertEqual(settled_prompt_hook.stdout, "")
 
             async def call_assignment():
                 parameters = StdioServerParameters(
