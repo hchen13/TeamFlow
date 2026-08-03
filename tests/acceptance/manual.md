@@ -321,8 +321,9 @@ DISPATCH NOT-REQUIRED reason="当前变更不通知 Agent"
 
 1. 选择一个已经入职的 Agent Session。
 2. 【人工】执行 `/compact`。
-3. 先不要发送任何新消息，直接观察后台。
-4. 再调用 `get_assignment`。
+3. 确认压缩命令结束；此时没有后续模型请求，不要求后台立即恢复。
+4. 发送一条消息，让 Agent 调用 `get_assignment`。
+5. 观察该消息对应的 turn 与后台日志。
 
 场景 B：turn 执行中的自动压缩
 
@@ -334,18 +335,23 @@ DISPATCH NOT-REQUIRED reason="当前变更不通知 Agent"
 共同通过条件：
 
 - `SessionStart` 被授权并在压缩后实际触发；插件清单中不再存在 `PostCompact`。
-- 后台在同一个压缩边界内先出现 `AGENT CONTEXT RECOVERY PENDING`，紧接着出现 `AGENT CONTEXT RESTORED`，其间不需要任何新的用户消息。
+- 后台在恢复边界内先出现 `AGENT CONTEXT RECOVERY PENDING`，紧接着出现 `AGENT CONTEXT RESTORED`。
 - Session 中没有可见的入职或恢复消息。
 - `inspect-agent-context` 显示 `Evidence kind: recovery`，并最终记录真实 turn ID。
 - MCP 仍识别同一职责。
 - UI 不停留在“待恢复”。
+
+场景 A 追加通过条件：
+
+- `/compact` 与下一条消息之间没有模型请求时，允许暂时没有恢复日志。
+- 下一条消息对应的 rollout 必须先包含不可见的 TeamFlow 恢复上下文，再包含用户消息；两者属于同一个 turn。
 
 场景 B 追加通过条件：
 
 - 压缩后该 turn 继续执行期间 UI 仍显示“正在运行”，不得变成“空闲”。
 - 恢复上下文对同一个 turn 的后续模型调用生效，不需要等到下一条用户消息。
 
-若没有任何 Hook 日志，也没有授权提示，应判为失败，不得把“执行了 `/compact`”或“发生过自动压缩”本身判为通过。若即时恢复没有发生、直到下一条 `UserPromptSubmit` 才恢复，同样记为失败并保留后台日志。
+完成各场景对应的恢复触发步骤后，若没有任何 Hook 日志，也没有授权提示，应判为失败，不得把“执行了 `/compact`”或“发生过自动压缩”本身判为通过。场景 B 若即时恢复没有发生、直到后续新的用户消息才恢复，同样记为失败并保留后台日志。
 
 ## 12. 用例八：UI 真实状态
 
