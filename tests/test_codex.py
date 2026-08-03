@@ -259,11 +259,13 @@ class CodexTurnTest(unittest.TestCase):
         started = threading.Event()
         calls = {"read": 0}
         result_holder = {}
+        turn_start_params = {}
 
         def call(process_value, request_id, method, params, *, pending=None):
             if method == "thread/resume":
                 return {"thread": {"status": {"type": "idle"}}}
             if method == "turn/start":
+                turn_start_params.update(params)
                 return {"turn": {"id": "turn_app"}}
             raise AssertionError(method)
 
@@ -316,6 +318,11 @@ class CodexTurnTest(unittest.TestCase):
         self.assertEqual(stopped["turn_id"], "turn_app")
         self.assertEqual(stopped["status"], "interrupted")
         self.assertEqual(result_holder["turn"]["status"], "interrupted")
+        self.assertEqual(turn_start_params["approvalPolicy"], "never")
+        self.assertEqual(
+            turn_start_params["sandboxPolicy"],
+            {"type": "workspaceWrite"},
+        )
         interrupt = next(
             call.args[1]
             for call in send.call_args_list

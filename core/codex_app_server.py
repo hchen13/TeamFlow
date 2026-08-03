@@ -33,6 +33,8 @@ class CodexAppServerRuntime:
         client_message_id: str,
         on_started: Callable[[str], None] | None,
         stop_event: threading.Event | None,
+        approval_policy: str,
+        sandbox_policy: dict[str, Any],
     ) -> dict[str, Any]:
         process = self.resolve("_start_app_server")()
         pending: list[dict[str, Any]] = []
@@ -57,6 +59,8 @@ class CodexAppServerRuntime:
                 {
                     "threadId": thread,
                     "clientUserMessageId": client_message_id,
+                    "approvalPolicy": approval_policy,
+                    "sandboxPolicy": sandbox_policy,
                     "input": [
                         {
                             "type": "text",

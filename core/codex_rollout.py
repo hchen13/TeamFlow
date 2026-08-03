@@ -59,6 +59,18 @@ def codex_thread_settings(thread: dict[str, Any]) -> dict[str, str]:
     return fallback
 
 
+def codex_background_turn_permissions(thread_id: str) -> dict[str, Any]:
+    sandbox_type = _codex_persisted_sandbox_type(thread_id)
+    if sandbox_type in {"disabled", "dangerFullAccess", "danger-full-access"}:
+        sandbox_policy = {"type": "dangerFullAccess"}
+    else:
+        sandbox_policy = {"type": "workspaceWrite"}
+    return {
+        "approvalPolicy": "never",
+        "sandboxPolicy": sandbox_policy,
+    }
+
+
 def codex_developer_context_evidence(
     thread_id: str,
     expected_contexts: dict[str, str],
@@ -217,12 +229,7 @@ def _reverse_lines(path: Path, *, chunk_size: int = 65536) -> Iterator[bytes]:
 
 def _codex_rollout_path(thread_id: str) -> Path | None:
     codex_home = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
-    state_databases = sorted(
-        codex_home.glob("state_*.sqlite"),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    for database in state_databases:
+    for database in _codex_state_databases(codex_home):
         try:
             with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as conn:
                 row = conn.execute(
@@ -243,6 +250,45 @@ def _codex_rollout_path(thread_id: str) -> Path | None:
         if match is not None:
             return match
     return None
+
+
+def _codex_persisted_sandbox_type(thread_id: str) -> str | None:
+    codex_home = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
+    for database in _codex_state_databases(codex_home):
+        try:
+            with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as conn:
+                row = conn.execute(
+                    "SELECT sandbox_policy FROM threads WHERE id = ?",
+                    (thread_id,),
+                ).fetchone()
+        except (OSError, sqlite3.Error):
+            continue
+        if row is None:
+            continue
+        try:
+            policy = json.loads(str(row[0] or ""))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(policy, dict):
+            return None
+        sandbox_type = str(policy.get("type") or "").strip()
+        return sandbox_type or None
+    return None
+
+
+def _codex_state_databases(codex_home: Path) -> list[Path]:
+    databases = [
+        *codex_home.glob("state_*.sqlite"),
+        *(codex_home / "sqlite").glob("state_*.sqlite"),
+    ]
+
+    def modified_at(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return -1
+
+    return sorted(set(databases), key=modified_at, reverse=True)
 
 
 def _parse_timestamp(value: Any) -> datetime | None:

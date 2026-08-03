@@ -28,6 +28,7 @@ from .codex_ipc import (
 )
 from .codex_permissions import require_teamflow_mcp_authorization
 from .codex_rollout import (
+    codex_background_turn_permissions,
     codex_delivery_error_is_terminal,
     codex_developer_context_evidence,
     codex_thread_error,
@@ -187,12 +188,15 @@ def _run_codex_app_server_turn(
     on_started: Callable[[str], None] | None,
     stop_event: threading.Event | None,
 ) -> dict[str, Any]:
+    permissions = codex_background_turn_permissions(thread)
     return _APP_SERVER_RUNTIME.run_turn(
         thread,
         prompt,
         client_message_id=client_message_id,
         on_started=on_started,
         stop_event=stop_event,
+        approval_policy=str(permissions["approvalPolicy"]),
+        sandbox_policy=dict(permissions["sandboxPolicy"]),
     )
 
 
