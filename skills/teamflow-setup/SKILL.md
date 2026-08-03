@@ -31,7 +31,7 @@ PROJECT_ROOT=/absolute/path/to/project
    drive.file.bitable_field_changed_v1
    ```
 
-4. **在 Codex 中安装并启用 TeamFlow 插件**，并在插件页信任 `UserPromptSubmit`、`PostCompact` 两个 Hook。插件页没有逐 MCP 工具授权开关；后台 MCP 自动批准在第 8 步通过 TeamFlow UI 或 `authorize-codex-tools` 配置。
+4. **在 Codex 中安装并启用 TeamFlow 插件**，并在插件页信任 TeamFlow 列出的**全部** Hook，当前为 `SessionStart`、`SessionEnd`、`UserPromptSubmit`、`Stop`。少信任任何一个都会让职责注入或会话状态上报失效；以插件页实际列出的为准。插件页没有逐 MCP 工具授权开关；后台 MCP 自动批准在第 8 步通过 TeamFlow UI 或 `authorize-codex-tools` 配置。
 5. **应用密钥由用户从开放平台取得并 export 到环境变量**。CLI 只接收环境变量名，不接收密钥本身。
 
 ## 1. 初始化工作区

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from core.agent_context_runtime import AgentContextRuntime
 from core.agent_runtime import (
@@ -18,6 +19,7 @@ from core.agent_runtime import (
 )
 from core.config import resolve_workspace_paths
 from core.db import connect, init_workspace, register_agent
+from core.global_db import register_workspace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +50,7 @@ class FakeDaemon:
         self.logs: list[str] = []
         self.calls: list[str] = []
         self.failing: set[str] = set()
+        self.down = False
         self.before_confirm = None
         self.runtime = AgentContextRuntime(
             workspaces=lambda: [workspace],
@@ -63,7 +66,7 @@ class FakeDaemon:
     def __call__(self, payload: dict, *, timeout: float = 2) -> dict:
         action = payload["action"]
         self.calls.append(action)
-        if action in self.failing:
+        if self.down or action in self.failing:
             raise OSError("TeamFlow daemon is unavailable")
         if action == "assignment_context":
             return self.runtime.assignment(
@@ -96,8 +99,14 @@ class HookContextRecoveryTest(unittest.TestCase):
         (ROOT / "tmp").mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(prefix="hook-recovery-", dir=ROOT / "tmp")
         self.addCleanup(self.temp.cleanup)
+        self.home = tempfile.TemporaryDirectory(prefix="hook-recovery-home-", dir=ROOT / "tmp")
+        self.addCleanup(self.home.cleanup)
+        home_env = patch.dict(os.environ, {"TEAMFLOW_HOME": self.home.name})
+        home_env.start()
+        self.addCleanup(home_env.stop)
         self.workspace = self.temp.name
         init_workspace(self.workspace)
+        register_workspace(self.workspace, enabled=True)
         threads = patch("core.db.read_codex_thread", side_effect=codex_thread)
         threads.start()
         self.addCleanup(threads.stop)
@@ -239,12 +248,62 @@ class HookContextRecoveryTest(unittest.TestCase):
         retried = json.loads(self.run_hook(user_prompt_submit, self.prompt()))
         self.assertIn("会话压缩后恢复", retried["hookSpecificOutput"]["additionalContext"])
 
-    def test_an_unreachable_daemon_at_the_compact_boundary_changes_nothing(self):
+    def test_an_unreachable_daemon_still_restores_a_registered_agent(self):
         self.onboard()
-        self.daemon.failing = {"compact_assignment_context"}
+        self.daemon.down = True
+
+        output = json.loads(self.run_hook(session_runtime, self.compact_start()))
+
+        specific = output["hookSpecificOutput"]
+        self.assertEqual(specific["hookEventName"], "SessionStart")
+        self.assertIn("会话压缩后恢复", specific["additionalContext"])
+        self.assertEqual(self.status(), "injected")
+
+    def test_an_unregistered_session_is_untouched_when_the_daemon_is_down(self):
+        self.daemon.down = True
+
+        output = self.run_hook(session_runtime, self.compact_start(session_id="not-teamflow"))
+
+        self.assertEqual(output, "")
+
+    def test_the_fallback_only_recovers_an_agent_that_was_already_onboarded(self):
+        self.daemon.down = True
 
         self.assertEqual(self.run_hook(session_runtime, self.compact_start()), "")
-        self.assertEqual(self.daemon.calls, ["compact_assignment_context"])
+        self.assertEqual(self.status(), "pending")
+
+    def test_a_disabled_workspace_is_not_recovered_without_the_daemon(self):
+        self.onboard()
+        register_workspace(self.workspace, enabled=False)
+        self.daemon.down = True
+
+        self.assertEqual(self.run_hook(session_runtime, self.compact_start()), "")
+        self.assertEqual(self.status(), "injected")
+
+    def test_the_fallback_keeps_the_assignment_revision_guard(self):
+        self.onboard()
+        self.daemon.down = True
+        served = teamflow_hook.local_request()
+
+        def guarded(payload, *, timeout=2):
+            if payload["action"] == "confirm_assignment_context":
+                self.bump_revision()
+            return served(payload, timeout=timeout)
+
+        with patch.object(session_runtime, "local_request", lambda: guarded):
+            output = json.loads(self.run_hook(session_runtime, self.compact_start()))
+
+        self.assertIn("会话压缩后恢复", output["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(self.status(), "recovery_pending")
+
+    def test_the_daemon_remains_the_normal_recovery_path(self):
+        self.onboard()
+        fallback = Mock()
+
+        with patch.object(session_runtime, "local_request", fallback):
+            self.run_hook(session_runtime, self.compact_start())
+
+        fallback.assert_not_called()
         self.assertEqual(self.status(), "injected")
 
 
