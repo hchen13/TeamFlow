@@ -43,7 +43,7 @@
 2. **收敛为一个方案。** TL 汇总三份输入，形成一个明确方案，写清采纳理由、被否方案的取舍点和已识别风险。
 3. **单一实现者。** 只指定**一个实现 SubAgent** 写入该任务的 worktree。同一时刻只有这一个写入者。
 4. **对抗式评审。** 指定**另一个独立、只读**的 Review SubAgent，审查正确性、回归风险、简洁性和 code smell。评审者不得是实现者，也不得在评审期间获得该 worktree 的写入权限。
-5. **回原实现者修复。** 确认的问题交回**原实现者**修复，再复审；循环到 TL 认为可以提交为止。中途换写入者要显式交接（见 6.2 第 3 条）。
+5. **回原实现者修复。** 确认的问题交回**原实现者**修复，再复审；循环到 TL 认为可以提交为止。中途换写入者要显式交接（见 6.1 不变量 1、2）。
 
 这里的分析、实现和 Review SubAgent 是当前 harness 内部的临时工作者，不是 TeamFlow 看板职责，不注册 Agent，也不自行调用 TeamFlow MCP 改卡。TL 对它们的结果和最终提交负责。正式高风险任务若当前 harness 无法提供独立只读 reviewer，应 `block_task` 说明缺失的质量门槛；不要把同一人的自查伪装成独立评审。
 
@@ -76,11 +76,11 @@ QA 是**质量负责人，不是实现者**。QA 不修改产品实现；发现�
 - 发现问题回到**原 TestEngineer** 修改，不换人。
 - **通过审查后才执行测试。** 先跑未审查的测试等于用未验证的尺子量东西。
 - agentic 用例至少写清前置条件、自然语言步骤、期望结果、证据要求和清理方式；执行时派一个新的隔离 SubAgent 只读取该用例和必要项目事实，QA 根据产出的原始证据判定，不让执行者自行宣布通过。
-- 需要持久化的新测试资产在独立测试分支提交。该提交会改变候选内容：QA 应阻塞并把测试资产 commit 交给 PM/TL，TL 集成后产出新的 candidate SHA，QA 再针对新 SHA 执行最终验证。不得在旧 candidate SHA 上写完测试后仍宣布最终通过。
+- 需要持久化的新测试资产提交在 `qa/<task-id>-tests` 上，得到 `Q = 产品实现 + 测试`。**最终结论必须针对 Q**，不得在测试提交之前的旧 candidate SHA 上宣布通过。Q 验证通过即成为新的可晋升候选，不需要为了把测试并回任务分支而阻塞交回 TL；完整规则见 6.3。
 
 **结论有效期**
 
-候选内容一旦变化，既有 QA 结论**立即失效**，必须针对新 commit 重新验证。不要复用旧 SHA 上的通过结论。
+候选内容一旦变化，既有 QA 结论**立即失效**，必须针对新 commit 重新验证。不要复用旧 SHA 上的通过结论。目标分支前移不改变原 candidate，但集成后产生的 integrated SHA 必须重新 QA（见 6.4）。
 
 ## 4. Design
 
@@ -104,64 +104,61 @@ QA 是**质量负责人，不是实现者**。QA 不修改产品实现；发现�
 - 非 PM 不得修改 `role` 或跨职责转派。
 - `result_evidence` 是替换字段，不是追加日志。每次 `submit_task` 或 `review_task` 前先读取当前值，把已有证据与本次新增证据按小节合并后整体传回；不得丢掉 candidate SHA、QA 验证 SHA 或既有结论。
 - `approve` 会清空 `role`、`agent`、`agent_id`、`progress`、`next_action`；终态卡片上读不到这些字段，追溯要靠累计的 `result_evidence` 与飞书字段修改历史。
-- `review` 上的评审结论只能由 `review_task` 给出（PM 另可在 `review` 上 `block_task` 等待项目决策人，或 `cancel_task` 作废）。**不存在**「转交 TL」的专用 decision，也不存在 `promote` / `preflight` / `gate` 一类动作或状态。
-- 工作已完成时直接 `submit_task` 一并提交 `progress`、`next_action`、`result_evidence`，不要先做一次仅为提交服务的 `update_task`。
+- `review` 只由 PM 处置：最终验收、真实返工和转交 QA 分别使用 `review_task(approve)`、`review_task(rework)`、`review_task(send_to_qa)`；`rework` 只代表真实返工。阶段性交付已经确认、但同一张卡仍需其他职责继续执行正向后续工作时，PM 使用通用的 `route_task(role=…)` 将卡片带回 `ready`，并清空 `agent` / `agent_id`。PM 另可在 `review` 上 `block_task` 等待项目决策人，或 `cancel_task` 作废。不存在 `promote` / `preflight` / `gate` 一类专用动作或状态。
+- 工作已完成时直接 `submit_task` 一并提交 `progress`、`next_action`、`result_evidence`，不要先做一次仅为提交服务的 `update_task`。**例外**：记录已经发生的不可逆 Git 事实（如目标分支更新后的精确 SHA、刚建或刚删的 branch/worktree）必须在事实发生后立即 `update_task` 落盘，那不是「仅为提交服务」。
 
 ## 6. Git 协作协议
 
-**本节只属于 `software-development` 协作模式，不是跨 Workflow 规则。本轮不由程序强制**——违反不会被 MCP 拒绝，但会破坏交接可追溯性和 QA 结论的有效性。
+**本节只属于 `software-development` 协作模式，本轮不由程序强制**——违反不会被 MCP 拒绝，但会破坏交接可追溯性和 QA 结论的有效性。它只规定 **Git 安全不变量、角色责任和交接内容**；看板状态、卡片写法和合法动作一律以 `get_assignment` 的 workflow contract 与 `get_task.available_actions` 为准。本节**不规定必须创建什么类型的卡**，也不用卡片模拟锁、队列、事务或回调。
 
-### 6.1 优先级
+### 6.1 边界与不变量
 
-用户项目已有 `AGENTS.md`、`CONTRIBUTING.md` 或其他明确 Git 规范时，**优先遵循项目规范**。只有在没有既有规范时，才采用下面的 TeamFlow 默认协议。两者冲突时以项目规范为准，并在卡片里说明依据。
+- **commit SHA 是交付单位。** branch 与 worktree 都是可丢弃的临时现场；未提交的工作树内容不构成交接。
+- **项目根 checkout 保持稳定**，不作为日常实现目录。
+- 项目已有 `AGENTS.md`、`CONTRIBUTING.md` 等 Git 规范**优先**，可以覆盖分支命名、目标分支、PR/merge 方式和 worktree 路径，但**不能覆盖**下列五条：
+  1. 一个共享 ref 同一时刻只有一个写入者。
+  2. 跨 Agent 只交接**已提交的准确 SHA**。
+  3. QA 结论绑定它实际验证的那个 SHA。
+  4. 不 force、不 rebase 已经交接过的历史。
+  5. 同一目标分支一次只允许一个集成者更新。
+- 冲突时在卡片里写明依据。默认只处理本地对象；远端 push / PR / 远端 branch 删除服从项目规范。
 
-### 6.2 默认协议
+### 6.2 TL 开发与交接
 
-1. **项目根 checkout 保持稳定**，不作为 Agent 的日常写入目录。
-2. **每张需要修改仓库的任务卡使用一个短期任务分支和一个隔离 worktree**，worktree 位于项目根目录内。默认路径 `.teamflow/worktrees/<task-id>/`；分支与目录命名都应包含稳定 task ID，便于从卡片反查工作现场。
-3. **一个任务分支同一时刻只有一个写入者。** 规划、实现评审和 QA 验证默认只读；QA 新增测试资产时使用独立测试分支上的单一 TestEngineer 写入者。更换写入者必须显式交接，不能靠默契。
-4. **交接必须基于干净工作树和明确 commit SHA。** 提交保持单一目的，不混入无关改动，不随意重写已共享的历史。
-5. **默认只保留一个长期目标分支**，代表已集成、已验证、可发布的状态。实际发布由 tag / version / deployment record 表示，不靠额外长期分支。项目既有规则另有 dev / release 分支时服从项目规则。
-6. **多个经 PM 初审通过的任务可以组成一个临时 integration/validation gate**，流程见 6.3。
-7. **需求卡与技术协调卡分层写作。** 需求卡只写业务目标、范围和验收标准，不塞入 MCP、daemon、worktree 等 TeamFlow 内部术语。gate、promotion 等技术协调卡和结果证据可以写分支、commit SHA 和测试信息，但它们仍在同一看板中，对有看板权限的人可见；这是写作约定，不是访问控制。
-8. **不把这些 Git 规则上升为跨 Workflow 规则**，也不抽取成全局 reference。
+- **认领之后**才从目标分支基准创建独立的 task branch 与 worktree；创建它们不产生 commit。
+- 实现、内部评审、修复、提交都在自己的 worktree 内完成，同一时刻只有一个写入者。
+- 交接时必须给出这些事实：**candidate SHA**、目标分支及其起始 SHA、branch 与 worktree 位置、工作树是否干净、验证证据、尚需处理的风险。
+- 交接之后**冻结该 candidate**；要继续写，等返工回来再说。
 
-### 6.3 integration/validation gate
+### 6.3 QA 与测试资产
 
-**职责分工**
+- 在**独立的 worktree / session** 中验证**准确的 candidate SHA**，证据写明验证所用的 SHA 与现场位置。
+- 不需要写入时，detached 现场就够了。
+- 需要沉淀测试资产时创建 QA 测试分支并提交，**新的 tip 成为新的 candidate**；不得把测试资产只留在 detached 现场。
+- 结论失败时交回 PM，由 PM 转给 TL。**TL 必须在包含 QA 测试提交的历史之上修复**，形成新 candidate，再走一次 fresh QA。
+- candidate 一旦变化，旧 QA 结论立即失效。
 
-- PM 决定业务优先级和纳入哪些任务。
-- TL 从最新目标分支创建临时 merge-group 候选分支，按依赖顺序合入各任务分支。
-- 冲突在任务分支或候选分支解决，**不直接污染目标分支**。
-- TL 运行技术 preflight，提交明确的 candidate SHA。
-- QA 从**准确的 candidate SHA** 建独立 worktree，验证这一批任务**组合后**的真实状态，而不是逐个任务分支的状态。
-- **candidate 发生任何变化，QA 结论作废。**
-- QA 通过后由 TL 把该准确候选晋升到目标分支；PM 再关闭 gate 卡以及它覆盖的功能卡。
-- QA 失败时目标分支保持不变，PM 把受影响任务打回；修复后重建候选。
-- QA 期间目标分支前移时，同样重建候选并重新执行要求的验证。
+### 6.4 并发与串行集成
 
-**卡片流转**
+- 多个功能的 branch / worktree 可以**并行**开发与 QA，各自证据绑定各自的 candidate SHA。
+- **同一目标分支同一时刻只允许一个候选进入集成阶段。** 其余候选保持它们原本的看板状态等待——本节不定义队列，也不用卡片模拟锁。
+- **正常末段**：QA `submit_task(passed)` → 卡片进 `review`，PM 核验证据后用 `route_task(role="tl")` 把同一张卡带回 `ready`（`agent` / `agent_id` 被清空）→ TL `claim_task` 进 `in_progress` → 执行 Integration & Cleanup → TL `submit_task(completed)` → `review` → PM `approve` → `done`。路由之前，PM 把 **candidate SHA、目标分支及其当前 SHA、QA 证据和下一步**写进现有字段（`result_evidence` / `next_action` 等），不发明新字段。
+- **目标分支未变化且候选可 fast-forward 时**：由 TL 做 ff-only 更新，完成后核对目标分支 HEAD **精确等于**已 QA 的 candidate；不相等就不算成功，交回 PM。
+- **目标分支已前移、多个候选需要合并、或出现冲突时**：由 TL 从**当前目标 tip** 建独立 integration branch 与 worktree，在那里**真正 merge** 候选并解决冲突，**必须保留候选为祖先**，得到新的 integrated SHA。
+- **integrated SHA 是新的 candidate，旧 QA 结论随即失效**：PM 用 `send_to_qa` 走一次 fresh QA，通过后再 `route_task(role="tl")` 交回 TL 完成**不改变内容**的最终 ff-only 晋升与清理。
+- 目标分支更新之后**只核对 SHA**，不再做可能失败的业务验收——验收必须发生在更新之前。
+- 不在目标分支上解决冲突，不 force，不重写共享历史。
 
-只能用现有状态机与现有 MCP 工具表达，**不新增状态、字段或 MCP**。使用一张 gate 卡验证候选；QA 通过后另建一张短期 promotion 卡，避免把成功晋升伪装成 `rework`。`dependencies` 用自由文本写 gate 与候选任务编号。
+> 当前 runtime 无法重新发现处于等待状态的 `review` 卡，等待中的候选只能靠 PM 后续主动复核推进；这是已知的 runtime 缺口，不在本节用额外卡片去补。
 
-1. PM 创建 gate 卡并路由 TL。`task_type` 取 `development`；若本质是发布检查则取 `validation`。卡片写清批次范围、gate 判据和候选任务编号。
-2. TL 认领，从最新目标分支构建 merge-group，运行 preflight，提交候选分支、candidate SHA、目标分支基准 SHA 和原始命令输出。
-3. PM 业务初审后 `send_to_qa`。传入的 `result_evidence` 必须保留 TL 证据并追加 PM 初审小节。
-4. QA 认领，在独立 worktree 验证准确 candidate SHA。提交时保留已有证据并追加 QA 的 worktree、验证 SHA、命令、输出和 `passed` / `failed` 结论。
-5. QA 失败时，PM 才对 gate 使用 `rework` 路由 TL 修复；修复后重建候选并重走 QA。
-6. QA 通过时，gate 保持 `review`。PM 创建 `chore` 类型 promotion 卡，写入 gate ID、准确 candidate SHA、目标分支当前基准和晋升验收标准，再路由 TL；成功路径不对 gate 调用 `rework`。
-7. TL 认领 promotion 卡。若 candidate 已变化或目标分支已前移，阻塞并要求 PM 执行下方的失效恢复流程；否则只晋升 QA 验证过的准确 SHA，提交目标分支新 SHA、tag 或发布记录。
-8. PM 先验收 promotion 卡，再在同一 turn 验收 gate 和它覆盖的功能卡。每张卡的最终 `result_evidence` 都保留既有技术/QA 证据并追加关闭结论。
+### 6.5 清理与异常
 
-**失败与异常分支**
-
-- QA `outcome="failed"` 时，PM 用 `rework` + `role="tl"` 让 TL 修复；这条分支上 `rework` 与语义一致。
-- QA 新增了需要持久化的测试资产时，先 `block_task` 并提交测试资产 commit。PM 对 gate 使用 `route_task` 的 `resume` 路由 TL；TL 集成测试资产、重建 candidate 并提交后，PM 再 `send_to_qa`，由 QA 对新 SHA 完整重验。
-- promotion 阶段发现 candidate 变化或目标分支前移时，PM 先取消已阻塞的旧 promotion 卡，再对仍在 `review` 的 gate 使用 `rework` 路由 TL。TL 重建 candidate 后必须重新经过 PM 初审与 QA；QA 再次通过后，PM 创建新的 promotion 卡。旧 QA 结论不得沿用。
-- 执行中受阻：TL / QA 用 `block_task`（`waiting_on` 只能填 `pm`）；PM 用 `route_task` 的 `resume` 规则解除，需传 `role`。
-- PM 需要项目决策人拍板：PM 在 `in_progress` 或 `review` 上 `block_task`，`waiting_on="stakeholder"`。
-- 批次作废：`backlog` / `ready` / `review` / `blocked` 上直接 `cancel_task`；卡在 `in_progress` 时先 `stop_task_execution` 再 `cancel_task`。
-- 批次归属只能用自由文本 `dependencies` 表达，没有结构化父子关系。不要为了结构化而新增字段。
+- 成功晋升之后，由负责集成的 TL 或明确接手的人清理**交接事实中已列明**的短命 worktree 与 branch；**不扫描、不批量删除整个目录**。
+- 删除普通 branch 前先确认它的 tip 已被目标分支包含。脏 worktree 不强删，保留现场并说明。
+- 取消且未晋升时，先确保需要保留的 commit 仍被某个 ref 指向，再删普通 branch 与 worktree。
+- 清理应当**幂等**：对象已经不存在就视为已清理，重复执行不产生新错误。
+- 清理责任作为**交接事实**说明即可。
+- 阻塞、取消、返工都用现有合法动作交给相应角色，不发明新状态。
 
 ## 7. 完整规则出处
 

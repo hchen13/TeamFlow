@@ -553,6 +553,30 @@
             "guards": [
               "executor_unavailable"
             ]
+          },
+          {
+            "key": "handoff",
+            "labels": {
+              "zh-CN": "评审后转交",
+              "en": "Hand off after review"
+            },
+            "actors": [
+              "coordinator"
+            ],
+            "from": [
+              "review"
+            ],
+            "to": "ready",
+            "writable_fields": [
+              "role"
+            ],
+            "required_inputs": [
+              "role"
+            ],
+            "clear_fields": [
+              "agent",
+              "agent_id"
+            ]
           }
         ]
       },

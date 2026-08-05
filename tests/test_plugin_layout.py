@@ -115,18 +115,6 @@ class PluginLayoutTests(unittest.TestCase):
         self.assertIn("插件页没有逐 MCP 工具授权开关", skill)
         self.assertIn("授权后先重启当前正在运行的 Codex 客户端", skill)
 
-    def test_software_development_reference_preserves_evidence_and_positive_flow_semantics(self):
-        reference = SOFTWARE_DEVELOPMENT_REFERENCE.read_text(encoding="utf-8")
-
-        self.assertIn("`result_evidence` 是替换字段", reference)
-        self.assertIn("另建一张短期 promotion 卡", reference)
-        self.assertIn("成功路径不对 gate 调用 `rework`", reference)
-        self.assertIn("该提交会改变候选内容", reference)
-        self.assertIn("这是写作约定，不是访问控制", reference)
-        self.assertIn("取消已阻塞的旧 promotion 卡", reference)
-        self.assertIn("旧 QA 结论不得沿用", reference)
-        self.assertNotIn("QA 已通过，转 TL 执行晋升", reference)
-
     def test_software_development_contract_supports_gate_recovery(self):
         definition = load_workflow_definitions(WORKFLOWS_DIR)["software-development"]
 

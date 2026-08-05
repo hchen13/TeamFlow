@@ -267,6 +267,75 @@ class WorkflowActionTest(unittest.TestCase):
             )
             self.assertEqual(completed["available_actions"], [])
 
+    def test_review_hands_off_to_tl_and_keeps_existing_review_decisions(self):
+        reviewed = {
+            "record_id": "recHandoff",
+            "task_id": "TF-0042",
+            "title": "集成并清理",
+            "status": "review",
+            "type": "development",
+            "priority": "P1",
+            "role": "qa",
+            "agent": "QA Agent",
+            "agent_id": "agent_qa",
+            "description": "把已通过 QA 的候选晋升到目标分支。",
+            "context": None,
+            "acceptance_criteria": "目标分支 HEAD 等于已验证的候选。",
+            "dependencies": None,
+            "progress": None,
+            "next_action": None,
+            "result_evidence": "QA 验证通过。",
+            "blocked_reason": None,
+            "waiting_on": None,
+        }
+
+        for actor in (self.tl, self.qa):
+            board = FakeTaskBoard(reviewed)
+            read, write = board.patches()
+            with read, write:
+                denied = route_task(actor, record_id="recHandoff", role="tl")
+            self.assertFalse(denied["ok"])
+            self.assertEqual(board.task["status"], "review")
+            self.assertEqual(board.task["agent_id"], "agent_qa")
+
+        board = FakeTaskBoard(reviewed)
+        read, write = board.patches()
+        with read, write:
+            handed_off = route_task(self.pm, record_id="recHandoff", role="tl")
+            self.assertTrue(handed_off["ok"], handed_off.get("error"))
+            self.assertEqual(handed_off["transition"], {"from": "review", "to": "ready"})
+            self.assertEqual(handed_off["task"]["role"], "tl")
+            self.assertIsNone(handed_off["task"]["agent"])
+            self.assertIsNone(handed_off["task"]["agent_id"])
+            self.assertEqual(handed_off["task"]["result_evidence"], "QA 验证通过。")
+
+            claimed = claim_task(self.tl, record_id="recHandoff")
+            self.assertEqual(claimed["transition"], {"from": "ready", "to": "in_progress"})
+            self.assertEqual(claimed["task"]["agent_id"], "agent_tl")
+            self.assertEqual(claimed["task"]["agent"], "TL Agent")
+
+        for decision, extra, expected in (
+            ("send_to_qa", {}, ("ready", "qa")),
+            ("rework", {"role": "tl"}, ("ready", "tl")),
+            ("approve", {}, ("done", None)),
+        ):
+            board = FakeTaskBoard(reviewed)
+            read, write = board.patches()
+            with read, write:
+                decided = review_task(
+                    self.pm,
+                    record_id="recHandoff",
+                    decision=decision,
+                    result_evidence="评审结论。",
+                    **extra,
+                )
+            self.assertTrue(decided["ok"], decided.get("error"))
+            self.assertEqual(
+                (decided["task"]["status"], decided["task"]["role"]),
+                expected,
+                decision,
+            )
+
     def test_complete_general_task_delivery_flow(self):
         board = FakeTaskBoard()
         read, write = board.patches()
