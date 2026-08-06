@@ -158,6 +158,9 @@
       "done",
       "canceled"
     ],
+    "completion_states": [
+      "done"
+    ],
     "states": [
       {
         "key": "backlog",

@@ -25,8 +25,16 @@ from .workflow_lifecycle import (
     prepare_existing_action,
     provided_fields,
 )
+from .delivery import (
+    claim_baseline,
+    completion_failure,
+    append_resources,
+    resolve_create_mode,
+    resolve_transition_mode,
+)
 from .workflow_responses import (
     action_success,
+    delivery_incomplete_error,
     input_error,
     task_changed_error,
     write_not_visible_error,
@@ -101,8 +109,19 @@ def create_task(
     context: str | None = None,
     acceptance_criteria: str | None = None,
     dependencies: str | None = None,
+    delivery_mode: str | None = None,
     invocation_id: str | None = None,
 ) -> dict[str, Any]:
+    try:
+        mode = resolve_create_mode(assignment["workspace_root"], delivery_mode)
+    except ValueError as error:
+        return input_error(
+            assignment,
+            action_key="create",
+            code="invalid_delivery_mode",
+            message=str(error),
+            details={"delivery_mode": delivery_mode},
+        )
     prepared = prepare_create_action(
         assignment,
         {
@@ -118,6 +137,8 @@ def create_task(
     )
     if not prepared["ok"]:
         return prepared
+    if mode:
+        prepared["patch"]["delivery_mode"] = mode
     result = upsert_lark_task(
         assignment["workspace_root"],
         task=prepared["patch"],
@@ -149,6 +170,7 @@ def update_task(
     *,
     record_id: str,
     fields: dict[str, Any],
+    delivery: dict[str, Any] | None = None,
     invocation_id: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(fields, dict) or not fields:
@@ -164,6 +186,7 @@ def update_task(
         action_key="update",
         record_id=record_id,
         payload=fields,
+        delivery=delivery,
         invocation_id=invocation_id,
     )
 
@@ -211,6 +234,7 @@ def submit_task(
     result_evidence: str,
     progress: str | None = None,
     next_action: str | None = None,
+    delivery: dict[str, Any] | None = None,
     invocation_id: str | None = None,
 ) -> dict[str, Any]:
     return _execute_existing_action(
@@ -223,6 +247,7 @@ def submit_task(
             "progress": progress,
             "next_action": next_action,
         }),
+        delivery=delivery,
         invocation_id=invocation_id,
     )
 
@@ -304,6 +329,7 @@ def _execute_existing_action(
     record_id: str,
     payload: dict[str, Any],
     variant: str | None = None,
+    delivery: dict[str, Any] | None = None,
     confirmed: bool = True,
     runtime_facts: set[str] | None = None,
     current_task: dict[str, Any] | None = None,
@@ -341,6 +367,37 @@ def _execute_existing_action(
             before=task,
             task=task,
             already_applied=True,
+        )
+    try:
+        _apply_delivery(
+            assignment,
+            prepared,
+            action_key=action_key,
+            task=task,
+            delivery=delivery,
+        )
+    except ValueError as error:
+        return input_error(
+            assignment,
+            action_key=action_key,
+            code="invalid_delivery",
+            message=str(error),
+            details={"delivery": delivery},
+        )
+    blocked = completion_failure(
+        assignment["workspace_root"],
+        prepared["definition"],
+        task,
+        prepared["patch"],
+    )
+    if blocked:
+        return delivery_incomplete_error(
+            assignment,
+            prepared["definition"],
+            action_key=action_key,
+            variant=variant,
+            task=task,
+            blocked=blocked,
         )
     latest = get_lark_task(assignment["workspace_root"], record_id=record_id)["task"]
     if latest != task:
@@ -422,3 +479,46 @@ def _visible_write(
 
 def _definition(assignment: dict[str, Any]) -> dict[str, Any]:
     return workflow_definition_for_assignment(assignment)
+
+
+def _apply_delivery(
+    assignment: dict[str, Any],
+    prepared: dict[str, Any],
+    *,
+    action_key: str,
+    task: dict[str, Any],
+    delivery: dict[str, Any] | None,
+) -> None:
+    """Merge the delivery facts an action may record into the rule's own patch."""
+    workspace = assignment["workspace_root"]
+    definition = prepared["definition"]
+    patch = prepared["patch"]
+    delivery = delivery or {}
+    if not isinstance(delivery, dict):
+        raise ValueError("delivery must be an object")
+
+    mode = resolve_transition_mode(
+        workspace,
+        definition,
+        task,
+        delivery.get("delivery_mode"),
+        target_state=prepared["rule"].get("to"),
+    )
+    if mode:
+        patch["delivery_mode"] = mode
+
+    for field in ("target_branch", "base_sha", "candidate_sha", "verified_sha", "promoted_sha"):
+        if field in delivery and str(delivery[field] or "").strip():
+            patch[field] = str(delivery[field]).strip()
+
+    resources = delivery.get("resources")
+    if resources is not None:
+        if not isinstance(resources, dict):
+            raise ValueError("delivery.resources must be an object")
+        patch["delivery_resources"] = append_resources(
+            task.get("delivery_resources"),
+            resources,
+        )
+
+    if action_key == "claim":
+        patch.update(claim_baseline(workspace, {**task, **patch}))

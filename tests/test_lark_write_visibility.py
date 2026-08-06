@@ -23,6 +23,7 @@ READY_TASK = {
     "task_id": "TF-0059",
     "title": "Ship the change",
     "status": "ready",
+    "delivery_mode": "standard",
     "type": "development",
     "priority": "P1",
     "role": "tl",

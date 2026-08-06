@@ -197,6 +197,7 @@ class WorkflowActionTest(unittest.TestCase):
                 priority="P1",
                 description="在临时目录中实现排序算法。",
                 acceptance_criteria="测试覆盖空数组、重复值和逆序输入。",
+                delivery_mode="standard",
             )
             self.assertTrue(created["ok"])
             self.assertEqual(created["task"]["status"], "backlog")
@@ -273,6 +274,7 @@ class WorkflowActionTest(unittest.TestCase):
             "task_id": "TF-0042",
             "title": "集成并清理",
             "status": "review",
+            "delivery_mode": "standard",
             "type": "development",
             "priority": "P1",
             "role": "qa",
@@ -347,6 +349,7 @@ class WorkflowActionTest(unittest.TestCase):
                 priority="P1",
                 description="比较候选方案并整理证据。",
                 acceptance_criteria="结论可复查，取舍明确。",
+                delivery_mode="standard",
             )
             self.assertEqual(created["task"]["status"], "backlog")
             self.assertEqual(created["task"]["role"], "executor")
@@ -743,6 +746,7 @@ class WorkflowActionTest(unittest.TestCase):
             "task_id": "TF-0003",
             "title": "可执行任务",
             "status": "ready",
+            "delivery_mode": "standard",
             "type": "development",
             "priority": "P1",
             "role": "tl",

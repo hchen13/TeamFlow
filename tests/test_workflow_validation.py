@@ -342,6 +342,10 @@ class WorkflowValidationTest(unittest.TestCase):
             mapping[state]
             for state in definition["lifecycle"]["terminal_states"]
         ]
+        definition["lifecycle"]["completion_states"] = [
+            mapping[state]
+            for state in definition["lifecycle"]["completion_states"]
+        ]
         for state in definition["lifecycle"]["states"]:
             state["key"] = mapping[state["key"]]
         for action in definition["lifecycle"]["actions"].values():

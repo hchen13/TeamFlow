@@ -23,7 +23,18 @@ TASK_FIELD_KEYS = frozenset({
     "result_evidence",
     "blocked_reason",
     "waiting_on",
+    "delivery_mode",
+    "target_branch",
+    "base_sha",
+    "candidate_sha",
+    "verified_sha",
+    "promoted_sha",
+    "delivery_resources",
 })
+DELIVERY_MODES = (
+    ("standard", {"zh-CN": "标准交付", "en": "Standard"}, "Gray", "Lighter"),
+    ("repository", {"zh-CN": "仓库交付", "en": "Repository"}, "Blue", "Lighter"),
+)
 PRIORITIES = (
     ("P0", {"zh-CN": "P0", "en": "P0"}, "Red", "Light"),
     ("P1", {"zh-CN": "P1", "en": "P1"}, "Orange", "Light"),
@@ -77,7 +88,7 @@ TASK_TYPE_FIELDS = frozenset({"key", "labels", "descriptions", "default_role"})
 WAITING_TARGET_FIELDS = frozenset({"key", "labels", "color"})
 TASK_SCHEMA_FIELDS = frozenset({"base", "task_id"})
 TASK_ID_FIELDS = frozenset({"sequence_length"})
-LIFECYCLE_FIELDS = frozenset({"initial_state", "terminal_states", "states", "actions"})
+LIFECYCLE_FIELDS = frozenset({"initial_state", "terminal_states", "completion_states", "states", "actions"})
 STATE_FIELDS = frozenset({
     "key",
     "labels",
@@ -246,6 +257,16 @@ def _validate_lifecycle(
         or len(set(terminal_states)) != len(terminal_states)
     ):
         raise ValueError(f"{key}.lifecycle.terminal_states is invalid")
+    completion_states = lifecycle.get("completion_states")
+    if (
+        not isinstance(completion_states, list)
+        or not completion_states
+        or any(state not in terminal_states for state in completion_states)
+        or len(set(completion_states)) != len(completion_states)
+    ):
+        raise ValueError(
+            f"{key}.lifecycle.completion_states must be a non-empty subset of terminal_states"
+        )
     if initial_state in terminal_states:
         raise ValueError(f"{key}.lifecycle.initial_state cannot be terminal")
     for terminal_state in terminal_states:

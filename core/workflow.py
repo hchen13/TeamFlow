@@ -9,6 +9,7 @@ from typing import Any
 from .workflow_validation import (
     LOCALES,
     PRIORITIES,
+    DELIVERY_MODES,
     TASK_FIELD_KEYS,
     validate_workflow_definition,
 )
@@ -31,6 +32,13 @@ FIELD_DEFINITIONS = (
     ("result_evidence", {"zh-CN": "结果与证据", "en": "Result / Evidence"}, "text"),
     ("blocked_reason", {"zh-CN": "阻塞原因", "en": "Blocked Reason"}, "text"),
     ("waiting_on", {"zh-CN": "等待对象", "en": "Waiting On"}, "select"),
+    ("delivery_mode", {"zh-CN": "交付方式", "en": "Delivery Mode"}, "select"),
+    ("target_branch", {"zh-CN": "目标分支", "en": "Target Branch"}, "text"),
+    ("base_sha", {"zh-CN": "基线 SHA", "en": "Base SHA"}, "text"),
+    ("candidate_sha", {"zh-CN": "候选 SHA", "en": "Candidate SHA"}, "text"),
+    ("verified_sha", {"zh-CN": "已验证 SHA", "en": "Verified SHA"}, "text"),
+    ("promoted_sha", {"zh-CN": "已晋升 SHA", "en": "Promoted SHA"}, "text"),
+    ("delivery_resources", {"zh-CN": "交付资源", "en": "Delivery Resources"}, "text"),
 )
 OPTION_COLORS = (
     ("Purple", "Lighter"),
@@ -270,6 +278,7 @@ def task_option_definitions(definition: dict[str, Any]) -> dict[str, list[dict[s
         "priority": _fixed_options(PRIORITIES),
         "role": _definition_options(definition["roles"]),
         "waiting_on": _colored_definition_options(definition["waiting_targets"]),
+        "delivery_mode": _fixed_options(DELIVERY_MODES),
     }
 
 

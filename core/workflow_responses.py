@@ -112,6 +112,33 @@ def write_not_visible_error(
     )
 
 
+def delivery_incomplete_error(
+    assignment: dict[str, Any],
+    definition: dict[str, Any],
+    *,
+    action_key: str,
+    variant: str | None,
+    task: dict[str, Any],
+    blocked: dict[str, Any],
+) -> dict[str, Any]:
+    return workflow_error(
+        assignment,
+        definition,
+        action_key=action_key,
+        variant=variant,
+        task=task,
+        category="business_rule",
+        code="delivery_incomplete",
+        message=(
+            f"任务 {task_name(task)} 使用仓库交付，完成前必须先晋升到 "
+            f"{blocked['target_branch']} 并清理已声明的临时对象。"
+            "请按 failures 列出的项目逐条处理后重试。"
+        ),
+        retryable=True,
+        details=blocked,
+    )
+
+
 def workflow_error(
     assignment: dict[str, Any],
     definition: dict[str, Any],
