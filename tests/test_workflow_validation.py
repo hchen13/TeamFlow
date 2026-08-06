@@ -464,4 +464,3 @@ class DeliverySystemFieldTest(unittest.TestCase):
         rule["writable_fields"] = [*rule["writable_fields"], "candidate_sha"]
 
         validate_workflow_definition(definition, WORKFLOW_PATH)
-
