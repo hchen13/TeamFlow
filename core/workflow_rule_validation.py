@@ -10,7 +10,7 @@ from .workflow_contract import (
     rule_actor_allowed,
 )
 from .workflow_responses import workflow_error as _workflow_error
-from .workflow_validation import DELIVERY_SYSTEM_FIELDS
+from .workflow_validation import DELIVERY_MANAGED_FIELDS
 
 
 def validate_rule(
@@ -35,7 +35,7 @@ def validate_rule(
             message=f"当前 Agent 的职责 {assignment['role_key']} 无权执行 {ACTION_TO_TOOL[action_key]}。",
         )
     invalid_fields = sorted(
-        (set(payload) - set(rule.get("writable_fields", []))) | (set(payload) & DELIVERY_SYSTEM_FIELDS)
+        (set(payload) - set(rule.get("writable_fields", []))) | (set(payload) & DELIVERY_MANAGED_FIELDS)
     )
     if invalid_fields:
         return _workflow_error(

@@ -130,7 +130,7 @@ QA 是**质量负责人，不是实现者**。QA 不修改产品实现；发现�
 - 每次新建或删除 branch / worktree，都把**实际对象**记进卡片的 `delivery_resources`（它是追加去重的历史清单，清空不等于清理完成）。最终的完成门禁以这份清单里记录的**精确对象**为事实，不按模板猜测。
 - 实现、内部评审、修复、提交都在自己的 worktree 内完成，同一时刻只有一个写入者。
 - **交付方式**：workspace 启用版本控制时，卡片在进入任何会派发工作的状态或完成状态之前必须先定下 `delivery_mode`（`standard` 或 `repository`）。PM 用一次 **只带 `delivery` 的 `update_task`** 记录即可，不需要顺手改别的字段；定下之后不能再改。`get_assignment` 的 `delivery` 约束会告诉你本 workspace 是否启用、允许哪些 mode、以及哪些字段能由 Agent 提交。
-- **记录 Git 事实**：`candidate_sha` / `verified_sha` / `promoted_sha` 通过 `update_task` 或 `submit_task` 的 `delivery` 提交，必须是**完整 40 位 commit id**——分支名、`HEAD`、tag、缩写和 rev 表达式一律被拒。`target_branch` 固定为 `main`、`base_sha` 在首次认领时自动固定，两者都不接受 Agent 写入。新建或删除临时对象时用 `delivery.resources`（只接受 `branches` / `worktrees` 两个字符串数组）追加声明；相对路径按 workspace 根解析。
+- **记录 Git 事实**：`candidate_sha` / `verified_sha` / `promoted_sha` 通过 `update_task` 或 `submit_task` 的 `delivery` 提交，必须是**本仓库 object format 下的完整 commit id**（SHA-1 为 40 位，SHA-256 为 64 位）——分支名、`HEAD`、tag、缩写和 rev 表达式一律被拒。`target_branch` 固定为 `main`、`base_sha` 在首次认领时自动固定，两者都不接受 Agent 写入。新建或删除临时对象时用 `delivery.resources`（只接受 `branches` / `worktrees` 两个字符串数组）追加声明；相对路径按 workspace 根解析。
 - **被门禁拒绝时**：`delivery_incomplete` 会逐条列出 `failures`（缺哪个 SHA、三者是否一致、`base` 是否是候选祖先、`main` 是否包含候选、哪些声明的 branch/worktree 还在）。按列出的项目在 Git 侧处理干净、把新事实补进 `delivery`，再重试同一个动作；TeamFlow 不会代为 merge、ff、删分支或删目录。
 - 交接时必须给出这些事实：**candidate SHA**、目标分支及其起始 SHA、branch 与 worktree 位置、工作树是否干净、验证证据、尚需处理的风险。使用仓库交付的卡片把这些写进 `candidate_sha` / `target_branch` / `base_sha` 等交付字段，TeamFlow 只读取和校验，从不代为 merge、ff、删分支或删目录。
 - 交接之后**冻结该 candidate**；要继续写，等返工回来再说。

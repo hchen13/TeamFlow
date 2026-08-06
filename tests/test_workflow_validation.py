@@ -438,29 +438,39 @@ class WorkflowValidationTest(unittest.TestCase):
         }
 
 
-class DeliverySystemFieldTest(unittest.TestCase):
-    """A workflow cannot hand agents a direct write to the fields git pins."""
+DELIVERY_FIELDS = (
+    "delivery_mode",
+    "target_branch",
+    "base_sha",
+    "candidate_sha",
+    "verified_sha",
+    "promoted_sha",
+    "delivery_resources",
+)
+
+
+class DeliveryManagedFieldTest(unittest.TestCase):
+    """A workflow cannot reach any delivery fact as an ordinary task field."""
 
     def rules(self):
         definition = deepcopy(load_workflow_definition("software-development"))
         return definition, definition["lifecycle"]["actions"]["update"]["rules"][0]
 
-    def test_a_system_field_cannot_be_declared_writable(self):
-        for field in ("target_branch", "base_sha", "delivery_resources"):
+    def declaring(self, key, value):
+        for field in DELIVERY_FIELDS:
             definition, rule = self.rules()
-            rule["writable_fields"] = [*rule["writable_fields"], field]
-            with self.assertRaises(ValueError):
+            rule[key] = [*rule.get(key, []), field] if isinstance(value, str) else {field: value}
+            with self.assertRaises(ValueError, msg=f"{key} accepted {field}"):
                 validate_workflow_definition(definition, WORKFLOW_PATH)
 
-    def test_a_system_field_cannot_be_declared_clearable(self):
-        for field in ("target_branch", "base_sha", "delivery_resources"):
-            definition, rule = self.rules()
-            rule["clear_fields"] = [*rule.get("clear_fields", []), field]
-            with self.assertRaises(ValueError):
-                validate_workflow_definition(definition, WORKFLOW_PATH)
+    def test_no_rule_may_declare_a_delivery_field_in_any_of_its_field_lists(self):
+        self.declaring("writable_fields", "")
+        self.declaring("clear_fields", "")
+        self.declaring("defaults", "main")
+        self.declaring("fixed_fields", "main")
 
-    def test_an_agent_writable_field_is_still_accepted(self):
-        definition, rule = self.rules()
-        rule["writable_fields"] = [*rule["writable_fields"], "candidate_sha"]
-
-        validate_workflow_definition(definition, WORKFLOW_PATH)
+    def test_the_bundled_workflows_still_validate(self):
+        for key in ("software-development", "general-task"):
+            validate_workflow_definition(
+                load_workflow_definition(key), Path(f"/tmp/{key}/workflow.json")
+            )

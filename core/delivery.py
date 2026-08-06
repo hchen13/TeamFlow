@@ -175,6 +175,11 @@ def resolve_transition_mode(
     requested = str(requested or "").strip()
     initial_state = definition["lifecycle"]["initial_state"]
     in_initial = str(task.get("status") or "") == initial_state
+    carries_forward = action_key != "cancel" and target_state is not None
+
+    # An unreadable mode leaves every check below with nothing to reason about.
+    if current and current not in DELIVERY_MODES and carries_forward:
+        raise ValueError(f"delivery_mode {current} is not one of {', '.join(DELIVERY_MODES)}")
 
     if requested:
         if requested not in DELIVERY_MODES:
@@ -195,7 +200,7 @@ def resolve_transition_mode(
         return "standard"
     # An unset mode blocks anything that carries the task forward. A state-neutral
     # delivery-only update is how it gets set, and cancelling never needs one.
-    if action_key != "cancel" and target_state is not None:
+    if carries_forward:
         raise ValueError(
             "choose a delivery_mode (standard or repository) before this task enters "
             f"{target_state}; record it with a delivery-only update_task first"
@@ -226,9 +231,7 @@ def verify_supplied_shas(workspace: str | None, delivery: dict[str, Any]) -> Non
     except GitFactError as error:
         raise ValueError(f"git could not confirm the supplied commit ids: {error}") from error
     if missing:
-        raise ValueError(
-            f"{', '.join(missing)} does not name a commit in this repository"
-        )
+        raise ValueError(f"{', '.join(missing)} does not name a commit in this repository")
 
 
 def claim_baseline(workspace: str | None, task: dict[str, Any]) -> dict[str, Any]:
@@ -243,6 +246,14 @@ def claim_baseline(workspace: str | None, task: dict[str, Any]) -> dict[str, Any
             f"repository delivery needs an existing {DEFAULT_TARGET_BRANCH} branch in {workspace}"
         )
     return {"target_branch": DEFAULT_TARGET_BRANCH, "base_sha": sha}
+
+
+def _gate_failure(check: str, current: Any, expected: str) -> dict[str, Any]:
+    return {
+        "failures": [{"check": check, "current": current, "expected": expected}],
+        "target_branch": DEFAULT_TARGET_BRANCH,
+        "leftover_resources": {"branches": [], "worktrees": []},
+    }
 
 
 def _worktree_location(repo: str, path: str) -> str:
@@ -263,7 +274,10 @@ def completion_failure(
         return None
     # A task already locked to repository delivery keeps its gate even if the
     # workspace switch is turned off afterwards.
-    if mode_of(merged) != "repository":
+    mode = mode_of(merged)
+    if mode and mode not in DELIVERY_MODES:
+        return _gate_failure("delivery_mode", mode, f"one of {', '.join(DELIVERY_MODES)}")
+    if mode != "repository":
         return None
 
     repo = str(Path(workspace or ".").expanduser().resolve())
@@ -371,23 +385,14 @@ def completion_failure(
             })
     except GitFactError as error:
         # A probe that cannot answer is not evidence of a clean repository.
-        return {
-            "failures": [{
-                "check": "git_probe",
-                "current": str(error),
-                "expected": "git can be read in the workspace repository",
-            }],
-            "target_branch": branch,
-            "leftover_resources": {"branches": [], "worktrees": []},
-        }
+        return _gate_failure(
+            "git_probe", str(error), "git can be read in the workspace repository"
+        )
 
     if not failures:
         return None
     return {
         "failures": failures,
         "target_branch": branch,
-        "leftover_resources": {
-            "branches": leftover_branches,
-            "worktrees": leftover_worktrees,
-        },
+        "leftover_resources": {"branches": leftover_branches, "worktrees": leftover_worktrees},
     }

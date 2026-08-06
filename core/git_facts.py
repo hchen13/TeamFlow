@@ -45,11 +45,19 @@ def is_object_id(value: str) -> bool:
     return bool(OBJECT_ID.fullmatch(str(value or "").strip()))
 
 
+def object_id_length(repo: str | Path) -> int:
+    _, output = _run(repo, "rev-parse", "--show-object-format")
+    return 64 if output.strip() == "sha256" else 40
+
+
 def commit_exists(repo: str | Path, object_id: str) -> bool:
     """True only when `object_id` is a full commit id that this repository holds."""
-    if not is_object_id(object_id):
+    value = str(object_id or "").strip()
+    # A 40-digit id is an abbreviation in a sha256 repository, and git resolves it
+    # happily, so length has to be judged against the repository's own format.
+    if not is_object_id(value) or len(value) != object_id_length(repo):
         return False
-    code, output = _run(repo, "cat-file", "-t", object_id.strip(), allowed=(0, 1, 128))
+    code, output = _run(repo, "cat-file", "-t", value, allowed=(0, 1, 128))
     return code == 0 and output.strip() == "commit"
 
 
@@ -80,10 +88,16 @@ def fast_forwarded_to(repo: str | Path, branch: str, target: str) -> bool:
     if code != 0:
         return False
     updates = [line.strip() for line in output.splitlines() if line.strip()]
-    return any(
-        new == target and index + 1 < len(updates) and is_ancestor(repo, updates[index + 1], target)
-        for index, new in enumerate(updates)
-    )
+    for index, new in enumerate(updates):
+        if new != target or index + 1 >= len(updates):
+            continue
+        # Reaching the candidate once proves nothing on its own: the branch can be
+        # rolled back onto it afterwards. Every update from that entry up to the
+        # current tip has to have moved forward for the promotion to still stand.
+        chain = updates[: index + 2]
+        if all(is_ancestor(repo, chain[step + 1], chain[step]) for step in range(len(chain) - 1)):
+            return True
+    return False
 
 
 def worktree_paths(repo: str | Path) -> set[str]:

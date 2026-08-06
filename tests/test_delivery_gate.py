@@ -11,12 +11,13 @@ from unittest.mock import patch
 
 from core.delivery import (
     append_resources,
+    render_resources,
     normalize_delivery_input,
     claim_baseline,
     completion_failure,
     resolve_transition_mode,
 )
-from core.git_facts import is_ancestor
+from core.git_facts import commit_exists, is_ancestor
 from core.workflow import load_workflow_definition
 from core.teamflow_tools import cancel_task, claim_task, route_task, submit_task, update_task
 from core.workspace_settings import set_version_control
@@ -25,6 +26,15 @@ from tests.test_teamflow_tools import FakeTaskBoard, assignment
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFINITION = load_workflow_definition("software-development")
+DELIVERY_FIELDS = (
+    "delivery_mode",
+    "target_branch",
+    "base_sha",
+    "candidate_sha",
+    "verified_sha",
+    "promoted_sha",
+    "delivery_resources",
+)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -388,6 +398,47 @@ class DeliveryGateTest(unittest.TestCase):
 
         self.assertIsNone(self.blocked(task))
 
+    def test_a_branch_rolled_back_onto_an_older_candidate_is_refused(self):
+        candidate = self.commit("ours")
+        moved_on = self.commit("theirs")
+        git(self.repo, "update-ref", "refs/heads/main", candidate)
+        task = self.task(
+            base_sha=self.base,
+            candidate_sha=candidate,
+            verified_sha=candidate,
+            promoted_sha=candidate,
+        )
+
+        # main did fast-forward onto the candidate once, then advanced past it and
+        # was reset back, throwing the newer commit away.
+        self.assertTrue(is_ancestor(str(self.repo), candidate, moved_on))
+        self.assertIn("fast_forward", self.checks(task))
+
+    def test_main_advancing_after_the_candidate_keeps_the_proof(self):
+        candidate = self.commit("ours")
+        self.commit("theirs")
+        task = self.task(
+            base_sha=self.base,
+            candidate_sha=candidate,
+            verified_sha=candidate,
+            promoted_sha=candidate,
+        )
+
+        self.assertIsNone(self.blocked(task))
+
+    def test_a_sha_256_repository_refuses_a_forty_digit_prefix(self):
+        sha256 = Path(self.temporary.name) / "prefix"
+        sha256.mkdir()
+        git(sha256, "init", "--quiet", "--initial-branch=main", "--object-format=sha256")
+        (sha256 / "README.md").write_text("teamflow\n", encoding="utf-8")
+        git(sha256, "add", "README.md")
+        git(sha256, "commit", "--quiet", "-m", "base")
+        full = git(sha256, "rev-parse", "HEAD")
+
+        self.assertEqual(git(sha256, "rev-parse", "--verify", full[:40]), full)
+        self.assertFalse(commit_exists(str(sha256), full[:40]))
+        self.assertTrue(commit_exists(str(sha256), full))
+
     def test_a_target_branch_without_a_reflog_cannot_prove_anything(self):
         candidate = self.commit("ours")
         (self.repo / ".git" / "logs" / "refs" / "heads" / "main").unlink()
@@ -466,6 +517,10 @@ class DeliveryWriteTest(unittest.TestCase):
         git(self.repo, "add", "README.md")
         git(self.repo, "commit", "--quiet", "-m", "base")
         self.base = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "next.txt").write_text("next\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "--quiet", "-m", "promoted")
+        self.promoted = git(self.repo, "rev-parse", "HEAD")
         set_version_control(str(self.repo), enabled=True)
         self.tl = assignment("tl", "agent_tl") | {"workspace_root": str(self.repo)}
         self.board = FakeTaskBoard({
@@ -476,6 +531,9 @@ class DeliveryWriteTest(unittest.TestCase):
             "delivery_mode": "repository",
             "target_branch": "main",
             "base_sha": self.base,
+            "candidate_sha": self.base,
+            "verified_sha": self.base,
+            "promoted_sha": self.base,
             "type": "development",
             "priority": "P1",
             "role": "tl",
@@ -499,16 +557,24 @@ class DeliveryWriteTest(unittest.TestCase):
         refused = self.record("e" * 40)
 
         self.assertFalse(refused["ok"])
-        self.assertIsNone(self.board.task.get("candidate_sha"))
+        self.assertEqual(self.board.task["candidate_sha"], self.base)
 
-    def test_a_workflow_that_declares_the_system_fields_writable_is_still_refused(self):
+    def test_a_workflow_that_declares_the_delivery_fields_writable_is_still_refused(self):
         forced = deepcopy(DEFINITION)
         for rule in forced["lifecycle"]["actions"]["update"]["rules"]:
-            rule["writable_fields"] = [
-                *rule["writable_fields"], "target_branch", "base_sha", "delivery_resources"
-            ]
+            rule["writable_fields"] = [*rule["writable_fields"], *DELIVERY_FIELDS]
         ledger = append_resources(None, {"branches": ["teamflow/TF-0100/task"]})
         self.board.task["delivery_resources"] = ledger
+        before = dict(self.board.task)
+        overwrite = {
+            "delivery_mode": "standard",
+            "target_branch": "release",
+            "base_sha": "f" * 40,
+            "candidate_sha": "f" * 40,
+            "verified_sha": "f" * 40,
+            "promoted_sha": "f" * 40,
+            "delivery_resources": render_resources({"branches": [], "worktrees": []}),
+        }
 
         read, write = self.board.patches()
         with read, write, patch(
@@ -516,28 +582,25 @@ class DeliveryWriteTest(unittest.TestCase):
         ), patch(
             "core.workflow_lifecycle.workflow_definition_for_assignment", return_value=forced
         ):
-            overwritten = update_task(
-                self.tl,
-                record_id="recRepo",
-                fields={"base_sha": "f" * 40, "target_branch": "release"},
-            )
-            cleared = update_task(
-                self.tl,
-                record_id="recRepo",
-                fields={"delivery_resources": ""},
-            )
+            for field, value in overwrite.items():
+                self.assertFalse(
+                    update_task(self.tl, record_id="recRepo", fields={field: value})["ok"],
+                    msg=f"{field} was writable through update_task.fields",
+                )
+                # Clearing is the other half of the same hole: an empty ledger reads
+                # as a cleaned-up repository to the completion gate.
+                self.assertFalse(
+                    update_task(self.tl, record_id="recRepo", fields={field: ""})["ok"],
+                    msg=f"{field} could be cleared through update_task.fields",
+                )
 
-        self.assertFalse(overwritten["ok"])
-        self.assertFalse(cleared["ok"])
-        self.assertEqual(self.board.task["base_sha"], self.base)
-        self.assertEqual(self.board.task["target_branch"], "main")
-        self.assertEqual(self.board.task["delivery_resources"], ledger)
+        self.assertEqual(self.board.task, before)
 
     def test_a_real_commit_is_recorded(self):
-        recorded = self.record(self.base)
+        recorded = self.record(self.promoted)
 
         self.assertTrue(recorded["ok"], recorded.get("error"))
-        self.assertEqual(self.board.task["candidate_sha"], self.base)
+        self.assertEqual(self.board.task["candidate_sha"], self.promoted)
 
 
 class LegacyModeGateTest(unittest.TestCase):
@@ -637,6 +700,41 @@ class LegacyModeGateTest(unittest.TestCase):
 
         self.assertTrue(claimed["ok"], claimed.get("error"))
         self.assertEqual(board.task["status"], "in_progress")
+
+    def test_a_mode_teamflow_cannot_read_stops_every_advance_but_cancel(self):
+        board = self.board(delivery_mode="git", status="review", agent_id="agent_tl")
+        read, write = board.patches()
+        with read, write:
+            from core.teamflow_tools import review_task
+
+            self.assertFalse(
+                review_task(
+                    self.pm,
+                    record_id="recLegacy",
+                    decision="approve",
+                    result_evidence="验收通过。",
+                )["ok"]
+            )
+            self.assertEqual(board.task["status"], "review")
+
+            self.assertFalse(
+                route_task(self.pm, record_id="recLegacy", role="qa")["ok"]
+            )
+            self.assertEqual(board.task["status"], "review")
+
+            canceled = cancel_task(
+                self.pm, record_id="recLegacy", result_evidence="不做了。", confirmed=True
+            )
+
+        self.assertTrue(canceled["ok"], canceled.get("error"))
+        self.assertEqual(board.task["status"], "canceled")
+
+    def test_a_mode_teamflow_cannot_read_is_never_waved_through_completion(self):
+        broken = repository_task(delivery_mode="git", base_sha=None)
+
+        failure = completion_failure(self.workspace, DEFINITION, broken, {"status": "done"})
+
+        self.assertEqual([item["check"] for item in failure["failures"]], ["delivery_mode"])
 
     def test_cancelling_a_legacy_card_never_needs_a_mode(self):
         board = self.board(status="review")

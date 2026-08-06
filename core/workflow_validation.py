@@ -69,13 +69,23 @@ ACTOR_FIELD_BINDINGS = {
     "agent": "agent_name",
     "agent_id": "agent_id",
 }
-# TeamFlow pins these from git; delivery_resources is an append-only ledger. A
-# workflow that declared them writable would hand agents a way around the gate.
-DELIVERY_SYSTEM_FIELDS = frozenset({"target_branch", "base_sha", "delivery_resources"})
+# Every delivery fact is either pinned by TeamFlow from git or recorded through the
+# delivery parameter, which is where the mode lock, the commit probes and the
+# append-only ledger live. A rule that reached any of them as an ordinary field
+# would hand agents a way straight past all three.
+DELIVERY_MANAGED_FIELDS = frozenset({
+    "delivery_mode",
+    "target_branch",
+    "base_sha",
+    "candidate_sha",
+    "verified_sha",
+    "promoted_sha",
+    "delivery_resources",
+})
 DIRECTLY_WRITABLE_FIELDS = (
-    TASK_FIELD_KEYS - {"task_id", "status", "agent", "agent_id"} - DELIVERY_SYSTEM_FIELDS
+    TASK_FIELD_KEYS - {"task_id", "status", "agent", "agent_id"} - DELIVERY_MANAGED_FIELDS
 )
-CLEARABLE_FIELDS = TASK_FIELD_KEYS - {"task_id", "status", "title"} - DELIVERY_SYSTEM_FIELDS
+CLEARABLE_FIELDS = TASK_FIELD_KEYS - {"task_id", "status", "title"} - DELIVERY_MANAGED_FIELDS
 WORKFLOW_DEFINITION_FIELDS = frozenset({
     "schema_version",
     "key",
