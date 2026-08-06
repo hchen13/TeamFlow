@@ -459,7 +459,10 @@ class DeliveryManagedFieldTest(unittest.TestCase):
     def declaring(self, key, value):
         for field in DELIVERY_FIELDS:
             definition, rule = self.rules()
-            rule[key] = [*rule.get(key, []), field] if isinstance(value, str) else {field: value}
+            if key in {"writable_fields", "clear_fields"}:
+                rule[key] = [*rule.get(key, []), field]
+            else:
+                rule[key] = {**rule.get(key, {}), field: value}
             with self.assertRaises(ValueError, msg=f"{key} accepted {field}"):
                 validate_workflow_definition(definition, WORKFLOW_PATH)
 
