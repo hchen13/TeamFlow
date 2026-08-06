@@ -166,6 +166,7 @@ def resolve_transition_mode(
     requested: str | None,
     *,
     target_state: str | None,
+    action_key: str = "",
 ) -> str | None:
     """Return the delivery_mode to write, or None when nothing should change."""
     enabled = version_control_enabled(workspace)
@@ -191,22 +192,25 @@ def resolve_transition_mode(
         return None
     if not enabled:
         return "standard"
-    if target_state and (
-        _dispatches_work(definition, target_state)
-        or target_state in completion_states(definition)
-    ):
+    # An unset mode blocks anything that carries the task forward. A state-neutral
+    # delivery-only update is how it gets set, and cancelling never needs one.
+    if action_key != "cancel" and target_state is not None:
         raise ValueError(
             "choose a delivery_mode (standard or repository) before this task enters "
-            f"{target_state}; PM can record it with a delivery-only update_task"
+            f"{target_state}; record it with a delivery-only update_task first"
         )
     return None
 
 
-def _dispatches_work(definition: dict[str, Any], state_key: str) -> bool:
-    return any(
-        state["key"] == state_key and state["dispatch"] != "none"
-        for state in definition["lifecycle"]["states"]
-    )
+def reject_repository_only_input(mode: str, delivery: dict[str, Any]) -> None:
+    if mode == "repository":
+        return
+    supplied = sorted(set(delivery) & {*AGENT_SHA_FIELDS, "resources"})
+    if supplied:
+        raise ValueError(
+            f"{', '.join(supplied)} only applies to repository delivery; "
+            f"this task uses {mode or 'an unset'} delivery"
+        )
 
 
 def claim_baseline(workspace: str | None, task: dict[str, Any]) -> dict[str, Any]:

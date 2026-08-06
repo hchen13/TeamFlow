@@ -27,6 +27,8 @@ from .workflow_lifecycle import (
 )
 from .delivery import (
     AGENT_SHA_FIELDS,
+    mode_of,
+    reject_repository_only_input,
     claim_baseline,
     normalize_delivery_input,
     completion_failure,
@@ -515,9 +517,11 @@ def _apply_delivery(
         task,
         delivery.get("delivery_mode"),
         target_state=prepared["rule"].get("to"),
+        action_key=action_key,
     )
     if mode:
         patch["delivery_mode"] = mode
+    reject_repository_only_input(mode or mode_of(task), delivery)
 
     for field in AGENT_SHA_FIELDS:
         if field in delivery:

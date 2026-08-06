@@ -14,7 +14,9 @@ from core.delivery import (
     resolve_transition_mode,
 )
 from core.workflow import load_workflow_definition
+from core.teamflow_tools import cancel_task, claim_task, route_task, submit_task, update_task
 from core.workspace_settings import set_version_control
+from tests.test_teamflow_tools import FakeTaskBoard, assignment
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -310,6 +312,137 @@ class DeliveryGateTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "before this task enters done"):
             resolve_transition_mode(str(self.repo), DEFINITION, legacy, None, target_state="done")
+
+class LegacyModeGateTest(unittest.TestCase):
+    """A card created before delivery_mode existed must pick one before it moves on."""
+
+    def setUp(self) -> None:
+        (ROOT / "tmp").mkdir(exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix="legacy-mode-", dir=ROOT / "tmp")
+        self.addCleanup(self.temporary.cleanup)
+        self.workspace = self.temporary.name
+        set_version_control(self.workspace, enabled=True)
+        self.pm = assignment("pm", "agent_pm") | {"workspace_root": self.workspace}
+        self.tl = assignment("tl", "agent_tl") | {"workspace_root": self.workspace}
+
+    def board(self, **overrides: object) -> FakeTaskBoard:
+        task = {
+            "record_id": "recLegacy",
+            "task_id": "TF-0900",
+            "title": "旧卡",
+            "status": "ready",
+            "delivery_mode": None,
+            "type": "development",
+            "priority": "P1",
+            "role": "tl",
+            "description": "旧数据。",
+            "acceptance_criteria": "通过。",
+            "context": None,
+            "dependencies": None,
+            "progress": None,
+            "next_action": None,
+            "result_evidence": "既有证据。",
+            "blocked_reason": None,
+            "waiting_on": None,
+            "agent": None,
+            "agent_id": None,
+        }
+        task.update(overrides)
+        return FakeTaskBoard(task)
+
+    def test_claim_does_not_move_a_legacy_card_into_progress(self):
+        board = self.board()
+        read, write = board.patches()
+        with read, write:
+            claimed = claim_task(self.tl, record_id="recLegacy")
+
+        self.assertFalse(claimed["ok"])
+        self.assertEqual(board.task["status"], "ready")
+        self.assertIsNone(board.task["agent_id"])
+
+    def test_route_submit_and_review_are_all_blocked(self):
+        board = self.board()
+        read, write = board.patches()
+        with read, write:
+            self.assertFalse(route_task(self.pm, record_id="recLegacy", role="qa")["ok"])
+        self.assertEqual(board.task["status"], "ready")
+
+        board = self.board(status="in_progress", agent="TL Agent", agent_id="agent_tl")
+        read, write = board.patches()
+        with read, write:
+            submitted = submit_task(
+                self.tl,
+                record_id="recLegacy",
+                outcome="completed",
+                result_evidence="做完了。",
+            )
+        self.assertFalse(submitted["ok"])
+        self.assertEqual(board.task["status"], "in_progress")
+
+        board = self.board(status="review", agent="TL Agent", agent_id="agent_tl")
+        read, write = board.patches()
+        with read, write:
+            from core.teamflow_tools import review_task
+
+            approved = review_task(
+                self.pm,
+                record_id="recLegacy",
+                decision="approve",
+                result_evidence="验收通过。",
+            )
+        self.assertFalse(approved["ok"])
+        self.assertEqual(board.task["status"], "review")
+
+    def test_a_delivery_only_update_records_the_mode_and_unblocks_the_card(self):
+        board = self.board()
+        read, write = board.patches()
+        with read, write:
+            recorded = update_task(
+                self.pm,
+                record_id="recLegacy",
+                delivery={"delivery_mode": "standard"},
+            )
+            self.assertTrue(recorded["ok"], recorded.get("error"))
+            self.assertEqual(board.task["delivery_mode"], "standard")
+            self.assertEqual(board.task["status"], "ready")
+
+            claimed = claim_task(self.tl, record_id="recLegacy")
+
+        self.assertTrue(claimed["ok"], claimed.get("error"))
+        self.assertEqual(board.task["status"], "in_progress")
+
+    def test_cancelling_a_legacy_card_never_needs_a_mode(self):
+        board = self.board(status="review")
+        read, write = board.patches()
+        with read, write:
+            canceled = cancel_task(
+                self.pm,
+                record_id="recLegacy",
+                result_evidence="不做了。",
+                confirmed=True,
+            )
+
+        self.assertTrue(canceled["ok"], canceled.get("error"))
+        self.assertEqual(board.task["status"], "canceled")
+
+    def test_standard_delivery_refuses_repository_only_facts(self):
+        board = self.board(delivery_mode="standard")
+        read, write = board.patches()
+        with read, write:
+            rejected = update_task(
+                self.pm,
+                record_id="recLegacy",
+                delivery={"candidate_sha": "a" * 40},
+            )
+            resources = update_task(
+                self.pm,
+                record_id="recLegacy",
+                delivery={"resources": {"branches": ["x"]}},
+            )
+
+        self.assertFalse(rejected["ok"])
+        self.assertFalse(resources["ok"])
+        self.assertIsNone(board.task.get("candidate_sha"))
 
 
 if __name__ == "__main__":
