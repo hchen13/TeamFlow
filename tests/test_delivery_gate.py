@@ -68,6 +68,9 @@ class DeliveryGateTest(unittest.TestCase):
         self.base = git(self.repo, "rev-parse", "HEAD")
         set_version_control(str(self.repo), enabled=True)
 
+    def task(self, **overrides: object) -> dict[str, object]:
+        return repository_task(**{"base_sha": self.base, **overrides})
+
     def commit(self, message: str) -> str:
         (self.repo / f"{message}.txt").write_text(message, encoding="utf-8")
         git(self.repo, "add", "-A")
@@ -82,18 +85,18 @@ class DeliveryGateTest(unittest.TestCase):
         return {item["check"] for item in (failure or {}).get("failures", [])}
 
     def test_a_standard_task_is_never_checked_against_the_repository(self):
-        task = repository_task(delivery_mode="standard")
+        task = self.task(delivery_mode="standard")
 
         self.assertIsNone(self.blocked(task))
 
     def test_disabling_the_switch_does_not_release_an_already_locked_task(self):
         set_version_control(str(self.repo), enabled=False)
 
-        self.assertIsNotNone(self.blocked(repository_task(candidate_sha=self.base)))
-        self.assertIsNone(self.blocked(repository_task(delivery_mode="standard")))
+        self.assertIsNotNone(self.blocked(self.task(candidate_sha=self.base)))
+        self.assertIsNone(self.blocked(self.task(delivery_mode="standard")))
 
     def test_a_fully_promoted_and_cleaned_task_passes(self):
-        task = repository_task(
+        task = self.task(
             candidate_sha=self.base,
             verified_sha=self.base,
             promoted_sha=self.base,
@@ -107,18 +110,18 @@ class DeliveryGateTest(unittest.TestCase):
 
     def test_missing_or_unknown_shas_are_reported_per_field(self):
         self.assertEqual(
-            self.checks(repository_task()),
+            self.checks(self.task()),
             {"candidate_sha", "verified_sha", "promoted_sha"},
         )
         self.assertIn(
             "candidate_sha",
-            self.checks(repository_task(candidate_sha="0" * 40, verified_sha=self.base, promoted_sha=self.base)),
+            self.checks(self.task(candidate_sha="0" * 40, verified_sha=self.base, promoted_sha=self.base)),
         )
 
     def test_a_new_candidate_invalidates_the_earlier_verification(self):
         rebuilt = self.commit("rebuilt")
         git(self.repo, "update-ref", "refs/heads/main", self.base)
-        task = repository_task(
+        task = self.task(
             candidate_sha=rebuilt,
             verified_sha=self.base,
             promoted_sha=self.base,
@@ -129,7 +132,7 @@ class DeliveryGateTest(unittest.TestCase):
     def test_a_target_branch_that_does_not_point_at_the_candidate_blocks(self):
         promoted = self.commit("feature")
         git(self.repo, "update-ref", "refs/heads/main", self.base)
-        task = repository_task(
+        task = self.task(
             candidate_sha=promoted,
             verified_sha=promoted,
             promoted_sha=promoted,
@@ -141,7 +144,7 @@ class DeliveryGateTest(unittest.TestCase):
 
     def test_a_declared_branch_that_still_exists_blocks(self):
         git(self.repo, "branch", "teamflow/TF-0100/task")
-        task = repository_task(
+        task = self.task(
             candidate_sha=self.base,
             verified_sha=self.base,
             promoted_sha=self.base,
@@ -155,7 +158,7 @@ class DeliveryGateTest(unittest.TestCase):
     def test_a_declared_worktree_that_still_exists_blocks(self):
         worktree = self.repo / ".teamflow" / "worktrees" / "TF-0100" / "task"
         git(self.repo, "worktree", "add", "--detach", str(worktree), self.base)
-        task = repository_task(
+        task = self.task(
             candidate_sha=self.base,
             verified_sha=self.base,
             promoted_sha=self.base,
@@ -169,7 +172,7 @@ class DeliveryGateTest(unittest.TestCase):
         self.assertIsNone(self.blocked(task))
 
     def test_the_gate_only_runs_for_transitions_into_a_completion_state(self):
-        task = repository_task()
+        task = self.task()
 
         self.assertIsNone(completion_failure(str(self.repo), DEFINITION, task, {"status": "ready"}))
         self.assertIsNone(completion_failure(str(self.repo), DEFINITION, task, {"status": "canceled"}))
@@ -232,15 +235,16 @@ class DeliveryGateTest(unittest.TestCase):
                 normalize_delivery_input({field: "main"}, workspace=str(self.repo))
 
     def test_only_full_commit_ids_are_accepted_as_delivery_shas(self):
-        for rejected in ("main", "HEAD", "v1.0", self.base[:8], "HEAD~1", "main@{0}"):
-            with self.assertRaisesRegex(ValueError, "full 40-character commit id"):
+        for rejected in ("main", "HEAD", "v1.0", self.base[:8], "HEAD~1", "main@{0}", "A" * 40, "a" * 41):
+            with self.assertRaises(ValueError):
                 normalize_delivery_input({"candidate_sha": rejected}, workspace=str(self.repo))
 
-        accepted = normalize_delivery_input({"candidate_sha": self.base}, workspace=str(self.repo))
-        self.assertEqual(accepted["candidate_sha"], self.base)
+        for accepted in (self.base, "c" * 64):
+            normalized = normalize_delivery_input({"candidate_sha": accepted}, workspace=str(self.repo))
+            self.assertEqual(normalized["candidate_sha"], accepted)
 
     def test_a_full_id_that_is_not_a_commit_in_this_repository_blocks(self):
-        task = repository_task(
+        task = self.task(
             candidate_sha="b" * 40,
             verified_sha="b" * 40,
             promoted_sha="b" * 40,
@@ -251,7 +255,7 @@ class DeliveryGateTest(unittest.TestCase):
     def test_main_may_move_on_after_the_candidate_is_promoted(self):
         promoted = self.commit("feature")
         self.commit("unrelated")
-        task = repository_task(
+        task = self.task(
             base_sha=self.base,
             candidate_sha=promoted,
             verified_sha=promoted,
@@ -260,10 +264,71 @@ class DeliveryGateTest(unittest.TestCase):
 
         self.assertIsNone(self.blocked(task))
 
+    def test_a_task_without_a_pinned_baseline_cannot_complete(self):
+        promoted = self.commit("feature")
+        task = self.task(
+            base_sha=None,
+            candidate_sha=promoted,
+            verified_sha=promoted,
+            promoted_sha=promoted,
+        )
+
+        self.assertIn("base_sha", self.checks(task))
+        self.assertIsNone(self.blocked({**task, "base_sha": self.base}))
+
+    def test_a_baseline_that_is_not_a_commit_here_cannot_complete(self):
+        promoted = self.commit("feature")
+        task = self.task(
+            base_sha="d" * 40,
+            candidate_sha=promoted,
+            verified_sha=promoted,
+            promoted_sha=promoted,
+        )
+
+        self.assertIn("base_sha", self.checks(task))
+
+    def test_a_replacement_object_cannot_forge_the_baseline_ancestry(self):
+        promoted = self.commit("feature")
+        orphan = git(self.repo, "commit-tree", "-m", "orphan", f"{self.base}^{{tree}}")
+        # Rewriting the candidate itself is what forges ancestry: the replacement
+        # commit claims the orphan as its parent, so an ordinary walk believes it.
+        forged = git(
+            self.repo, "commit-tree", "-m", "forged", "-p", orphan, f"{promoted}^{{tree}}"
+        )
+        git(self.repo, "replace", "-f", promoted, forged)
+        task = self.task(
+            base_sha=orphan,
+            candidate_sha=promoted,
+            verified_sha=promoted,
+            promoted_sha=promoted,
+        )
+
+        self.assertIn("base_ancestry", self.checks(task))
+
+    def test_a_sha_256_repository_records_its_longer_commit_ids(self):
+        sha256 = Path(self.temporary.name) / "sha256"
+        sha256.mkdir()
+        git(sha256, "init", "--quiet", "--initial-branch=main", "--object-format=sha256")
+        (sha256 / "README.md").write_text("teamflow\n", encoding="utf-8")
+        git(sha256, "add", "README.md")
+        git(sha256, "commit", "--quiet", "-m", "base")
+        base = git(sha256, "rev-parse", "HEAD")
+        set_version_control(str(sha256), enabled=True)
+        self.assertEqual(len(base), 64)
+
+        task = repository_task(
+            base_sha=base,
+            candidate_sha=base,
+            verified_sha=base,
+            promoted_sha=base,
+        )
+
+        self.assertIsNone(completion_failure(str(sha256), DEFINITION, task, {"status": "done"}))
+
     def test_a_base_that_is_not_an_ancestor_of_the_candidate_blocks(self):
         promoted = self.commit("feature")
         orphan = git(self.repo, "commit-tree", "-m", "orphan", f"{self.base}^{{tree}}")
-        task = repository_task(
+        task = self.task(
             base_sha=orphan,
             candidate_sha=promoted,
             verified_sha=promoted,
@@ -295,7 +360,7 @@ class DeliveryGateTest(unittest.TestCase):
 
     def test_a_repository_that_cannot_be_read_fails_closed(self):
         broken = self.repo / "vanished"
-        task = repository_task(
+        task = self.task(
             candidate_sha=self.base,
             verified_sha=self.base,
             promoted_sha=self.base,
@@ -312,6 +377,61 @@ class DeliveryGateTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "before this task enters done"):
             resolve_transition_mode(str(self.repo), DEFINITION, legacy, None, target_state="done")
+
+class DeliveryWriteTest(unittest.TestCase):
+    """Facts are checked when they are recorded, not only when the task completes."""
+
+    def setUp(self) -> None:
+        (ROOT / "tmp").mkdir(exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix="delivery-write-", dir=ROOT / "tmp")
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = Path(self.temporary.name)
+        git(self.repo, "init", "--quiet", "--initial-branch=main")
+        (self.repo / "README.md").write_text("teamflow\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "--quiet", "-m", "base")
+        self.base = git(self.repo, "rev-parse", "HEAD")
+        set_version_control(str(self.repo), enabled=True)
+        self.tl = assignment("tl", "agent_tl") | {"workspace_root": str(self.repo)}
+        self.board = FakeTaskBoard({
+            "record_id": "recRepo",
+            "task_id": "TF-0100",
+            "title": "仓库交付任务",
+            "status": "in_progress",
+            "delivery_mode": "repository",
+            "target_branch": "main",
+            "base_sha": self.base,
+            "type": "development",
+            "priority": "P1",
+            "role": "tl",
+            "description": "做事。",
+            "acceptance_criteria": "通过。",
+            "agent": "TL Agent",
+            "agent_id": "agent_tl",
+            "progress": None,
+            "next_action": None,
+            "result_evidence": None,
+            "blocked_reason": None,
+            "waiting_on": None,
+        })
+
+    def record(self, sha: str) -> dict[str, object]:
+        read, write = self.board.patches()
+        with read, write:
+            return update_task(self.tl, record_id="recRepo", delivery={"candidate_sha": sha})
+
+    def test_a_commit_id_that_does_not_exist_here_is_refused_on_the_spot(self):
+        refused = self.record("e" * 40)
+
+        self.assertFalse(refused["ok"])
+        self.assertIsNone(self.board.task.get("candidate_sha"))
+
+    def test_a_real_commit_is_recorded(self):
+        recorded = self.record(self.base)
+
+        self.assertTrue(recorded["ok"], recorded.get("error"))
+        self.assertEqual(self.board.task["candidate_sha"], self.base)
+
 
 class LegacyModeGateTest(unittest.TestCase):
     """A card created before delivery_mode existed must pick one before it moves on."""

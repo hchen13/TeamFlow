@@ -29,6 +29,7 @@ from .delivery import (
     AGENT_SHA_FIELDS,
     mode_of,
     reject_repository_only_input,
+    verify_supplied_shas,
     claim_baseline,
     normalize_delivery_input,
     completion_failure,
@@ -522,6 +523,7 @@ def _apply_delivery(
     if mode:
         patch["delivery_mode"] = mode
     reject_repository_only_input(mode or mode_of(task), delivery)
+    verify_supplied_shas(workspace, delivery)
 
     for field in AGENT_SHA_FIELDS:
         if field in delivery:

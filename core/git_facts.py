@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
 
 
-OBJECT_ID = re.compile(r"\A[0-9a-f]{40}\Z")
+# SHA-1 and SHA-256 repositories name commits with 40 and 64 hex digits respectively.
+OBJECT_ID = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 
 class GitFactError(ValueError):
@@ -20,6 +22,9 @@ def _run(repo: str | Path, *args: str, allowed: tuple[int, ...] = (0,)) -> tuple
             capture_output=True,
             text=True,
             timeout=20,
+            # Replacement objects can rewrite history for every read command, so an
+            # attacker-supplied refs/replace entry could forge ancestry for this gate.
+            env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise GitFactError(f"git could not run in {repo}: {error}") from error

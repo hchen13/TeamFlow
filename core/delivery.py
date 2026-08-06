@@ -37,7 +37,7 @@ def delivery_constraints(workspace: str | None, definition: dict[str, Any]) -> d
         "submittable_fields": ["delivery_mode", *AGENT_SHA_FIELDS, "resources"],
         "system_fields": list(SYSTEM_FIELDS),
         "resource_kinds": list(RESOURCE_KINDS),
-        "sha_format": "full 40-character commit object id",
+        "sha_format": "full commit object id (40 or 64 lowercase hex digits)",
     }
 
 
@@ -68,7 +68,7 @@ def normalize_delivery_input(delivery: Any, *, workspace: str | None) -> dict[st
             continue
         if not is_object_id(value):
             raise ValueError(
-                f"{field} must be a full 40-character commit id; "
+                f"{field} must be a full commit id (40 or 64 lowercase hex digits); "
                 f"branches, tags, HEAD, abbreviated ids and rev expressions are rejected"
             )
         normalized[field] = value
@@ -213,6 +213,23 @@ def reject_repository_only_input(mode: str, delivery: dict[str, Any]) -> None:
         )
 
 
+def verify_supplied_shas(workspace: str | None, delivery: dict[str, Any]) -> None:
+    """A recorded id must already name a commit here; a typo must not surface at completion."""
+    supplied = {field: delivery[field] for field in AGENT_SHA_FIELDS if field in delivery}
+    if not supplied:
+        return
+    repo = str(Path(workspace or ".").expanduser().resolve())
+    try:
+        ensure_repository(repo)
+        missing = sorted(field for field, sha in supplied.items() if not commit_exists(repo, sha))
+    except GitFactError as error:
+        raise ValueError(f"git could not confirm the supplied commit ids: {error}") from error
+    if missing:
+        raise ValueError(
+            f"{', '.join(missing)} does not name a commit in this repository"
+        )
+
+
 def claim_baseline(workspace: str | None, task: dict[str, Any]) -> dict[str, Any]:
     """Pin the target branch and its exact SHA the first time a repository task is claimed."""
     if mode_of(task) != "repository":
@@ -273,10 +290,18 @@ def completion_failure(
 
         candidate = resolved.get("candidate_sha")
         base = str(merged.get("base_sha") or "").strip()
-        if candidate and base:
-            if not commit_exists(repo, base):
-                failures.append({"check": "base_sha", "current": base, "expected": "a commit that exists"})
-            elif not is_ancestor(repo, base, candidate):
+        if not base:
+            # Without a baseline there is nothing to prove the candidate was built on,
+            # so the ancestry check below would silently never run.
+            failures.append({
+                "check": "base_sha",
+                "current": None,
+                "expected": "a baseline commit pinned at the first claim",
+            })
+        elif not commit_exists(repo, base):
+            failures.append({"check": "base_sha", "current": base, "expected": "a commit that exists"})
+        elif candidate:
+            if not is_ancestor(repo, base, candidate):
                 failures.append({
                     "check": "base_ancestry",
                     "current": {"base_sha": base, "candidate_sha": candidate},
