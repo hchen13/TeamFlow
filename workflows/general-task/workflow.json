@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "key": "general-task",
   "labels": {
     "zh-CN": "通用任务",

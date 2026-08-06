@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
+from uuid import uuid4
 
 from .config import resolve_workspace_paths
 
@@ -39,7 +41,11 @@ def read_workspace_settings(workspace: str | None) -> dict[str, Any]:
 
 
 def set_version_control(workspace: str | None, *, enabled: bool) -> dict[str, Any]:
-    settings = ensure_workspace_settings(workspace)
+    """An explicit switch also repairs a corrupt file; ordinary reads still fail closed."""
+    try:
+        settings = ensure_workspace_settings(workspace)
+    except ValueError:
+        settings = default_settings()
     settings["version_control"]["enabled"] = bool(enabled)
     return _write(workspace, settings)
 
@@ -64,9 +70,21 @@ def _validate(settings: Any, path: Any) -> None:
 
 def _write(workspace: str | None, settings: dict[str, Any]) -> dict[str, Any]:
     paths = resolve_workspace_paths(workspace)
-    paths.settings_path.write_text(
-        json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    paths.state_dir.mkdir(parents=True, exist_ok=True)
+    temporary = paths.settings_path.with_name(
+        f".{paths.settings_path.name}.{os.getpid()}.{uuid4().hex}.tmp"
     )
-    paths.settings_path.chmod(0o600)
+    try:
+        temporary.write_text(
+            json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.chmod(0o600)
+        # Replace atomically so a crashed write never leaves a truncated file behind.
+        temporary.replace(paths.settings_path)
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
     return settings

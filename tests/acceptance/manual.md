@@ -370,6 +370,27 @@ DISPATCH NOT-REQUIRED reason="当前变更不通知 Agent"
 
 刷新页面、点击空白处或切换浏览器焦点不能让状态超过 2 秒停在“正在确认”，也不能形成持续无意义的 `/api/codex` 请求。
 
+## 13. 用例九：仓库交付门禁
+
+前置：UI 第一步已启用版本控制，工作区是一个已有 `main` 的 Git 仓库。
+
+1. PM 建一张 `delivery_mode=repository` 的开发卡并路由 TL。
+2. TL 认领——卡片上应自动出现 `target_branch=main` 与当时 `main` 的精确 SHA。
+3. TL 建分支与 worktree，用 `delivery.resources` 声明它们，提交候选后用 `delivery.candidate_sha` 记录完整 SHA。
+4. 走完 QA 与 PM 评审，把 `verified_sha` / `promoted_sha` 记录为同一个 SHA，并真正把候选合入 `main`。
+5. 在**尚未删除**声明的 branch/worktree 时尝试 `approve`。
+6. 删除它们之后再次 `approve`。
+
+通过条件：
+
+- 第 5 步必须被 `delivery_incomplete` 拒绝，`failures` 指出仍存在的 branch/worktree，卡片**没有**进入 `done`。
+- 第 6 步通过，卡片进入 `done`。
+- 提交分支名、`HEAD`、tag 或缩写 SHA 作为 `candidate_sha` 会被 `invalid_delivery` 拒绝。
+- 尝试提交 `target_branch` 或 `base_sha` 会被拒绝。
+- `main` 在候选晋升后又前进一次，不影响第 6 步通过。
+- 全程 TeamFlow 没有代为执行任何 merge、ff 或删除。
+- 旧看板首次访问时自动补齐交付字段，不需要手工重建。
+
 ## 13. 结束条件
 
 满足以下条件才能判定一个版本通过真实链路验收：

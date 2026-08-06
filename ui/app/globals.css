@@ -2722,3 +2722,25 @@ button.accessCheck.failed:focus-visible {
     grid-column: 2;
   }
 }
+
+.versionControlToggle {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-top: 20px;
+  padding-top: 20px;
+}
+
+.versionControlToggle label {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+}
+
+.versionControlToggle small {
+  color: var(--muted);
+  display: block;
+  margin-top: 2px;
+}

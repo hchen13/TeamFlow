@@ -32,7 +32,8 @@ PROJECT_ROOT=/absolute/path/to/project
    ```
 
 4. **在 Codex 中安装并启用 TeamFlow 插件**，并在插件页信任 TeamFlow 列出的**全部** Hook，当前为 `SessionStart`、`SessionEnd`、`UserPromptSubmit`、`Stop`。少信任任何一个都会让职责注入或会话状态上报失效；以插件页实际列出的为准。插件页没有逐 MCP 工具授权开关；后台 MCP 自动批准在第 8 步通过 TeamFlow UI 或 `authorize-codex-tools` 配置。
-5. **应用密钥由用户从开放平台取得并 export 到环境变量**。CLI 只接收环境变量名，不接收密钥本身。
+5. **版本控制开关**在 UI 第一步「协作模式」里，默认启用。启用后，选择 `repository` 交付的任务必须先把候选晋升到 `main` 并清理自己声明的临时 branch/worktree 才能完成；关闭只是不再允许**新**选择 `repository`，已锁定的任务仍受门禁约束。TeamFlow 不会自动 `git init`，也不代为执行任何 Git 变更。
+6. **应用密钥由用户从开放平台取得并 export 到环境变量**。CLI 只接收环境变量名，不接收密钥本身。
 
 ## 1. 初始化工作区
 

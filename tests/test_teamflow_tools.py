@@ -17,6 +17,7 @@ from core.teamflow_tools import (
     update_task,
     workflow_contract,
 )
+from core.workflow_validation import WORKFLOW_SCHEMA_VERSION
 from core.workflow import (
     load_workflow_definition,
     task_option_definitions,
@@ -99,7 +100,7 @@ class WorkflowActionTest(unittest.TestCase):
             for item in task_option_definitions(definition)["status"]
         }
 
-        self.assertEqual(definition["schema_version"], 2)
+        self.assertEqual(definition["schema_version"], WORKFLOW_SCHEMA_VERSION)
         self.assertEqual(
             set(definition["lifecycle"]["actions"]),
             {"create", "update", "route", "claim", "submit", "block", "review", "cancel"},

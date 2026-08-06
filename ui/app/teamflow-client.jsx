@@ -810,14 +810,19 @@ function WorkflowStep({ actions, currentWorkflow, lang, state, t }) {
       <form action={actions.setVersionControl} className="versionControlToggle">
         <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
         <input name="step" type="hidden" value="workflow" suppressHydrationWarning />
-        <input name="enabled" type="hidden" value={versionControlEnabled ? "false" : "true"} suppressHydrationWarning />
-        <div>
-          <strong>{t.versionControlTitle}</strong>
-          <p>{t.versionControlHint}</p>
-        </div>
-        <button className={versionControlEnabled ? "primary compact" : "compact"} type="submit">
-          {versionControlEnabled ? t.versionControlOn : t.versionControlOff}
-        </button>
+        <label>
+          <input
+            defaultChecked={versionControlEnabled}
+            name="enabled"
+            type="checkbox"
+            value="true"
+          />
+          <span>
+            <strong>{t.versionControlTitle}</strong>
+            <small>{t.versionControlHint}</small>
+          </span>
+        </label>
+        <button className="compact" type="submit">{t.save}</button>
       </form>
     </div>
   );

@@ -526,6 +526,38 @@ class LarkBoardTest(unittest.TestCase):
         self.assertEqual(verification["summary"]["verified"], 2)
         self.assertEqual(self.client.max_active_writes, 1)
 
+    def test_a_board_initialized_before_the_delivery_fields_upgrades_itself(self):
+        configure_lark_board(
+            self.workspace,
+            board_url="https://example.feishu.cn/base/bascnTest?table=tblDefault&view=vewGrid",
+        )
+        verify_lark_board(self.workspace)
+        initialize_lark_board(self.workspace, task_prefix="TF")
+
+        delivery_names = {"交付方式", "候选 SHA", "已验证 SHA", "已晋升 SHA", "交付资源", "目标分支", "基线 SHA"}
+        self.client.fields = [
+            field for field in self.client.fields if field["field_name"] not in delivery_names
+        ]
+        self.assertFalse(
+            delivery_names & {field["field_name"] for field in self.client.fields}
+        )
+        created_before = self.client.created_fields
+
+        written = upsert_lark_task(
+            self.workspace,
+            task={"title": "旧看板任务", "status": "backlog", "delivery_mode": "repository"},
+        )
+
+        self.assertTrue(written["ok"])
+        self.assertEqual(written["task"]["delivery_mode"], "repository")
+        self.assertGreater(self.client.created_fields, created_before)
+        self.assertTrue(
+            delivery_names <= {field["field_name"] for field in self.client.fields}
+        )
+
+        read_back = get_lark_task(self.workspace, record_id=written["task"]["record_id"])
+        self.assertEqual(read_back["task"]["delivery_mode"], "repository")
+
     def test_switching_boards_discards_stale_verification(self):
         self.client.write_delay = 0.1
         errors = []

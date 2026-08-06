@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 
+WORKFLOW_SCHEMA_VERSION = 3
 LOCALES = ("zh-CN", "en")
 TASK_FIELD_KEYS = frozenset({
     "title",
@@ -134,8 +135,13 @@ def validate_workflow_definition(definition: Any, path: Path) -> None:
         raise ValueError(f"workflow definition must be an object: {path}")
     _reject_unknown_fields(definition, WORKFLOW_DEFINITION_FIELDS, str(path))
     _require_fields(definition, WORKFLOW_DEFINITION_FIELDS, str(path))
-    if definition.get("schema_version") != 2:
-        raise ValueError(f"unsupported workflow schema version: {path}")
+    if definition.get("schema_version") != WORKFLOW_SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported workflow schema version {definition.get('schema_version')!r}: {path}. "
+            f"This build requires schema_version {WORKFLOW_SCHEMA_VERSION}: set it, add "
+            "lifecycle.completion_states (a non-empty subset of terminal_states), and re-run "
+            "initialize-lark-board so the board gains the common delivery fields."
+        )
     key = _required_text(definition, "key", path)
     if key != path.parent.name:
         raise ValueError(f"workflow key must match its directory name: {path}")

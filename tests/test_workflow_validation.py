@@ -13,6 +13,7 @@ from core.workflow import (
 from core.workflow_contract import workflow_contract
 from core.workflow_rule_validation import validate_rule
 from core.workflow_validation import (
+    WORKFLOW_SCHEMA_VERSION,
     WORKFLOW_ACTION_KEYS,
     validate_workflow_definition,
 )
@@ -41,7 +42,7 @@ class WorkflowValidationTest(unittest.TestCase):
         self.assertTrue(definitions)
         for key, definition in definitions.items():
             with self.subTest(workflow=key):
-                self.assertEqual(definition["schema_version"], 2)
+                self.assertEqual(definition["schema_version"], WORKFLOW_SCHEMA_VERSION)
                 self.assertEqual(
                     set(definition["lifecycle"]["actions"]),
                     WORKFLOW_ACTION_KEYS,

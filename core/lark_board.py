@@ -1218,6 +1218,9 @@ def _task_context(
     field_specs = task_field_specs(definition, locale)
     client = LarkBoardClient(identity, board)
     bundle = client.get_table(board["table_id"])
+    # A board configured before a field was added still has to be readable, so the
+    # same idempotent creation the initialize step uses runs before strict mapping.
+    _ensure_task_fields(client, board["table_id"], bundle, field_specs, task_field_aliases())
     return (
         paths,
         board,

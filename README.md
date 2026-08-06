@@ -18,6 +18,10 @@ TeamFlow 是一个面向 Codex 的多智能体项目协作系统。它把独立�
 
 TeamFlow 把 Agent、角色、任务、工作流和事件连接到同一个项目协作层。人负责目标和决策，Agent 围绕共享看板协作，每一次任务推进都有明确的负责人、状态和结果证据。
 
+## 版本控制与仓库交付
+
+工作区可在 UI 第一步开启版本控制（默认开启，配置存在 `.teamflow/settings.json`）。开启后任务要在 `standard` 与 `repository` 之间选一种交付方式；`repository` 任务在完成前必须满足：`candidate_sha` / `verified_sha` / `promoted_sha` 是同一个完整 commit id、`base_sha` 是候选的祖先、`main` 包含该候选、并且卡片声明过的临时 branch 与 worktree 都已清理。TeamFlow 只读取、记录和拒绝，从不代为 merge、fast-forward 或删除。
+
 ## 核心能力
 
 - 为每个项目创建独立的 `.teamflow/teamflow.db`。

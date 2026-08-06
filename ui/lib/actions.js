@@ -186,6 +186,7 @@ export async function selectWorkflow(formData) {
 export async function setVersionControl(formData) {
   const args = ["set-version-control", ...workspaceArgs()];
   const lang = language(formData);
+  // An unchecked checkbox sends no value at all, so absence is the disabled case.
   args.push(field(formData, "enabled") === "true" ? "--enable" : "--disable");
   await finish(args, {}, "lark", "versionControlUpdated", lang, field(formData, "step"));
 }

@@ -108,7 +108,7 @@
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `schema_version` | 是 | 固定为 `2` |
+| `schema_version` | 是 | 固定为 `3` |
 | `key` | 是 | 稳定标识，必须与所在目录名一致 |
 | `labels` | 是 | 双语名称 |
 | `short_descriptions` | 是 | 双语短描述 |
@@ -415,6 +415,8 @@ defaults
 11. 按 [`tests/acceptance/manual.md`](../../tests/acceptance/manual.md) 执行至少一次真实 Agent、真实看板验收。
 
 ## 13. 版本变更规则
+
+当前语法版本为 `3`：相对 `2` 增加了 `lifecycle.completion_states`（`terminal_states` 的非空子集，标记「真正完成」而非「终态」）与七个公共交付字段（`delivery_mode`、`target_branch`、`base_sha`、`candidate_sha`、`verified_sha`、`promoted_sha`、`delivery_resources`）。旧定义会被明确拒绝并给出升级提示，本实现不做多版本兼容。
 
 `schema_version` 描述的是机器定义语法，不是文档或单个协作模式的发布版本。以下变化不改变当前语法：
 
