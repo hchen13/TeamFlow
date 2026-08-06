@@ -8,6 +8,7 @@ from pathlib import Path
 
 from core.delivery import (
     append_resources,
+    normalize_delivery_input,
     claim_baseline,
     completion_failure,
     resolve_transition_mode,
@@ -222,6 +223,93 @@ class DeliveryGateTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "choose a delivery_mode"):
             resolve_transition_mode(str(self.repo), DEFINITION, legacy, None, target_state="ready")
+
+    def test_system_owned_fields_cannot_be_supplied_by_an_agent(self):
+        for field in ("target_branch", "base_sha"):
+            with self.assertRaisesRegex(ValueError, "set by TeamFlow"):
+                normalize_delivery_input({field: "main"}, workspace=str(self.repo))
+
+    def test_only_full_commit_ids_are_accepted_as_delivery_shas(self):
+        for rejected in ("main", "HEAD", "v1.0", self.base[:8], "HEAD~1", "main@{0}"):
+            with self.assertRaisesRegex(ValueError, "full 40-character commit id"):
+                normalize_delivery_input({"candidate_sha": rejected}, workspace=str(self.repo))
+
+        accepted = normalize_delivery_input({"candidate_sha": self.base}, workspace=str(self.repo))
+        self.assertEqual(accepted["candidate_sha"], self.base)
+
+    def test_a_full_id_that_is_not_a_commit_in_this_repository_blocks(self):
+        task = repository_task(
+            candidate_sha="b" * 40,
+            verified_sha="b" * 40,
+            promoted_sha="b" * 40,
+        )
+
+        self.assertIn("candidate_sha", self.checks(task))
+
+    def test_main_may_move_on_after_the_candidate_is_promoted(self):
+        promoted = self.commit("feature")
+        self.commit("unrelated")
+        task = repository_task(
+            base_sha=self.base,
+            candidate_sha=promoted,
+            verified_sha=promoted,
+            promoted_sha=promoted,
+        )
+
+        self.assertIsNone(self.blocked(task))
+
+    def test_a_base_that_is_not_an_ancestor_of_the_candidate_blocks(self):
+        promoted = self.commit("feature")
+        orphan = git(self.repo, "commit-tree", "-m", "orphan", f"{self.base}^{{tree}}")
+        task = repository_task(
+            base_sha=orphan,
+            candidate_sha=promoted,
+            verified_sha=promoted,
+            promoted_sha=promoted,
+        )
+
+        self.assertIn("base_ancestry", self.checks(task))
+
+    def test_resources_reject_unknown_keys_and_non_string_entries(self):
+        with self.assertRaisesRegex(ValueError, "only accepts branches, worktrees"):
+            normalize_delivery_input({"resources": {"tags": []}}, workspace=str(self.repo))
+        with self.assertRaisesRegex(ValueError, "must be an array of strings"):
+            normalize_delivery_input({"resources": {"branches": "one"}}, workspace=str(self.repo))
+        with self.assertRaisesRegex(ValueError, "must be an array of strings"):
+            normalize_delivery_input({"resources": {"worktrees": [1]}}, workspace=str(self.repo))
+        with self.assertRaisesRegex(ValueError, "resources must be an object"):
+            normalize_delivery_input({"resources": []}, workspace=str(self.repo))
+
+    def test_a_relative_worktree_path_resolves_against_the_workspace(self):
+        normalized = normalize_delivery_input(
+            {"resources": {"worktrees": [".teamflow/worktrees/T-1/task"]}},
+            workspace=str(self.repo),
+        )
+
+        self.assertEqual(
+            normalized["resources"]["worktrees"],
+            [str((self.repo / ".teamflow/worktrees/T-1/task").resolve())],
+        )
+
+    def test_a_repository_that_cannot_be_read_fails_closed(self):
+        broken = self.repo / "vanished"
+        task = repository_task(
+            candidate_sha=self.base,
+            verified_sha=self.base,
+            promoted_sha=self.base,
+            delivery_resources=append_resources(None, {"branches": ["teamflow/T-1/task"]}),
+        )
+
+        failure = completion_failure(str(broken), DEFINITION, task, {"status": "done"})
+
+        self.assertIsNotNone(failure)
+        self.assertEqual([item["check"] for item in failure["failures"]], ["git_probe"])
+
+    def test_a_missing_delivery_mode_blocks_entry_into_a_completion_state(self):
+        legacy = {"status": "review", "delivery_mode": None}
+
+        with self.assertRaisesRegex(ValueError, "before this task enters done"):
+            resolve_transition_mode(str(self.repo), DEFINITION, legacy, None, target_state="done")
 
 
 if __name__ == "__main__":

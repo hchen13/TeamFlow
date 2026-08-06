@@ -144,8 +144,13 @@ def create_task(
     additional_context: str = "",
     acceptance_criteria: str = "",
     dependencies: str = "",
+    delivery_mode: str = "",
 ) -> dict[str, Any]:
-    """Create a workflow task. The workflow decides who may create it and its required initial state."""
+    """Create a workflow task. The workflow decides who may create it and its required initial state.
+
+    delivery_mode picks how the task ships: "standard", or "repository" when the workspace
+    has version control enabled. get_assignment reports which modes this workspace allows.
+    """
     return _invoke("create_task", {
         "title": title,
         "task_type": task_type,
@@ -155,17 +160,28 @@ def create_task(
         "context": additional_context,
         "acceptance_criteria": acceptance_criteria,
         "dependencies": dependencies,
+        "delivery_mode": delivery_mode,
     }, context)
 
 
 @mcp.tool()
 def update_task(
     record_id: str,
-    fields: dict[str, Any],
     context: Context,
+    fields: dict[str, Any] | None = None,
+    delivery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Update ordinary task fields allowed for the caller, current state, and workflow. Lifecycle fields are rejected."""
-    return _invoke("update_task", {"record_id": record_id, "fields": fields}, context)
+    """Update ordinary task fields allowed for the caller, current state, and workflow. Lifecycle fields are rejected.
+
+    delivery records repository facts and accepts delivery_mode, candidate_sha, verified_sha,
+    promoted_sha (full 40-character commit ids) and resources {branches, worktrees}. It may be
+    sent on its own, without fields. target_branch and base_sha are set by TeamFlow.
+    """
+    return _invoke(
+        "update_task",
+        {"record_id": record_id, "fields": fields, "delivery": delivery},
+        context,
+    )
 
 
 @mcp.tool()
@@ -182,14 +198,20 @@ def submit_task(
     context: Context,
     progress: str = "",
     next_action: str = "",
+    delivery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Submit claimed work with a workflow-defined outcome and evidence for its next review stage."""
+    """Submit claimed work with a workflow-defined outcome and evidence for its next review stage.
+
+    delivery carries the same repository facts as update_task and is how a repository task
+    records the candidate it produced or the promotion it completed.
+    """
     return _invoke("submit_task", {
         "record_id": record_id,
         "outcome": outcome,
         "result_evidence": result_evidence,
         "progress": progress,
         "next_action": next_action,
+        "delivery": delivery,
     }, context)
 
 

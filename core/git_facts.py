@@ -31,6 +31,11 @@ def _run(repo: str | Path, *args: str, allowed: tuple[int, ...] = (0,)) -> tuple
     return result.returncode, result.stdout
 
 
+def ensure_repository(repo: str | Path) -> None:
+    """Raise unless `repo` is a readable git repository, so later probes mean what they say."""
+    _run(repo, "rev-parse", "--git-dir")
+
+
 def is_object_id(value: str) -> bool:
     return bool(OBJECT_ID.fullmatch(str(value or "").strip()))
 

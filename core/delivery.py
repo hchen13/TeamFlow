@@ -6,6 +6,7 @@ from typing import Any
 
 from .git_facts import (
     GitFactError,
+    ensure_repository,
     branch_exists,
     branch_sha,
     commit_exists,
@@ -244,6 +245,7 @@ def completion_failure(
     leftover_worktrees: list[str] = []
 
     try:
+        ensure_repository(repo)
         resolved: dict[str, str] = {}
         for field in AGENT_SHA_FIELDS:
             value = str(merged.get(field) or "").strip()

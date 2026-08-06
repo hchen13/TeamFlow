@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .delivery import delivery_constraints
 from .workflow import task_option_definitions, workflow_definition_for_assignment
 
 
@@ -57,6 +58,8 @@ def workflow_contract(assignment: dict[str, Any]) -> dict[str, Any]:
         "coordinator_role": definition["coordinator_role"],
         "initial_state": lifecycle["initial_state"],
         "terminal_states": lifecycle["terminal_states"],
+        "completion_states": lifecycle["completion_states"],
+        "delivery": delivery_constraints(assignment.get("workspace_root"), definition),
         "states": [
             {
                 "key": state["key"],

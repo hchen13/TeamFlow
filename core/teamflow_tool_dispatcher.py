@@ -47,6 +47,7 @@ class TeamFlowToolDispatcher:
                     arguments.get("acceptance_criteria")
                 ),
                 dependencies=_optional_text(arguments.get("dependencies")),
+                delivery_mode=_optional_text(arguments.get("delivery_mode")),
                 invocation_id=invocation_id,
             )
         if tool_name == "update_task":
@@ -55,6 +56,7 @@ class TeamFlowToolDispatcher:
                 assignment,
                 record_id=record_id,
                 fields=fields if isinstance(fields, dict) else {},
+                delivery=_optional_delivery(arguments.get("delivery")),
                 invocation_id=invocation_id,
             )
         if tool_name == "route_task":
@@ -81,6 +83,7 @@ class TeamFlowToolDispatcher:
                 result_evidence=str(arguments.get("result_evidence") or ""),
                 progress=_optional_text(arguments.get("progress")),
                 next_action=_optional_text(arguments.get("next_action")),
+                delivery=_optional_delivery(arguments.get("delivery")),
                 invocation_id=invocation_id,
             )
         if tool_name == "block_task":
@@ -133,3 +136,12 @@ class TeamFlowToolDispatcher:
 def _optional_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _optional_delivery(value: Any) -> dict[str, Any] | None:
+    """Forward the delivery object untouched; delivery.py owns what is acceptable."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("delivery must be an object")
+    return value
