@@ -2922,7 +2922,7 @@ class LarkEventsTest(unittest.TestCase):
         )
         self.assertEqual(
             set(tools["submit_task"]["properties"]),
-            {"record_id", "outcome", "result_evidence", "progress", "next_action"},
+            {"record_id", "outcome", "result_evidence", "progress", "next_action", "delivery"},
         )
         self.assertEqual(
             set(tools["review_task"]["properties"]),
