@@ -436,3 +436,32 @@ class WorkflowValidationTest(unittest.TestCase):
             field: allowed_values.get(field, [values[field]])[0]
             for field in rule.get("required_inputs", [])
         }
+
+
+class DeliverySystemFieldTest(unittest.TestCase):
+    """A workflow cannot hand agents a direct write to the fields git pins."""
+
+    def rules(self):
+        definition = deepcopy(load_workflow_definition("software-development"))
+        return definition, definition["lifecycle"]["actions"]["update"]["rules"][0]
+
+    def test_a_system_field_cannot_be_declared_writable(self):
+        for field in ("target_branch", "base_sha", "delivery_resources"):
+            definition, rule = self.rules()
+            rule["writable_fields"] = [*rule["writable_fields"], field]
+            with self.assertRaises(ValueError):
+                validate_workflow_definition(definition, WORKFLOW_PATH)
+
+    def test_a_system_field_cannot_be_declared_clearable(self):
+        for field in ("target_branch", "base_sha", "delivery_resources"):
+            definition, rule = self.rules()
+            rule["clear_fields"] = [*rule.get("clear_fields", []), field]
+            with self.assertRaises(ValueError):
+                validate_workflow_definition(definition, WORKFLOW_PATH)
+
+    def test_an_agent_writable_field_is_still_accepted(self):
+        definition, rule = self.rules()
+        rule["writable_fields"] = [*rule["writable_fields"], "candidate_sha"]
+
+        validate_workflow_definition(definition, WORKFLOW_PATH)
+

@@ -5,7 +5,9 @@ import os
 import subprocess
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from core.delivery import (
     append_resources,
@@ -449,6 +451,38 @@ class DeliveryWriteTest(unittest.TestCase):
 
         self.assertFalse(refused["ok"])
         self.assertIsNone(self.board.task.get("candidate_sha"))
+
+    def test_a_workflow_that_declares_the_system_fields_writable_is_still_refused(self):
+        forced = deepcopy(DEFINITION)
+        for rule in forced["lifecycle"]["actions"]["update"]["rules"]:
+            rule["writable_fields"] = [
+                *rule["writable_fields"], "target_branch", "base_sha", "delivery_resources"
+            ]
+        ledger = append_resources(None, {"branches": ["teamflow/TF-0100/task"]})
+        self.board.task["delivery_resources"] = ledger
+
+        read, write = self.board.patches()
+        with read, write, patch(
+            "core.teamflow_tools.workflow_definition_for_assignment", return_value=forced
+        ), patch(
+            "core.workflow_lifecycle.workflow_definition_for_assignment", return_value=forced
+        ):
+            overwritten = update_task(
+                self.tl,
+                record_id="recRepo",
+                fields={"base_sha": "f" * 40, "target_branch": "release"},
+            )
+            cleared = update_task(
+                self.tl,
+                record_id="recRepo",
+                fields={"delivery_resources": ""},
+            )
+
+        self.assertFalse(overwritten["ok"])
+        self.assertFalse(cleared["ok"])
+        self.assertEqual(self.board.task["base_sha"], self.base)
+        self.assertEqual(self.board.task["target_branch"], "main")
+        self.assertEqual(self.board.task["delivery_resources"], ledger)
 
     def test_a_real_commit_is_recorded(self):
         recorded = self.record(self.base)
