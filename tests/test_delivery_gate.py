@@ -83,10 +83,11 @@ class DeliveryGateTest(unittest.TestCase):
 
         self.assertIsNone(self.blocked(task))
 
-    def test_disabled_version_control_skips_the_gate_entirely(self):
+    def test_disabling_the_switch_does_not_release_an_already_locked_task(self):
         set_version_control(str(self.repo), enabled=False)
 
-        self.assertIsNone(self.blocked(repository_task(candidate_sha=self.base)))
+        self.assertIsNotNone(self.blocked(repository_task(candidate_sha=self.base)))
+        self.assertIsNone(self.blocked(repository_task(delivery_mode="standard")))
 
     def test_a_fully_promoted_and_cleaned_task_passes(self):
         task = repository_task(

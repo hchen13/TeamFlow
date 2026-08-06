@@ -4,13 +4,22 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .git_facts import branch_exists, branch_sha, resolve_commit, worktree_paths
+from .git_facts import (
+    GitFactError,
+    branch_exists,
+    branch_sha,
+    commit_exists,
+    is_ancestor,
+    is_object_id,
+    worktree_paths,
+)
 from .workspace_settings import version_control_enabled
 
 
 DELIVERY_MODES = ("standard", "repository")
 DEFAULT_TARGET_BRANCH = "main"
-SHA_FIELDS = ("base_sha", "candidate_sha", "verified_sha", "promoted_sha")
+AGENT_SHA_FIELDS = ("candidate_sha", "verified_sha", "promoted_sha")
+SYSTEM_FIELDS = ("target_branch", "base_sha")
 RESOURCE_KINDS = ("branches", "worktrees")
 
 
@@ -24,7 +33,74 @@ def delivery_constraints(workspace: str | None, definition: dict[str, Any]) -> d
         "modes": list(DELIVERY_MODES),
         "target_branch": DEFAULT_TARGET_BRANCH,
         "completion_states": list(completion_states(definition)),
+        "submittable_fields": ["delivery_mode", *AGENT_SHA_FIELDS, "resources"],
+        "system_fields": list(SYSTEM_FIELDS),
+        "resource_kinds": list(RESOURCE_KINDS),
+        "sha_format": "full 40-character commit object id",
     }
+
+
+def normalize_delivery_input(delivery: Any, *, workspace: str | None) -> dict[str, Any]:
+    """Reject anything an agent must not set, and anything git cannot trust."""
+    if delivery is None:
+        return {}
+    if not isinstance(delivery, dict):
+        raise ValueError("delivery must be an object")
+    unknown = set(delivery) - {"delivery_mode", *AGENT_SHA_FIELDS, "resources"}
+    if unknown:
+        overridden = sorted(unknown & set(SYSTEM_FIELDS))
+        if overridden:
+            raise ValueError(
+                f"{', '.join(overridden)} is set by TeamFlow and cannot be supplied: "
+                f"the target branch is always {DEFAULT_TARGET_BRANCH} and the baseline is "
+                "pinned at the first claim"
+            )
+        raise ValueError(f"unknown delivery fields: {', '.join(sorted(unknown))}")
+    normalized: dict[str, Any] = {}
+    if "delivery_mode" in delivery:
+        normalized["delivery_mode"] = delivery["delivery_mode"]
+    for field in AGENT_SHA_FIELDS:
+        if field not in delivery:
+            continue
+        value = str(delivery[field] or "").strip()
+        if not value:
+            continue
+        if not is_object_id(value):
+            raise ValueError(
+                f"{field} must be a full 40-character commit id; "
+                f"branches, tags, HEAD, abbreviated ids and rev expressions are rejected"
+            )
+        normalized[field] = value
+    if "resources" in delivery:
+        normalized["resources"] = normalize_resource_input(delivery["resources"], workspace=workspace)
+    return normalized
+
+
+def normalize_resource_input(resources: Any, *, workspace: str | None) -> dict[str, list[str]]:
+    if not isinstance(resources, dict):
+        raise ValueError("delivery.resources must be an object")
+    unknown = set(resources) - set(RESOURCE_KINDS)
+    if unknown:
+        raise ValueError(
+            f"delivery.resources only accepts {', '.join(RESOURCE_KINDS)}; "
+            f"got {', '.join(sorted(unknown))}"
+        )
+    root = Path(workspace or ".").expanduser().resolve()
+    normalized: dict[str, list[str]] = {}
+    for kind in RESOURCE_KINDS:
+        values = resources.get(kind, [])
+        if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
+            raise ValueError(f"delivery.resources.{kind} must be an array of strings")
+        cleaned = []
+        for item in values:
+            value = item.strip()
+            if not value:
+                continue
+            if kind == "worktrees":
+                value = str((root / value).resolve() if not Path(value).is_absolute() else Path(value).resolve())
+            cleaned.append(value)
+        normalized[kind] = cleaned
+    return normalized
 
 
 def parse_resources(raw: Any) -> dict[str, list[str]]:
@@ -100,7 +176,7 @@ def resolve_transition_mode(
     if requested:
         if requested not in DELIVERY_MODES:
             raise ValueError(f"delivery_mode must be one of {', '.join(DELIVERY_MODES)}")
-        if requested == "repository" and not enabled:
+        if requested == "repository" and not enabled and current != "repository":
             raise ValueError(
                 "this workspace has version control disabled, so repository delivery is unavailable"
             )
@@ -114,10 +190,13 @@ def resolve_transition_mode(
         return None
     if not enabled:
         return "standard"
-    if target_state and _dispatches_work(definition, target_state):
+    if target_state and (
+        _dispatches_work(definition, target_state)
+        or target_state in completion_states(definition)
+    ):
         raise ValueError(
             "choose a delivery_mode (standard or repository) before this task enters "
-            f"{target_state}"
+            f"{target_state}; PM can record it with a delivery-only update_task"
         )
     return None
 
@@ -149,72 +228,114 @@ def completion_failure(
     task: dict[str, Any],
     patch: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Repository facts that must hold before a task may enter a completion state."""
+    """Immutable Git facts that must hold before a task may enter a completion state."""
     merged = {**task, **patch}
     if str(patch.get("status") or "") not in completion_states(definition):
         return None
-    if not version_control_enabled(workspace) or mode_of(merged) != "repository":
+    # A task already locked to repository delivery keeps its gate even if the
+    # workspace switch is turned off afterwards.
+    if mode_of(merged) != "repository":
         return None
 
     repo = str(Path(workspace or ".").expanduser().resolve())
-    branch = str(merged.get("target_branch") or DEFAULT_TARGET_BRANCH).strip()
+    branch = DEFAULT_TARGET_BRANCH
     failures: list[dict[str, Any]] = []
-
-    resolved = {}
-    for field in ("candidate_sha", "verified_sha", "promoted_sha"):
-        value = str(merged.get(field) or "").strip()
-        if not value:
-            failures.append({"check": field, "current": None, "expected": "a recorded commit"})
-            continue
-        commit = resolve_commit(repo, value)
-        if commit is None:
-            failures.append({"check": field, "current": value, "expected": "a commit that exists"})
-            continue
-        resolved[field] = commit
-
-    if len(resolved) == 3 and len(set(resolved.values())) != 1:
-        failures.append({
-            "check": "verified_candidate",
-            "current": dict(resolved),
-            "expected": "candidate_sha, verified_sha and promoted_sha resolve to one commit",
-        })
-
-    head = branch_sha(repo, branch)
-    promoted = resolved.get("promoted_sha")
-    if promoted and head != promoted:
-        failures.append({
-            "check": "target_branch",
-            "current": {"branch": branch, "sha": head},
-            "expected": {"branch": branch, "sha": promoted},
-        })
+    leftover_branches: list[str] = []
+    leftover_worktrees: list[str] = []
 
     try:
-        resources = parse_resources(merged.get("delivery_resources"))
-    except ValueError as error:
-        failures.append({"check": "delivery_resources", "current": str(error), "expected": "valid JSON"})
-        resources = {kind: [] for kind in RESOURCE_KINDS}
+        resolved: dict[str, str] = {}
+        for field in AGENT_SHA_FIELDS:
+            value = str(merged.get(field) or "").strip()
+            if not value:
+                failures.append({"check": field, "current": None, "expected": "a recorded commit id"})
+            elif not commit_exists(repo, value):
+                failures.append({
+                    "check": field,
+                    "current": value,
+                    "expected": "a full commit id that exists in this repository",
+                })
+            else:
+                resolved[field] = value
 
-    leftover_branches = [name for name in resources["branches"] if branch_exists(repo, name)]
-    if leftover_branches:
-        failures.append({
-            "check": "declared_branches",
-            "current": leftover_branches,
-            "expected": "every declared branch is deleted",
-        })
+        if len(resolved) == len(AGENT_SHA_FIELDS) and len(set(resolved.values())) != 1:
+            failures.append({
+                "check": "verified_candidate",
+                "current": dict(resolved),
+                "expected": "candidate_sha, verified_sha and promoted_sha are the same commit",
+            })
 
-    registered = worktree_paths(repo)
-    leftover_worktrees = [
-        path
-        for path in resources["worktrees"]
-        if str(Path(path).expanduser().resolve()) in registered
-        or Path(path).expanduser().exists()
-    ]
-    if leftover_worktrees:
-        failures.append({
-            "check": "declared_worktrees",
-            "current": leftover_worktrees,
-            "expected": "every declared worktree is removed",
-        })
+        candidate = resolved.get("candidate_sha")
+        base = str(merged.get("base_sha") or "").strip()
+        if candidate and base:
+            if not commit_exists(repo, base):
+                failures.append({"check": "base_sha", "current": base, "expected": "a commit that exists"})
+            elif not is_ancestor(repo, base, candidate):
+                failures.append({
+                    "check": "base_ancestry",
+                    "current": {"base_sha": base, "candidate_sha": candidate},
+                    "expected": "base_sha is an ancestor of candidate_sha",
+                })
+
+        head = branch_sha(repo, branch)
+        if candidate:
+            if head is None:
+                failures.append({
+                    "check": "target_branch",
+                    "current": {"branch": branch, "sha": None},
+                    "expected": f"{branch} exists",
+                })
+            elif not is_ancestor(repo, candidate, head):
+                # main may move on after this task is promoted, but it must not
+                # have lost the candidate.
+                failures.append({
+                    "check": "target_branch",
+                    "current": {"branch": branch, "sha": head},
+                    "expected": f"{branch} contains candidate_sha {candidate}",
+                })
+
+        try:
+            resources = parse_resources(merged.get("delivery_resources"))
+        except ValueError as error:
+            failures.append({
+                "check": "delivery_resources",
+                "current": str(error),
+                "expected": "valid JSON with branches and worktrees arrays",
+            })
+            resources = {kind: [] for kind in RESOURCE_KINDS}
+
+        leftover_branches = [name for name in resources["branches"] if branch_exists(repo, name)]
+        if leftover_branches:
+            failures.append({
+                "check": "declared_branches",
+                "current": leftover_branches,
+                "expected": "every declared branch is deleted",
+            })
+
+        registered = worktree_paths(repo)
+        leftover_worktrees = [
+            path
+            for path in resources["worktrees"]
+            if str(Path(path).expanduser().resolve()) in registered
+            or Path(path).expanduser().exists()
+        ]
+        if leftover_worktrees:
+            failures.append({
+                "check": "declared_worktrees",
+                "current": leftover_worktrees,
+                "expected": "every declared worktree is removed",
+            })
+    except GitFactError as error:
+        # A probe that cannot answer is not evidence of a clean repository.
+        return {
+            "failures": [{
+                "check": "git_probe",
+                "current": str(error),
+                "expected": "git can be read in the workspace repository",
+            }],
+            "target_branch": branch,
+            "leftover_resources": {"branches": [], "worktrees": []},
+        }
 
     if not failures:
         return None

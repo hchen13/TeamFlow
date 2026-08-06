@@ -26,7 +26,9 @@ from .workflow_lifecycle import (
     provided_fields,
 )
 from .delivery import (
+    AGENT_SHA_FIELDS,
     claim_baseline,
+    normalize_delivery_input,
     completion_failure,
     append_resources,
     resolve_create_mode,
@@ -169,17 +171,19 @@ def update_task(
     assignment: dict[str, Any],
     *,
     record_id: str,
-    fields: dict[str, Any],
+    fields: dict[str, Any] | None = None,
     delivery: dict[str, Any] | None = None,
     invocation_id: str | None = None,
 ) -> dict[str, Any]:
-    if not isinstance(fields, dict) or not fields:
+    if not isinstance(fields, dict):
+        fields = {}
+    if not fields and not delivery:
         return input_error(
             assignment,
             action_key="update",
             code="fields_required",
-            message="update_task 至少需要一个待更新字段。",
-            details={"required": ["fields"]},
+            message="update_task 至少需要一个待更新字段或一组 delivery 事实。",
+            details={"required": ["fields", "delivery"]},
         )
     return _execute_existing_action(
         assignment,
@@ -347,6 +351,16 @@ def _execute_existing_action(
             expected=current_task,
             current=task,
         )
+    try:
+        delivery = normalize_delivery_input(delivery, workspace=assignment["workspace_root"])
+    except ValueError as error:
+        return input_error(
+            assignment,
+            action_key=action_key,
+            code="invalid_delivery",
+            message=str(error),
+            details={"delivery": delivery},
+        )
     prepared = prepare_existing_action(
         assignment,
         action_key=action_key,
@@ -358,7 +372,7 @@ def _execute_existing_action(
     )
     if not prepared["ok"]:
         return prepared
-    if prepared["already_applied"]:
+    if prepared["already_applied"] and not delivery:
         return action_success(
             assignment,
             prepared["definition"],
@@ -384,21 +398,6 @@ def _execute_existing_action(
             message=str(error),
             details={"delivery": delivery},
         )
-    blocked = completion_failure(
-        assignment["workspace_root"],
-        prepared["definition"],
-        task,
-        prepared["patch"],
-    )
-    if blocked:
-        return delivery_incomplete_error(
-            assignment,
-            prepared["definition"],
-            action_key=action_key,
-            variant=variant,
-            task=task,
-            blocked=blocked,
-        )
     latest = get_lark_task(assignment["workspace_root"], record_id=record_id)["task"]
     if latest != task:
         return task_changed_error(
@@ -408,6 +407,21 @@ def _execute_existing_action(
             variant=variant,
             expected=task,
             current=latest,
+        )
+    blocked = completion_failure(
+        assignment["workspace_root"],
+        prepared["definition"],
+        latest,
+        prepared["patch"],
+    )
+    if blocked:
+        return delivery_incomplete_error(
+            assignment,
+            prepared["definition"],
+            action_key=action_key,
+            variant=variant,
+            task=latest,
+            blocked=blocked,
         )
     result = upsert_lark_task(
         assignment["workspace_root"],
@@ -494,8 +508,6 @@ def _apply_delivery(
     definition = prepared["definition"]
     patch = prepared["patch"]
     delivery = delivery or {}
-    if not isinstance(delivery, dict):
-        raise ValueError("delivery must be an object")
 
     mode = resolve_transition_mode(
         workspace,
@@ -507,17 +519,14 @@ def _apply_delivery(
     if mode:
         patch["delivery_mode"] = mode
 
-    for field in ("target_branch", "base_sha", "candidate_sha", "verified_sha", "promoted_sha"):
-        if field in delivery and str(delivery[field] or "").strip():
-            patch[field] = str(delivery[field]).strip()
+    for field in AGENT_SHA_FIELDS:
+        if field in delivery:
+            patch[field] = delivery[field]
 
-    resources = delivery.get("resources")
-    if resources is not None:
-        if not isinstance(resources, dict):
-            raise ValueError("delivery.resources must be an object")
+    if "resources" in delivery:
         patch["delivery_resources"] = append_resources(
             task.get("delivery_resources"),
-            resources,
+            delivery["resources"],
         )
 
     if action_key == "claim":
