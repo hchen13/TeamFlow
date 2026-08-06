@@ -319,10 +319,8 @@ class CodexTurnTest(unittest.TestCase):
         self.assertEqual(stopped["status"], "interrupted")
         self.assertEqual(result_holder["turn"]["status"], "interrupted")
         self.assertEqual(turn_start_params["approvalPolicy"], "never")
-        self.assertEqual(
-            turn_start_params["sandboxPolicy"],
-            {"type": "workspaceWrite"},
-        )
+        self.assertEqual(turn_start_params["permissions"], ":workspace")
+        self.assertNotIn("sandboxPolicy", turn_start_params)
         interrupt = next(
             call.args[1]
             for call in send.call_args_list

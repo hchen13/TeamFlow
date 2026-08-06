@@ -196,7 +196,7 @@ def _run_codex_app_server_turn(
         on_started=on_started,
         stop_event=stop_event,
         approval_policy=str(permissions["approvalPolicy"]),
-        sandbox_policy=dict(permissions["sandboxPolicy"]),
+        permission_profile=str(permissions["permissions"]),
     )
 
 

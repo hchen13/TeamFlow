@@ -18,7 +18,7 @@ class CodexThreadPermissionsTest(unittest.TestCase):
 
         self.assertEqual(permissions, {
             "approvalPolicy": "never",
-            "sandboxPolicy": {"type": "dangerFullAccess"},
+            "permissions": ":danger-full-access",
         })
 
     def test_maps_persisted_workspace_access_to_unattended_workspace_write(self):
@@ -26,7 +26,7 @@ class CodexThreadPermissionsTest(unittest.TestCase):
 
         self.assertEqual(permissions, {
             "approvalPolicy": "never",
-            "sandboxPolicy": {"type": "workspaceWrite"},
+            "permissions": ":workspace",
         })
 
     def test_defaults_unknown_or_missing_settings_to_workspace_write(self):
@@ -38,16 +38,57 @@ class CodexThreadPermissionsTest(unittest.TestCase):
 
         expected = {
             "approvalPolicy": "never",
-            "sandboxPolicy": {"type": "workspaceWrite"},
+            "permissions": ":workspace",
         }
         self.assertEqual(missing, expected)
         self.assertEqual(unknown, expected)
+
+    def test_prefers_latest_explicit_profile_over_background_policy_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            codex_home = Path(directory)
+            rollout = codex_home / "sessions" / "rollout-thread_1.jsonl"
+            rollout.parent.mkdir()
+            rollout.write_text("\n".join([
+                json.dumps({
+                    "type": "response_item",
+                    "payload": {
+                        "thread_settings": {
+                            "permission_profile": {"type": "disabled"},
+                            "active_permission_profile": {"id": ":danger-full-access"},
+                        }
+                    },
+                }),
+                json.dumps({
+                    "type": "response_item",
+                    "payload": {
+                        "thread_settings": {
+                            "permission_profile": {"type": "managed"},
+                        }
+                    },
+                }),
+            ]), encoding="utf-8")
+            database = codex_home / "state_5.sqlite"
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, sandbox_policy TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO threads (id, rollout_path, sandbox_policy) VALUES (?, ?, ?)",
+                    ("thread_1", str(rollout), json.dumps({"type": "managed"})),
+                )
+            with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                permissions = codex_background_turn_permissions("thread_1")
+
+        self.assertEqual(permissions, {
+            "approvalPolicy": "never",
+            "permissions": ":danger-full-access",
+        })
 
     def test_app_server_turn_receives_the_persisted_background_permissions(self):
         expected = {"ok": True, "transport": "app-server"}
         permissions = {
             "approvalPolicy": "never",
-            "sandboxPolicy": {"type": "dangerFullAccess"},
+            "permissions": ":danger-full-access",
         }
         with (
             patch(
@@ -76,7 +117,7 @@ class CodexThreadPermissionsTest(unittest.TestCase):
             on_started=None,
             stop_event=None,
             approval_policy="never",
-            sandbox_policy={"type": "dangerFullAccess"},
+            permission_profile=":danger-full-access",
         )
 
     def _permissions_for(self, sandbox_policy: dict[str, str]) -> dict[str, object]:

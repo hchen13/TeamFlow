@@ -60,14 +60,16 @@ def codex_thread_settings(thread: dict[str, Any]) -> dict[str, str]:
 
 
 def codex_background_turn_permissions(thread_id: str) -> dict[str, Any]:
-    sandbox_type = _codex_persisted_sandbox_type(thread_id)
-    if sandbox_type in {"disabled", "dangerFullAccess", "danger-full-access"}:
-        sandbox_policy = {"type": "dangerFullAccess"}
-    else:
-        sandbox_policy = {"type": "workspaceWrite"}
+    permission_profile = _codex_explicit_permission_profile_id(thread_id)
+    if permission_profile is None:
+        sandbox_type = _codex_persisted_sandbox_type(thread_id)
+        if sandbox_type in {"disabled", "dangerFullAccess", "danger-full-access"}:
+            permission_profile = ":danger-full-access"
+        else:
+            permission_profile = ":workspace"
     return {
         "approvalPolicy": "never",
-        "sandboxPolicy": sandbox_policy,
+        "permissions": permission_profile,
     }
 
 
@@ -273,6 +275,35 @@ def _codex_persisted_sandbox_type(thread_id: str) -> str | None:
             return None
         sandbox_type = str(policy.get("type") or "").strip()
         return sandbox_type or None
+    return None
+
+
+def _codex_explicit_permission_profile_id(thread_id: str) -> str | None:
+    rollout_path = _codex_rollout_path(thread_id)
+    if rollout_path is None:
+        return None
+    try:
+        for raw_line in _reverse_lines(rollout_path):
+            if b'"thread_settings"' not in raw_line:
+                continue
+            try:
+                record = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            settings = payload.get("thread_settings")
+            if not isinstance(settings, dict):
+                continue
+            active = settings.get("active_permission_profile")
+            if not isinstance(active, dict):
+                continue
+            profile_id = str(active.get("id") or "").strip()
+            if profile_id:
+                return profile_id
+    except OSError:
+        return None
     return None
 
 
