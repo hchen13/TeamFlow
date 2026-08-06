@@ -27,7 +27,8 @@ const messages = {
     userAuthExpired: "用户授权已过期，请重新授权后再检查。",
     userIdentityRefreshed: "用户身份已刷新",
     userIdentityVerified: "用户身份已连接",
-    workflowUpdated: "Workflow 已更新"
+    workflowUpdated: "Workflow 已更新",
+    versionControlUpdated: "版本控制设置已更新"
   },
   en: {
     codexToolsAuthorized: "TeamFlow tool authorization is active.",
@@ -49,7 +50,8 @@ const messages = {
     userAuthExpired: "User authorization has expired. Authorize again, then check the status.",
     userIdentityRefreshed: "User identity refreshed",
     userIdentityVerified: "User identity connected",
-    workflowUpdated: "Workflow updated"
+    workflowUpdated: "Workflow updated",
+    versionControlUpdated: "Version control setting updated"
   }
 };
 
@@ -179,6 +181,13 @@ export async function selectWorkflow(formData) {
   const tab = field(formData, "tab") === "lark" ? "lark" : "agent";
   add(args, "--workflow", field(formData, "workflow"));
   await finish(args, {}, tab, "workflowUpdated", lang, field(formData, "step"));
+}
+
+export async function setVersionControl(formData) {
+  const args = ["set-version-control", ...workspaceArgs()];
+  const lang = language(formData);
+  args.push(field(formData, "enabled") === "true" ? "--enable" : "--disable");
+  await finish(args, {}, "lark", "versionControlUpdated", lang, field(formData, "step"));
 }
 
 async function finish(args, env, tab, okMessage, lang, step = "", authMode = "") {

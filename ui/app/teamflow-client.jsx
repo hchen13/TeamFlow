@@ -26,6 +26,10 @@ const text = {
     larkSubtitle: "先选择协作模式，再配置操作身份和协作看板。",
     workflowTitle: "协作模式",
     workflowSubtitle: "决定当前项目使用哪些角色和协作规则。",
+    versionControlTitle: "启用版本控制",
+    versionControlHint: "开启后，通过仓库交付的任务必须先晋升到 main 并清理声明的临时分支和 worktree 才能完成。",
+    versionControlOn: "已启用",
+    versionControlOff: "已停用",
     stepWorkflow: "Step 1",
     identityTitle: "身份",
     identitySubtitle: "Agent 在飞书里以什么身份操作。",
@@ -244,6 +248,10 @@ const text = {
     larkSubtitle: "Choose the collaboration mode, then configure identity and board.",
     workflowTitle: "Collaboration mode",
     workflowSubtitle: "Controls the roles and collaboration rules for this project.",
+    versionControlTitle: "Enable version control",
+    versionControlHint: "Repository tasks must reach main and have their declared branches and worktrees removed before they can complete.",
+    versionControlOn: "Enabled",
+    versionControlOff: "Disabled",
     stepWorkflow: "Step 1",
     identityTitle: "Identity",
     identitySubtitle: "How agents operate inside Lark.",
@@ -760,6 +768,7 @@ function StepFooter({ activeStep, hasIdentity, setActiveStep, t }) {
 }
 
 function WorkflowStep({ actions, currentWorkflow, lang, state, t }) {
+  const versionControlEnabled = state.settings?.version_control?.enabled !== false;
   return (
     <div className="configStep">
       <div className="sectionHeader">
@@ -798,6 +807,18 @@ function WorkflowStep({ actions, currentWorkflow, lang, state, t }) {
           </form>
         ))}
       </div>
+      <form action={actions.setVersionControl} className="versionControlToggle">
+        <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
+        <input name="step" type="hidden" value="workflow" suppressHydrationWarning />
+        <input name="enabled" type="hidden" value={versionControlEnabled ? "false" : "true"} suppressHydrationWarning />
+        <div>
+          <strong>{t.versionControlTitle}</strong>
+          <p>{t.versionControlHint}</p>
+        </div>
+        <button className={versionControlEnabled ? "primary compact" : "compact"} type="submit">
+          {versionControlEnabled ? t.versionControlOn : t.versionControlOff}
+        </button>
+      </form>
     </div>
   );
 }
