@@ -811,19 +811,27 @@ function WorkflowStep({ actions, currentWorkflow, lang, state, t }) {
       <form action={actions.setVersionControl} className="versionControlToggle">
         <input name="lang" type="hidden" value={lang} suppressHydrationWarning />
         <input name="step" type="hidden" value="workflow" suppressHydrationWarning />
-        <label>
+        <div className="versionControlCopy">
+          <strong>{t.versionControlTitle}</strong>
+          <small id="version-control-hint">{t.versionControlHint}</small>
+        </div>
+        <label className="versionControlSwitch">
           <input
+            aria-describedby="version-control-hint"
             defaultChecked={versionControlEnabled}
             name="enabled"
+            onChange={(event) => event.currentTarget.form?.requestSubmit()}
+            role="switch"
             type="checkbox"
             value="true"
           />
-          <span>
-            <strong>{t.versionControlTitle}</strong>
-            <small>{t.versionControlHint}</small>
-          </span>
+          <span
+            aria-hidden="true"
+            className="versionControlState"
+            data-off={t.versionControlOff}
+            data-on={t.versionControlOn}
+          />
         </label>
-        <button className="primary compact" type="submit">{t.save}</button>
       </form>
     </div>
   );
