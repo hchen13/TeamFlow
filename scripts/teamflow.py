@@ -35,6 +35,7 @@ from core.daemon import (
     sync_daemon_workspace,
 )
 from core.config import resolve_workspace_paths
+from core.workspace_settings import set_version_control
 from core.global_db import workspace_enabled
 from core.schema_guard import SchemaCompatibilityError
 from core.db import (
@@ -237,6 +238,16 @@ def main() -> int:
     add_workspace_args(workflow_parser)
     workflow_parser.add_argument("--workflow", required=True, help="Workflow key.")
     workflow_parser.set_defaults(func=cmd_select_workflow)
+
+    version_control_parser = subparsers.add_parser(
+        "set-version-control",
+        help="Enable or disable Git repository delivery for the workspace.",
+    )
+    add_workspace_args(version_control_parser)
+    enabled_group = version_control_parser.add_mutually_exclusive_group(required=True)
+    enabled_group.add_argument("--enable", dest="enabled", action="store_true")
+    enabled_group.add_argument("--disable", dest="enabled", action="store_false")
+    version_control_parser.set_defaults(func=cmd_set_version_control)
 
     ui_parser = subparsers.add_parser("serve-ui", help="Start the local TeamFlow configuration UI.")
     add_workspace_args(ui_parser)
@@ -534,6 +545,11 @@ def cmd_list_codex_sessions(args: argparse.Namespace) -> int:
 def cmd_select_workflow(args: argparse.Namespace) -> int:
     result = select_workflow(args.workspace, workflow=args.workflow)
     print_json(result)
+    return 0
+
+
+def cmd_set_version_control(args: argparse.Namespace) -> int:
+    print_json(set_version_control(args.workspace, enabled=args.enabled))
     return 0
 
 

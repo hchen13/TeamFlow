@@ -23,6 +23,7 @@ from .codex import (
     read_codex_thread,
 )
 from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
+from .workspace_settings import ensure_workspace_settings, read_workspace_settings
 from .migrations import MIGRATIONS
 from .schema_guard import (
     database_data_version,
@@ -78,6 +79,7 @@ def init_workspace(workspace: str | None, display_name: str | None = None, write
         upsert_workspace(conn, paths.root, display_name)
 
     os.chmod(paths.db_path, 0o600)
+    settings = ensure_workspace_settings(str(paths.root))
     gitignore_updated = ensure_workspace_gitignore(paths) if write_gitignore else False
     return {
         "ok": True,
@@ -85,6 +87,7 @@ def init_workspace(workspace: str | None, display_name: str | None = None, write
         "state_dir": str(paths.state_dir),
         "db_path": str(paths.db_path),
         "schema_version": SCHEMA_VERSION,
+        "settings": settings,
         "gitignore_updated": gitignore_updated,
     }
 
@@ -98,6 +101,7 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
             "workspace_root": str(paths.root),
             "state_dir": str(paths.state_dir),
             "db_path": str(paths.db_path),
+            "settings": read_workspace_settings(str(paths.root)),
         }
 
     with connect(paths.db_path) as conn:
@@ -178,6 +182,7 @@ def inspect_workspace(workspace: str | None) -> dict[str, Any]:
             "state_dir": str(paths.state_dir),
             "db_path": str(paths.db_path),
             "schema_version": current_schema_version(conn),
+            "settings": read_workspace_settings(str(paths.root)),
             "workspace": row_dict(workspace_row),
             "lark_identities": redact_rows(fetch_all(conn, "SELECT * FROM lark_identities WHERE workspace_id = ? ORDER BY updated_at DESC", workspace_id)),
             "lark_board": row_dict(board_row),

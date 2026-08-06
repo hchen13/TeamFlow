@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 TEAMFLOW_DIR = ".teamflow"
 DB_NAME = "teamflow.db"
+SETTINGS_NAME = "settings.json"
 
 
 @dataclass(frozen=True)
@@ -15,12 +16,18 @@ class WorkspacePaths:
     root: Path
     state_dir: Path
     db_path: Path
+    settings_path: Path
 
 
 def resolve_workspace_paths(workspace: str | None) -> WorkspacePaths:
     root = Path(workspace or ".").expanduser().resolve()
     state_dir = root / TEAMFLOW_DIR
-    return WorkspacePaths(root=root, state_dir=state_dir, db_path=state_dir / DB_NAME)
+    return WorkspacePaths(
+        root=root,
+        state_dir=state_dir,
+        db_path=state_dir / DB_NAME,
+        settings_path=state_dir / SETTINGS_NAME,
+    )
 
 
 def default_task_prefix(display_name: str | None, workspace: str | Path) -> str:
