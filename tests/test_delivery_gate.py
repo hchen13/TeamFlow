@@ -16,6 +16,7 @@ from core.delivery import (
     completion_failure,
     resolve_transition_mode,
 )
+from core.git_facts import is_ancestor
 from core.workflow import load_workflow_definition
 from core.teamflow_tools import cancel_task, claim_task, route_task, submit_task, update_task
 from core.workspace_settings import set_version_control
@@ -69,6 +70,7 @@ class DeliveryGateTest(unittest.TestCase):
         git(self.repo, "add", "README.md")
         git(self.repo, "commit", "--quiet", "-m", "base")
         self.base = git(self.repo, "rev-parse", "HEAD")
+        self.promoted = self.commit("promoted")
         set_version_control(str(self.repo), enabled=True)
 
     def task(self, **overrides: object) -> dict[str, object]:
@@ -100,9 +102,9 @@ class DeliveryGateTest(unittest.TestCase):
 
     def test_a_fully_promoted_and_cleaned_task_passes(self):
         task = self.task(
-            candidate_sha=self.base,
-            verified_sha=self.base,
-            promoted_sha=self.base,
+            candidate_sha=self.promoted,
+            verified_sha=self.promoted,
+            promoted_sha=self.promoted,
             delivery_resources=append_resources(
                 None,
                 {"branches": ["teamflow/TF-0100/task"], "worktrees": [str(self.repo / "gone")]},
@@ -162,9 +164,9 @@ class DeliveryGateTest(unittest.TestCase):
         worktree = self.repo / ".teamflow" / "worktrees" / "TF-0100" / "task"
         git(self.repo, "worktree", "add", "--detach", str(worktree), self.base)
         task = self.task(
-            candidate_sha=self.base,
-            verified_sha=self.base,
-            promoted_sha=self.base,
+            candidate_sha=self.promoted,
+            verified_sha=self.promoted,
+            promoted_sha=self.promoted,
             delivery_resources=append_resources(None, {"worktrees": [str(worktree)]}),
         )
 
@@ -178,9 +180,9 @@ class DeliveryGateTest(unittest.TestCase):
         worktree = self.repo / ".teamflow" / "worktrees" / "TF-0100" / "task"
         git(self.repo, "worktree", "add", "--detach", str(worktree), self.base)
         task = self.task(
-            candidate_sha=self.base,
-            verified_sha=self.base,
-            promoted_sha=self.base,
+            candidate_sha=self.promoted,
+            verified_sha=self.promoted,
+            promoted_sha=self.promoted,
             delivery_resources=json.dumps({
                 "branches": [],
                 "worktrees": [".teamflow/worktrees/TF-0100/task"],
@@ -339,17 +341,64 @@ class DeliveryGateTest(unittest.TestCase):
         git(sha256, "add", "README.md")
         git(sha256, "commit", "--quiet", "-m", "base")
         base = git(sha256, "rev-parse", "HEAD")
+        (sha256 / "next.txt").write_text("next\n", encoding="utf-8")
+        git(sha256, "add", "-A")
+        git(sha256, "commit", "--quiet", "-m", "promoted")
+        promoted = git(sha256, "rev-parse", "HEAD")
         set_version_control(str(sha256), enabled=True)
-        self.assertEqual(len(base), 64)
+        self.assertEqual(len(promoted), 64)
 
         task = repository_task(
             base_sha=base,
-            candidate_sha=base,
-            verified_sha=base,
-            promoted_sha=base,
+            candidate_sha=promoted,
+            verified_sha=promoted,
+            promoted_sha=promoted,
         )
 
         self.assertIsNone(completion_failure(str(sha256), DEFINITION, task, {"status": "done"}))
+
+    def test_a_candidate_force_installed_over_other_work_is_refused(self):
+        theirs = self.commit("theirs")
+        candidate = git(
+            self.repo, "commit-tree", "-m", "ours", "-p", self.promoted, f"{theirs}^{{tree}}"
+        )
+        git(self.repo, "update-ref", "refs/heads/main", candidate)
+        task = self.task(
+            base_sha=self.base,
+            candidate_sha=candidate,
+            verified_sha=candidate,
+            promoted_sha=candidate,
+        )
+
+        # Every containment fact still holds: the baseline precedes the candidate
+        # and main points straight at it. Only the ref's own history shows that
+        # reaching it threw away the commit main already carried.
+        self.assertTrue(is_ancestor(str(self.repo), self.base, candidate))
+        self.assertEqual(git(self.repo, "rev-parse", "main"), candidate)
+        self.assertIn("fast_forward", self.checks(task))
+
+    def test_a_candidate_that_main_fast_forwarded_onto_is_accepted(self):
+        candidate = self.commit("ours")
+        task = self.task(
+            base_sha=self.base,
+            candidate_sha=candidate,
+            verified_sha=candidate,
+            promoted_sha=candidate,
+        )
+
+        self.assertIsNone(self.blocked(task))
+
+    def test_a_target_branch_without_a_reflog_cannot_prove_anything(self):
+        candidate = self.commit("ours")
+        (self.repo / ".git" / "logs" / "refs" / "heads" / "main").unlink()
+        task = self.task(
+            base_sha=self.base,
+            candidate_sha=candidate,
+            verified_sha=candidate,
+            promoted_sha=candidate,
+        )
+
+        self.assertIn("fast_forward", self.checks(task))
 
     def test_a_base_that_is_not_an_ancestor_of_the_candidate_blocks(self):
         promoted = self.commit("feature")

@@ -10,6 +10,7 @@ from .git_facts import (
     branch_exists,
     branch_sha,
     commit_exists,
+    fast_forwarded_to,
     is_ancestor,
     is_object_id,
     worktree_paths,
@@ -329,6 +330,12 @@ def completion_failure(
                     "check": "target_branch",
                     "current": {"branch": branch, "sha": head},
                     "expected": f"{branch} contains candidate_sha {candidate}",
+                })
+            elif not fast_forwarded_to(repo, branch, candidate):
+                failures.append({
+                    "check": "fast_forward",
+                    "current": {"branch": branch, "candidate_sha": candidate},
+                    "expected": f"{branch} advanced onto candidate_sha by a fast-forward",
                 })
 
         try:

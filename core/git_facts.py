@@ -68,6 +68,24 @@ def is_ancestor(repo: str | Path, ancestor: str, descendant: str) -> bool:
     return code == 0
 
 
+def fast_forwarded_to(repo: str | Path, branch: str, target: str) -> bool:
+    """True when the branch's own history shows it moved onto `target` without discarding work.
+
+    Containment alone cannot tell a fast-forward from a force push that threw away
+    whatever the branch already pointed at, so the reflog is the only local evidence.
+    """
+    code, output = _run(
+        repo, "reflog", "show", "--no-abbrev", "--format=%H", f"refs/heads/{branch}", allowed=(0, 128)
+    )
+    if code != 0:
+        return False
+    updates = [line.strip() for line in output.splitlines() if line.strip()]
+    return any(
+        new == target and index + 1 < len(updates) and is_ancestor(repo, updates[index + 1], target)
+        for index, new in enumerate(updates)
+    )
+
+
 def worktree_paths(repo: str | Path) -> set[str]:
     _, output = _run(repo, "worktree", "list", "--porcelain", "-z")
     return {
