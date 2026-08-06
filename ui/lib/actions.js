@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { planAgentMutation } from "./agent-mutations";
 import { getCodexBridge } from "./codex-ipc";
+import { versionControlArgument } from "./setup-steps";
 import { getState, run, runJson, startLarkUserAuthFlow, workspaceArgs } from "./teamflow";
 
 const messages = {
@@ -186,8 +187,7 @@ export async function selectWorkflow(formData) {
 export async function setVersionControl(formData) {
   const args = ["set-version-control", ...workspaceArgs()];
   const lang = language(formData);
-  // An unchecked checkbox sends no value at all, so absence is the disabled case.
-  args.push(field(formData, "enabled") === "true" ? "--enable" : "--disable");
+  args.push(versionControlArgument(field(formData, "enabled")));
   await finish(args, {}, "lark", "versionControlUpdated", lang, field(formData, "step"));
 }
 

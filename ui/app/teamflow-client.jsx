@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { useRouter } from "next/navigation";
 import { acceptRuntimeSequence, createRuntimeSequence, runtimeStatusAllowsMutation } from "../lib/agent-runtime-rules";
+import { initialLarkStep } from "../lib/setup-steps";
 
 const FEISHU_APP_URL = "https://open.feishu.cn/app";
 const FEISHU_CREATE_APP_URL = "https://open.feishu.cn/page/launcher?from=backend_oneclick";
@@ -822,7 +823,7 @@ function WorkflowStep({ actions, currentWorkflow, lang, state, t }) {
             <small>{t.versionControlHint}</small>
           </span>
         </label>
-        <button className="compact" type="submit">{t.save}</button>
+        <button className="primary compact" type="submit">{t.save}</button>
       </form>
     </div>
   );
@@ -2310,16 +2311,6 @@ function accessFailureMessage(kind, t) {
     return t.accessCleanupFailed;
   }
   return t.accessGenericFailed;
-}
-
-function initialLarkStep(step, hasIdentity) {
-  if (step === "workflow" || step === "identity") {
-    return step;
-  }
-  if (step === "board" && hasIdentity) {
-    return "board";
-  }
-  return hasIdentity ? "board" : "identity";
 }
 
 function roleSort(a, b) {
