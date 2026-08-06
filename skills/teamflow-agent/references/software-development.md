@@ -125,9 +125,11 @@ QA 是**质量负责人，不是实现者**。QA 不修改产品实现；发现�
 
 ### 6.2 TL 开发与交接
 
-- **认领之后**才从目标分支基准创建独立的 task branch 与 worktree；创建它们不产生 commit。
+- **认领之后**才从目标分支基准创建独立的 task branch 与 worktree；创建它们不产生 commit。默认命名形态是 `teamflow/<task_id>/<workstream>` 与 `.teamflow/worktrees/<task_id>/<workstream>`。`<workstream>` 是**安全 slug**，不是固定枚举：推荐用 `task`、`qa`、`integration` 打头，按实际工作可以写成 `task-api`、`qa-2`。
+- **同一张卡的普通返工复用原来的 task branch 与 worktree**；只有真的需要另一个独立物理现场时才另起后缀。
+- 每次新建或删除 branch / worktree，都把**实际对象**记进卡片的 `delivery_resources`（它是追加去重的历史清单，清空不等于清理完成）。最终的完成门禁以这份清单里记录的**精确对象**为事实，不按模板猜测。
 - 实现、内部评审、修复、提交都在自己的 worktree 内完成，同一时刻只有一个写入者。
-- 交接时必须给出这些事实：**candidate SHA**、目标分支及其起始 SHA、branch 与 worktree 位置、工作树是否干净、验证证据、尚需处理的风险。
+- 交接时必须给出这些事实：**candidate SHA**、目标分支及其起始 SHA、branch 与 worktree 位置、工作树是否干净、验证证据、尚需处理的风险。使用仓库交付的卡片把这些写进 `candidate_sha` / `target_branch` / `base_sha` 等交付字段，TeamFlow 只读取和校验，从不代为 merge、ff、删分支或删目录。
 - 交接之后**冻结该 candidate**；要继续写，等返工回来再说。
 
 ### 6.3 QA 与测试资产
