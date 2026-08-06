@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -167,6 +168,29 @@ class DeliveryGateTest(unittest.TestCase):
 
         failure = self.blocked(task)
         self.assertIn("declared_worktrees", {item["check"] for item in failure["failures"]})
+
+        git(self.repo, "worktree", "remove", str(worktree))
+        self.assertIsNone(self.blocked(task))
+
+    def test_a_legacy_relative_worktree_path_is_read_against_the_repository(self):
+        worktree = self.repo / ".teamflow" / "worktrees" / "TF-0100" / "task"
+        git(self.repo, "worktree", "add", "--detach", str(worktree), self.base)
+        task = self.task(
+            candidate_sha=self.base,
+            verified_sha=self.base,
+            promoted_sha=self.base,
+            delivery_resources=json.dumps({
+                "branches": [],
+                "worktrees": [".teamflow/worktrees/TF-0100/task"],
+            }),
+        )
+
+        elsewhere = Path(self.temporary.name).parent
+        previous = os.getcwd()
+        os.chdir(elsewhere)
+        self.addCleanup(os.chdir, previous)
+
+        self.assertIn("declared_worktrees", self.checks(task))
 
         git(self.repo, "worktree", "remove", str(worktree))
         self.assertIsNone(self.blocked(task))

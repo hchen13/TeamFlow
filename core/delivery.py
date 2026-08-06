@@ -244,6 +244,12 @@ def claim_baseline(workspace: str | None, task: dict[str, Any]) -> dict[str, Any
     return {"target_branch": DEFAULT_TARGET_BRANCH, "base_sha": sha}
 
 
+def _worktree_location(repo: str, path: str) -> str:
+    """Cards written before paths were normalized still hold repository-relative ones."""
+    declared = Path(path).expanduser()
+    return str(declared.resolve() if declared.is_absolute() else (Path(repo) / declared).resolve())
+
+
 def completion_failure(
     workspace: str | None,
     definition: dict[str, Any],
@@ -347,8 +353,8 @@ def completion_failure(
         leftover_worktrees = [
             path
             for path in resources["worktrees"]
-            if str(Path(path).expanduser().resolve()) in registered
-            or Path(path).expanduser().exists()
+            if _worktree_location(repo, path) in registered
+            or Path(_worktree_location(repo, path)).exists()
         ]
         if leftover_worktrees:
             failures.append({
