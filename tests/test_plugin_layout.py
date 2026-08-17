@@ -81,12 +81,9 @@ class PluginLayoutTests(unittest.TestCase):
         installed = set(load_workflow_definitions(WORKFLOWS_DIR))
 
         for key in installed:
-            candidates = (
-                REFERENCES_DIR / f"{key}.md",
-                REFERENCES_DIR / key / "overview.md",
-            )
-            existing = [path for path in candidates if path.is_file()]
-            self.assertEqual(len(existing), 1, f"{key} has entrypoints: {existing}")
+            entrypoint = REFERENCES_DIR / key / "overview.md"
+            self.assertTrue(entrypoint.is_file(), f"missing {entrypoint}")
+            self.assertFalse((REFERENCES_DIR / f"{key}.md").exists())
 
     def test_every_relative_link_in_the_skills_resolves(self):
         for document in sorted(SKILLS_DIR.rglob("*.md")):

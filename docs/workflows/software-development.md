@@ -358,14 +358,22 @@ skills/
   teamflow-agent/
     SKILL.md
     references/
-      software-development.md
-      general-task.md
+      software-development/
+        overview.md
+        collaboration.md
+        pm.md
+        tl.md
+        qa.md
+        design.md
+        repository-delivery.md
+      general-task/
+        overview.md
 
 core/
   workflow.py
 ```
 
-插件只暴露 `teamflow-setup` 和 `teamflow-agent` 两个顶层 Skill，不再按协作模式各暴露一个 Skill。机器定义放在 `workflows/<workflow-key>/workflow.json`，面向模型的职责指引放在 `skills/teamflow-agent/references/<workflow-key>.md`。
+插件只暴露 `teamflow-setup` 和 `teamflow-agent` 两个顶层 Skill，不再按协作模式各暴露一个 Skill。机器定义放在 `workflows/<workflow-key>/workflow.json`，面向模型的入口放在 `skills/teamflow-agent/references/<workflow-key>/overview.md`；复杂协作模式可以在同一目录内按共享合同、职责和交付方式拆分文档，并由入口显式链接。
 
 协作模式相关信息分为以下层级：
 

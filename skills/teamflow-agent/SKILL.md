@@ -15,10 +15,10 @@ description: Use when a Codex session registered as a TeamFlow agent needs to in
 
 | `workflow_key` | 指引 |
 | --- | --- |
-| `software-development` | [软件开发协作](references/software-development.md) |
-| `general-task` | [通用任务协作](references/general-task.md) |
+| `software-development` | [软件开发协作](references/software-development/overview.md) |
+| `general-task` | [通用任务协作](references/general-task/overview.md) |
 
-`workflow_key` 不在上表时，不要臆造流程：只依据 `get_assignment` 与 `get_task` 返回的合法动作、合法字段和合法选项工作。
+先读对应协作模式的 `overview.md`，再按其中的路由只加载当前职责和当前交付模式需要的 reference。`workflow_key` 不在上表时，不要臆造流程：只依据 `get_assignment` 与 `get_task` 返回的合法动作、合法字段和合法选项工作。
 
 ## 通用纪律
 

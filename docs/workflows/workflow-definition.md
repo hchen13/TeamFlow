@@ -28,7 +28,7 @@
 其中：
 
 - `workflows/<workflow-key>/workflow.json` 是协作模式机器定义源。
-- `skills/teamflow-agent/references/<workflow-key>.md` 说明各职责如何工作，但不能改变机器权限或状态机。协作模式不再各自暴露顶层 Skill；插件只暴露 `teamflow-setup` 和 `teamflow-agent`。
+- `skills/teamflow-agent/references/<workflow-key>/overview.md` 是面向 Agent 的协作指引入口，但不能改变机器权限或状态机。复杂协作模式可以在同一目录内拆分共享合同和职责文档；协作模式不再各自暴露顶层 Skill，插件只暴露 `teamflow-setup` 和 `teamflow-agent`。
 - 飞书多维表格保存任务事实，不保存协作模式定义。
 - SQLite 只保存定义投影和运行实例，不成为规则源。
 - MCP 工具集合固定；不同协作模式只改变工具在当前任务上的合法规则和执行效果。
@@ -402,7 +402,7 @@ defaults
 
 ## 12. 新增协作模式流程
 
-1. 在 `workflows/<workflow-key>/` 创建 `workflow.json`，并在 `skills/teamflow-agent/references/` 创建同名 `<workflow-key>.md`。
+1. 在 `workflows/<workflow-key>/` 创建 `workflow.json`，并创建 `skills/teamflow-agent/references/<workflow-key>/overview.md`。
 2. 在 `skills/teamflow-agent/SKILL.md` 的映射表中补上该 `workflow_key` 与 reference 的相对链接。不要为新协作模式增加顶层 Skill。
 3. 从本规范的字段集合开始，不复制核心代码或 MCP Server。
 4. 定义职责、任务类型、等待对象和公共编号长度。
@@ -437,4 +437,4 @@ defaults
 - 新增表达式、脚本或 Python 扩展点；
 - 改变已有语法字段或固定动作键的含义。
 
-软件开发协作模式的具体职责和流转见 [`software-development.md`](software-development.md)，机器定义见 [`workflows/software-development/workflow.json`](../../workflows/software-development/workflow.json)，面向 Agent 的职责指引见 [`skills/teamflow-agent/references/software-development.md`](../../skills/teamflow-agent/references/software-development.md)。
+软件开发协作模式的人类规格见 [`software-development.md`](software-development.md)，机器定义见 [`workflows/software-development/workflow.json`](../../workflows/software-development/workflow.json)，面向 Agent 的指引入口见 [`skills/teamflow-agent/references/software-development/overview.md`](../../skills/teamflow-agent/references/software-development/overview.md)。

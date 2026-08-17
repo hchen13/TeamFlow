@@ -95,7 +95,7 @@ npm --prefix ui run build
 5. 角色、状态和任务类型名称没有进入核心分支。
 6. 定义能投影到新工作区并能被选择。
 7. 同一组固定 MCP 工具能按新定义返回正确权限和合法选项。
-8. `skills/teamflow-agent/references/` 下存在同名 reference，且 `SKILL.md` 的映射表已链接它。
+8. `skills/teamflow-agent/references/<workflow-key>/overview.md` 存在，`SKILL.md` 已链接它，且目录内所有 Markdown 都能从入口到达。
 
 现有 Workflow 测试会自动扫描新目录，不需要复制一套按协作模式命名的测试框架。`test_plugin_layout.py` 会检查插件暴露面与 reference 覆盖。只有新定义引入了此前没有覆盖的语义时，才补充通用测试。
 
