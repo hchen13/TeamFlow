@@ -145,16 +145,16 @@ $tf inspect-agent-context --workspace "$ws" --role tl
 
 ## 6. 用例二：完整软件开发闭环
 
-测试目标是在真实 Agent 间完成一次最小开发流程。
+测试目标是在真实 Agent 间完成一次包含仓库交付的最小开发流程。本用例应使用专用验收 Git 工作区，或用户明确允许写入的可跟踪目录；开始前确认 `main` 干净，不要把一次性样例写进正在开发的产品仓库。
 
 ### 任务内容
 
-PM 创建一张开发任务，要求技术负责人：
+PM 创建一张 `delivery_mode=repository` 的开发任务，要求技术负责人：
 
-- 在 `$ws/tmp/teamflow-acceptance/sort_task/` 实现一个独立的排序函数；
+- 在预先约定的可跟踪验收目录中实现一个独立的排序函数；
 - 覆盖空数组、重复值和逆序输入；
 - 不修改该目录之外的文件；
-- 在结果与证据中写明文件和测试命令；
+- 在结果与证据中写明文件、测试命令和完整 candidate SHA；
 - 技术实现完成后必须由 QA 独立运行测试并确认通过，PM 才能最终验收。
 
 ### 步骤与通过条件
@@ -162,28 +162,37 @@ PM 创建一张开发任务，要求技术负责人：
 1. PM 调用 `create_task`。
    - 卡片只能创建为初始状态。
    - 任务类型、优先级、负责人、描述和验收标准正确。
-2. PM 必要时调用 `update_task` 补齐字段，再调用 `route_task`。
+2. PM 必要时调用 `update_task` 补齐字段，并将交付模式设为 `repository`，再调用 `route_task`。
    - 卡片进入当前定义的可派发状态。
    - 后台只产生一次有效派发。
 3. 技术负责人收到通知后依次调用 `get_task`、`claim_task`。
    - 收到通知不等于认领。
    - 认领成功后卡片进入执行状态并写入真实 Agent 与 Agent ID。
-4. 技术负责人实现并测试，再调用 `submit_task(outcome="completed")`。
-   - 结果与证据非空。
+   - `target_branch=main`，`base_sha` 是认领时 `main` 的完整 SHA。
+4. 技术负责人创建并声明该卡专属的 branch/worktree，完成实现、测试和提交，再记录完整 `candidate_sha` 并调用 `submit_task(outcome="completed")`。
+   - 结果与证据包含实现位置、测试命令、candidate SHA 和剩余风险。
    - 卡片进入评审状态。
 5. PM 调用 `get_task` 后执行 `review_task(decision="send_to_qa")`。
    - 卡片回到可由 QA 认领的状态。
    - 负责人变为 QA，旧执行 Agent 被清空。
-6. QA 调用 `get_task`、`claim_task`，独立运行测试后调用 `submit_task(outcome="passed")`。
-   - 结果与证据包含稳定的 QA 通过前缀。
+6. QA 调用 `get_task`、`claim_task`，在独立 worktree/session 中验证准确 candidate，记录相同的完整 `verified_sha` 后调用 `submit_task(outcome="passed")`。
+   - 结果与证据包含验证 SHA、测试命令、原始结果和 QA 结论。
    - 卡片回到评审状态。
-7. PM 核对证据后调用 `review_task(decision="approve")`。
+7. PM 核对 QA 证据后，调用 `route_task(role="tl")` 把同一张卡交给 TL 执行 Integration & Cleanup。
+   - 卡片回到可执行状态，旧 QA Agent 被清空。
+   - PM 在现有字段中写明 candidate SHA、QA 结论、目标分支当前 SHA 和下一步。
+8. TL 再次 `claim_task`，将 `main` ff-only 晋升到已验证 candidate，记录相同的完整 `promoted_sha`，并只清理该卡声明的 branch/worktree，再调用 `submit_task(outcome="completed")`。
+   - `main` 精确指向 candidate，工作树干净。
+   - 所有已声明临时资源都已不存在，集成与清理证据完整。
+   - 卡片再次进入评审状态。
+9. PM 核对仓库交付门禁后调用 `review_task(decision="approve")`。
    - 卡片进入严格终态。
    - 后续合法动作为空，不能重新打开。
 
 最终同时检查：
 
-- 临时目录中的实现和测试证据存在；
+- `candidate_sha = verified_sha = promoted_sha`，且 `main` 指向该提交；
+- 该卡声明的临时 branch/worktree 已清理，其他任务资源未被误动；
 - 后台每次派发不漏不重；
 - 看板历史保留负责人、执行 Agent、状态和结果变化；
 - 没有 Agent 降级调用 Lark CLI 或飞书 API。
@@ -391,7 +400,7 @@ DISPATCH NOT-REQUIRED reason="当前变更不通知 Agent"
 - 全程 TeamFlow 没有代为执行任何 merge、ff 或删除。
 - 旧看板首次访问时自动补齐交付字段，不需要手工重建。
 
-## 13. 结束条件
+## 14. 结束条件
 
 满足以下条件才能判定一个版本通过真实链路验收：
 
@@ -406,4 +415,4 @@ DISPATCH NOT-REQUIRED reason="当前变更不通知 Agent"
 
 真实验收结束后，能稳定脱离飞书、Codex 或 UI 的失败场景应继续下沉为 Python 或 Node 自动测试；只依赖第三方真实运行时和人工视觉判断的部分保留在本文。
 
-验收卡片不得从飞书删除。未完成的测试卡由 PM 通过 TeamFlow MCP 写明原因后取消；已完成卡保留结果与证据。`tmp/teamflow-acceptance/` 中的文件保留到验收结论确认后，再由用户决定是否清理。
+验收卡片不得从飞书删除。未完成的测试卡由 PM 通过 TeamFlow MCP 写明原因后取消；已完成卡保留结果与证据。验收工作区或验收产物保留到结论确认后，再按该工作区的清理约定处理。
