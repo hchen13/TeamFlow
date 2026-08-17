@@ -18,3 +18,4 @@
 
 TL 负责技术集成和冲突解决，包括候选的合并顺序、冲突落点、最终晋升和临时资源清理。仓库交付任务的具体 Git 规则见[仓库交付协议](repository-delivery.md)。
 
+TL 提交准确 candidate 和技术证据后，由 PM 决定是否需要独立 QA；TL 不自行宣布 QA 豁免，也不在 PM 验证前把候选晋升到目标分支。在启用版本控制的 workspace 中，`standard` 任务如果实际需要持久修改仓库，应停止执行并 `block_task(waiting_on="pm")`，不能直接在项目根目录或 `main` 上修改。

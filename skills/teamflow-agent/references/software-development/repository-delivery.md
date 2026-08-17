@@ -35,19 +35,26 @@
 - 失败结论交回 PM，由 PM 转给 TL。TL 必须在包含 QA 测试提交的历史之上修复，形成新 candidate，再做 fresh QA。
 - candidate 变化后，旧 QA 结论立即失效。
 
+## 验证路径
+
+- **独立 QA 路径**适用于会改变代码行为、配置、Schema、API、数据契约、依赖、安全、迁移、并发、用户流程或 Agent 行为的改动，以及没有可靠既有覆盖或存在不确定性的任务。QA 针对准确 candidate 验证并记录同一完整 `verified_sha`。
+- **轻量路径**只适用于语义不变的错字、注释、格式或同等级别的确定性修改。PM 独立检查准确 candidate，执行与验收标准相称的确定性检查，在证据中说明为什么无需独立 QA，并记录同一完整 `verified_sha`。
+- 验证路径只改变由谁验证，不改变 candidate 冻结、目标分支晋升、临时资源清理和最终完成门禁。TL 不能自行选择轻量路径；存在疑问时使用独立 QA。
+
 ## 并发与串行集成
 
 - 多个功能可以在各自 branch/worktree 并行开发和 QA，证据分别绑定候选 SHA。
 - 同一目标分支同一时刻只允许一个候选进入集成阶段；其他候选保持原看板状态等待，不用卡片模拟锁或队列。
-- 正常末段：QA `submit_task(passed)` -> `review` -> PM 核验证据后 `route_task(role="tl")` -> `ready` -> TL `claim_task` -> `in_progress` -> Integration & Cleanup -> TL `submit_task(completed)` -> `review` -> PM `approve` -> `done`。
-- PM 路由集成前，把 candidate SHA、目标分支当前 SHA、QA 证据和下一步写进已有字段，不发明新字段。
-- 目标分支未变化且候选可 fast-forward 时，由 TL 做 ff-only 更新，并核对目标分支 HEAD 精确等于 QA 通过的 candidate；不相等则不能交付。
+- 独立 QA 末段：QA `submit_task(passed)` -> `review` -> PM 核验证据后 `route_task(role="tl")` -> `ready` -> TL `claim_task` -> `in_progress` -> Integration & Cleanup -> TL `submit_task(completed)` -> `review` -> PM `approve` -> `done`。
+- 轻量末段：TL 提交 candidate -> `review` -> PM 独立验证并记录 `verified_sha` -> PM `route_task(role="tl")` -> `ready` -> TL `claim_task` -> `in_progress` -> Integration & Cleanup -> TL `submit_task(completed)` -> `review` -> PM `approve` -> `done`。
+- PM 路由集成前，把 candidate SHA、目标分支当前 SHA、验证证据和下一步写进已有字段，不发明新字段。
+- 目标分支未变化且候选可 fast-forward 时，由 TL 做 ff-only 更新，并核对目标分支 HEAD 精确等于已经验证的 candidate；不相等则不能交付。
 - 目标分支已前移、多个候选需要合并或存在冲突时，由 TL 从当前目标 tip 创建独立 integration branch/worktree，在那里真正 merge 并解决冲突，且必须保留原 candidate 为祖先，得到 integrated SHA。
-- integrated SHA 是新的 candidate，旧 QA 结论失效。PM 用 `send_to_qa` 做 fresh QA，通过后再路由给 TL 完成不改变内容的 ff-only 晋升与清理。
+- integrated SHA 是新的 candidate，之前的验证结论失效。冲突集成已经超出轻量路径，PM 用 `send_to_qa` 做 fresh QA，通过后再路由给 TL 完成不改变内容的 ff-only 晋升与清理。
 - 目标分支更新后只核对 SHA，不再执行可能失败的业务验收；业务验收必须发生在更新之前。
 - 不在目标分支上解决冲突，不 force，不重写共享历史。
 
-daemon 不会重复投递没有变化的 `review` 卡。PM 暂缓某个候选后，应在当前集成任务重新进入 `review`、daemon 再次唤醒时继续处理仍在等待的候选；不使用额外卡片模拟队列。
+没有变化的 `review` 卡不会反复通知。PM 暂缓某个候选后，应在当前集成任务重新进入 `review`、收到新的 TeamFlow 通知时继续处理仍在等待的候选；不使用额外卡片模拟队列。
 
 ## 清理与异常
 
@@ -56,4 +63,3 @@ daemon 不会重复投递没有变化的 `review` 卡。PM 暂缓某个候选后
 - 取消且未晋升时，先保证需要保留的 commit 仍被某个 ref 指向，再删除普通 branch 与 worktree。
 - 清理必须幂等；对象已经不存在即视为已清理。
 - 阻塞、取消和返工使用现有合法动作，不发明状态或专用清理工具。
-

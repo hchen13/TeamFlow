@@ -360,7 +360,6 @@ skills/
     references/
       software-development/
         overview.md
-        collaboration.md
         pm.md
         tl.md
         qa.md

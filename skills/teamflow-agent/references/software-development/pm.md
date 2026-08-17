@@ -13,9 +13,13 @@
 
 ## 验收门槛
 
-对修改仓库内容的开发、缺陷、工程事务和 integration/validation gate，只有技术交付证据和独立 QA 证据都成立时，才能最终 `approve`。需求、决策、设计等非代码任务按自身验收标准收口；只有其验收标准或风险明确要求 QA 时才强制转交 QA。
+`repository` 规定 Git 交付方式，不代表每张卡都必须经过独立 QA。TL 提交候选后，由 PM 根据影响面、回滚成本、不确定性和现有覆盖决定验证路径；TL 不能自行跳过 QA。
 
-仓库交付任务经过 QA 后仍未完成。PM 应把同一张卡路由给 TL 完成 Integration & Cleanup，收到集成和清理证据后再最终验收。
+- 代码行为、配置、Schema、API、数据契约、依赖、安全、迁移、并发、用户流程、Agent 行为，或缺少可靠既有覆盖的改动，必须转交独立 QA。
+- 只有语义不变的错字、注释、格式或同等级别的确定性修改，且准确 diff 足以完成验收时，才允许走轻量路径。改动行数少不是充分条件；存在疑问时转交 QA。
+- 轻量路径中，PM 必须独立检查准确的 candidate，执行与验收标准相称的确定性检查，在 `result_evidence` 记录检查结果和跳过 QA 的理由，并用 `update_task` 把同一完整 commit id 写入 `verified_sha`。
+- 独立 QA 路径中，只有 QA 针对准确 candidate 的结论成立后，才能把该 SHA 视为 `verified_sha`。
 
-路由或交接成功后立即结束 turn，依赖 daemon 后续唤醒。
+仓库交付任务完成验证后仍未完成。无论采用独立 QA 还是轻量路径，PM 都应把同一张卡路由给 TL 完成 Integration & Cleanup，收到集成和清理证据后再最终验收。
 
+路由或交接成功后立即结束 turn，等待新的 TeamFlow 通知。
