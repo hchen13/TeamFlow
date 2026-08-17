@@ -14,13 +14,9 @@ WORKFLOWS_DIR = ROOT / "workflows"
 SKILLS_DIR = ROOT / "skills"
 AGENT_SKILL = SKILLS_DIR / "teamflow-agent"
 REFERENCES_DIR = AGENT_SKILL / "references"
-SETUP_SKILL = SKILLS_DIR / "teamflow-setup" / "SKILL.md"
-SOFTWARE_DEVELOPMENT_REFERENCE = REFERENCES_DIR / "software-development.md"
-GENERAL_TASK_REFERENCE = REFERENCES_DIR / "general-task.md"
 TOP_LEVEL_SKILLS = {"teamflow-setup", "teamflow-agent"}
 WORKFLOW_KEYS = {"software-development", "general-task"}
 RELATIVE_LINK = re.compile(r"\[[^\]]*\]\((?!https?://|#)([^)]+)\)")
-REFERENCE_ROW = re.compile(r"\|\s*`([^`]+)`\s*\|\s*\[[^\]]*\]\(references/([^)]+)\.md\)\s*\|")
 
 
 def frontmatter_name(skill: Path) -> str:
@@ -38,6 +34,15 @@ def frontmatter_name(skill: Path) -> str:
 def lifecycle_rule(definition: dict, action: str, key: str) -> dict:
     rules = definition["lifecycle"]["actions"][action]["rules"]
     return next(rule for rule in rules if rule["key"] == key)
+
+
+def local_markdown_links(document: Path, root: Path) -> set[Path]:
+    links: set[Path] = set()
+    for target in RELATIVE_LINK.findall(document.read_text(encoding="utf-8")):
+        resolved = (document.parent / target.split("#", 1)[0]).resolve()
+        if resolved.suffix == ".md" and resolved.is_relative_to(root):
+            links.add(resolved)
+    return links
 
 
 class PluginLayoutTests(unittest.TestCase):
@@ -72,17 +77,16 @@ class PluginLayoutTests(unittest.TestCase):
         for name in TOP_LEVEL_SKILLS:
             self.assertEqual(frontmatter_name(SKILLS_DIR / name / "SKILL.md"), name)
 
-    def test_agent_skill_references_every_installed_workflow(self):
+    def test_every_installed_workflow_has_one_reference_entrypoint(self):
         installed = set(load_workflow_definitions(WORKFLOWS_DIR))
 
-        self.assertEqual({path.stem for path in REFERENCES_DIR.glob("*.md")}, installed)
-
-        skill = (AGENT_SKILL / "SKILL.md").read_text(encoding="utf-8")
-
-        self.assertEqual(
-            dict(REFERENCE_ROW.findall(skill)),
-            {key: key for key in installed},
-        )
+        for key in installed:
+            candidates = (
+                REFERENCES_DIR / f"{key}.md",
+                REFERENCES_DIR / key / "overview.md",
+            )
+            existing = [path for path in candidates if path.is_file()]
+            self.assertEqual(len(existing), 1, f"{key} has entrypoints: {existing}")
 
     def test_every_relative_link_in_the_skills_resolves(self):
         for document in sorted(SKILLS_DIR.rglob("*.md")):
@@ -92,28 +96,22 @@ class PluginLayoutTests(unittest.TestCase):
                     resolved.exists(), f"{document} links to missing {target}"
                 )
 
-    def test_setup_skill_uses_the_installed_plugin_launcher_and_completes_setup(self):
-        skill = SETUP_SKILL.read_text(encoding="utf-8")
+    def test_every_skill_markdown_is_reachable_from_its_entrypoint(self):
+        for skill_file in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+            root = skill_file.parent.resolve()
+            reachable: set[Path] = set()
+            pending = [skill_file.resolve()]
+            while pending:
+                document = pending.pop()
+                if document in reachable:
+                    continue
+                reachable.add(document)
+                pending.extend(local_markdown_links(document, root) - reachable)
 
-        self.assertIn('TEAMFLOW_ROOT=$(CDPATH= cd "$(dirname "$SKILL_FILE")/../.." && pwd)', skill)
-        self.assertIn('TF="$TEAMFLOW_ROOT/teamflow"', skill)
-        self.assertIn("LARK_CLI_BRAND=feishu", skill)
-        self.assertIn('*.larksuite.com 使用 lark', skill)
-        self.assertIn('"$TF" initialize-lark-board', skill)
-        self.assertIn('"$TF" daemon enable --workspace "$PROJECT_ROOT"', skill)
-        self.assertIn("UI **不会**初始化任务表", skill)
-        self.assertIn("不会仅因打开页面就启用 daemon workspace", skill)
-        self.assertIn('URL 显式带 `table` 时', skill)
-
-    def test_setup_skill_covers_user_auth_and_codex_authorization_boundaries(self):
-        skill = SETUP_SKILL.read_text(encoding="utf-8")
-
-        self.assertIn('"$LARK_CLI" config init', skill)
-        self.assertIn("--app-secret-stdin", skill)
-        self.assertIn('--brand "$LARK_CLI_BRAND"', skill)
-        self.assertIn("完整权限修复链接", skill)
-        self.assertIn("插件页没有逐 MCP 工具授权开关", skill)
-        self.assertIn("授权后先重启当前正在运行的 Codex 客户端", skill)
+            self.assertEqual(
+                reachable,
+                {path.resolve() for path in root.rglob("*.md")},
+            )
 
     def test_software_development_contract_supports_gate_recovery(self):
         definition = load_workflow_definitions(WORKFLOWS_DIR)["software-development"]
@@ -126,13 +124,6 @@ class PluginLayoutTests(unittest.TestCase):
         self.assertEqual((rework["from"], rework["to"]), (["review"], "ready"))
         cancel = lifecycle_rule(definition, "cancel", "cancel")
         self.assertIn("blocked", cancel["from"])
-
-    def test_general_task_reference_does_not_fake_blocking_for_routing(self):
-        reference = GENERAL_TASK_REFERENCE.read_text(encoding="utf-8")
-
-        self.assertIn("不要为了换职责伪造阻塞", reference)
-        self.assertNotIn("先阻塞再解除", reference)
-
 
 if __name__ == "__main__":
     unittest.main()

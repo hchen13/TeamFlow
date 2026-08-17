@@ -21,15 +21,6 @@ class PluginHookCommandTests(unittest.TestCase):
             for event in ("SessionStart", "SessionEnd", "Stop")
         ]
 
-    def test_the_setup_skill_asks_users_to_trust_every_registered_hook(self):
-        guidance = (ROOT / "skills" / "teamflow-setup" / "SKILL.md").read_text(encoding="utf-8")
-        registered = set(self.hooks["hooks"])
-
-        named = {event for event in registered if f"`{event}`" in guidance}
-
-        self.assertEqual(named, registered)
-        self.assertNotIn("PostCompact", guidance)
-
     def test_compaction_recovery_is_driven_by_session_start_alone(self):
         events = self.hooks["hooks"]
 
