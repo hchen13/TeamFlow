@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "tool_descriptions_file": "tool-descriptions.json",
+  "prompts": {
+    "assignment-context.onboarding": {
+      "template_file": "assignment-context-onboarding.md",
+      "injection_surface": "hook_additional_context",
+      "allowed_triggers": ["onboarding"],
+      "required_variables": [
+        "workspace_name",
+        "workspace_root",
+        "workflow_name",
+        "workflow_key",
+        "role_name",
+        "role_key",
+        "role_description"
+      ]
+    },
+    "assignment-context.recovery": {
+      "template_file": "assignment-context-recovery.md",
+      "injection_surface": "hook_additional_context",
+      "allowed_triggers": ["compact_recovery"],
+      "required_variables": [
+        "workspace_name",
+        "workspace_root",
+        "workflow_name",
+        "workflow_key",
+        "role_name",
+        "role_key",
+        "role_description"
+      ]
+    },
+    "assignment-context.current": {
+      "template_file": "assignment-context-current.md",
+      "injection_surface": "hook_additional_context",
+      "allowed_triggers": ["status_snapshot"],
+      "required_variables": [
+        "workspace_name",
+        "workspace_root",
+        "workflow_name",
+        "workflow_key",
+        "role_name",
+        "role_key"
+      ]
+    },
+    "task-event.dispatch": {
+      "template_file": "task-event.md",
+      "injection_surface": "turn_input",
+      "allowed_triggers": ["task_event"],
+      "required_variables": [
+        "workflow_key",
+        "event_type",
+        "event_key",
+        "role_name",
+        "task_id",
+        "title",
+        "record_id",
+        "status",
+        "current_role",
+        "board_url",
+        "snapshot",
+        "instruction"
+      ],
+      "snapshot_fields": [
+        ["任务类型", "type"],
+        ["优先级", "priority"],
+        ["任务描述", "description"],
+        ["背景信息", "context"],
+        ["依赖关系", "dependencies"],
+        ["验收标准", "acceptance_criteria"],
+        ["当前进展", "progress"],
+        ["下一步", "next_action"],
+        ["结果与证据", "result_evidence"],
+        ["阻塞原因", "blocked_reason"],
+        ["等待对象", "waiting_on"]
+      ]
+    },
+    "task-event.default-instruction": {
+      "template_file": "task-event-default-instruction.md",
+      "injection_surface": "turn_input",
+      "allowed_triggers": ["task_event"],
+      "required_variables": []
+    },
+    "turn-control.reason": {
+      "template_file": "turn-control-reason.md",
+      "injection_surface": "tool_result_turn_control",
+      "allowed_triggers": ["handoff_complete"],
+      "required_variables": []
+    },
+    "turn-control.instruction": {
+      "template_file": "turn-control-instruction.md",
+      "injection_surface": "tool_result_turn_control",
+      "allowed_triggers": ["handoff_complete"],
+      "required_variables": []
+    }
+  }
+}

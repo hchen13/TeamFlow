@@ -1,0 +1,14 @@
+{
+  "block_task": "Block a task with an explicit reason, waiting target, and concrete next action permitted by the workflow.",
+  "cancel_task": "Cancel a task only after an explicit confirmation and the workflow's cancellation preconditions are satisfied.",
+  "claim_task": "Claim one task through the caller's workflow rules. The daemon verifies role, state, and executor identity.",
+  "create_task": "Create a workflow task. The workflow decides who may create it and its required initial state.\n\n    delivery_mode picks how the task ships: \"standard\", or \"repository\" when the workspace\n    has version control enabled. get_assignment reports which modes this workspace allows.\n    ",
+  "get_assignment": "Return the caller's trusted TeamFlow workspace, workflow, role, and agent assignment.",
+  "get_task": "Read one complete TeamFlow task by its Lark record ID.",
+  "list_available_tasks": "List tasks in workflow-defined states that the caller is currently allowed to claim.",
+  "review_task": "Apply a workflow-defined review decision such as approve, rework, or send_to_qa.",
+  "route_task": "Route a prepared, unblocked, or recoverable task to a role's claimable queue according to the workflow.",
+  "stop_task_execution": "Stop the task's current executor turn after workflow authorization and explicit confirmation. This does not cancel the task.",
+  "submit_task": "Submit claimed work with a workflow-defined outcome and evidence for its next review stage.\n\n    delivery carries the same repository facts as update_task and is how a repository task\n    records the candidate it produced or the promotion it completed.\n    ",
+  "update_task": "Update ordinary task fields allowed for the caller, current state, and workflow. Lifecycle fields are rejected.\n\n    delivery records repository facts and accepts delivery_mode, candidate_sha, verified_sha,\n    promoted_sha (full 40-character commit ids) and resources {branches, worktrees}. It may be\n    sent on its own, without fields. target_branch and base_sha are set by TeamFlow.\n    "
+}

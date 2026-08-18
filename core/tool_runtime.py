@@ -7,6 +7,7 @@ import threading
 import time
 from typing import Any, Callable
 
+from . import prompt_catalog
 from .agent_runtime import find_agent_assignment
 from .global_db import workspace_enabled
 from .teamflow_tools import MUTATING_TOOL_NAMES, RUNTIME_TOOL_NAMES, TOOL_NAMES
@@ -356,10 +357,9 @@ class ToolRuntime:
             return
         result["turn_control"] = {
             "action": "end_turn",
-            "reason": "当前 TeamFlow 任务已完成交接或本阶段已结束。",
-            "instruction": (
-                "请立即结束当前回复，不要轮询看板，也不要继续调用 TeamFlow 工具。"
-                "后续需要处理时，TeamFlow 会通过新的 turn 通知对应 Agent。"
+            "reason": prompt_catalog.render("turn-control.reason", trigger="handoff_complete"),
+            "instruction": prompt_catalog.render(
+                "turn-control.instruction", trigger="handoff_complete"
             ),
         }
 

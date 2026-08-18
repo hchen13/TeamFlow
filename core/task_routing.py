@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from . import prompt_catalog
 from .lark_events import LarkEventContext
 
 
@@ -28,59 +29,39 @@ def render_task_prompt(
         ),
         None,
     )
-    task_id = str(task.get("task_id") or task.get("record_id") or "-")
-    title = str(task.get("title") or "未命名任务")
-    header = [
-        "你收到了一个 TeamFlow 任务事件。",
-        "",
-        f"协作模式：{workflow_key}",
-        f"事件：{event_type}",
-        f"事件键：{event_key}",
-        f"目标职责：{role_name}",
-        f"任务：{task_id} {title}",
-        f"记录 ID：{task.get('record_id') or '-'}",
-        f"当前状态：{task.get('status') or '-'}",
-        f"当前负责人：{task.get('role') or '-'}",
-        f"多维表格：{context.board_url}",
-        "",
-        "当前卡片快照：",
-    ]
-    fields = (
-        ("任务类型", "type"),
-        ("优先级", "priority"),
-        ("任务描述", "description"),
-        ("背景信息", "context"),
-        ("依赖关系", "dependencies"),
-        ("验收标准", "acceptance_criteria"),
-        ("当前进展", "progress"),
-        ("下一步", "next_action"),
-        ("结果与证据", "result_evidence"),
-        ("阻塞原因", "blocked_reason"),
-        ("等待对象", "waiting_on"),
+    instruction = (state or {}).get("dispatch_instructions", {}).get("zh-CN") or (
+        prompt_catalog.render("task-event.default-instruction", trigger="task_event")
     )
-    for label, key in fields:
+    return prompt_catalog.render(
+        "task-event.dispatch",
+        trigger="task_event",
+        variables={
+            "workflow_key": workflow_key,
+            "event_type": event_type,
+            "event_key": event_key,
+            "role_name": role_name,
+            "task_id": str(task.get("task_id") or task.get("record_id") or "-"),
+            "title": str(task.get("title") or "未命名任务"),
+            "record_id": task.get("record_id") or "-",
+            "status": task.get("status") or "-",
+            "current_role": task.get("role") or "-",
+            "board_url": context.board_url,
+            "snapshot": _task_snapshot(task),
+            "instruction": instruction,
+        },
+    )
+
+
+def _task_snapshot(task: dict[str, Any]) -> str:
+    lines = []
+    for label, key in prompt_catalog.entry("task-event.dispatch")["snapshot_fields"]:
         value = task.get(key)
         if value in (None, "", []):
             continue
         if isinstance(value, (dict, list)):
-            value = json.dumps(
-                value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        header.append(f"{label}：{value}")
-    header.extend((
-        "",
-        "以上是 TeamFlow 派发前读取的卡片快照。需要重新确认或变更任务时，只能使用 "
-        "TeamFlow MCP 工具；如果工具不可用，请明确报告，禁止降级调用 Lark CLI、飞书 "
-        "API 或底层多维表格接口。",
-        "",
-    ))
-    instruction = (
-        (state or {}).get("dispatch_instructions", {}).get("zh-CN")
-        or "请读取完整卡片，并按当前协作模式返回的合法动作处理本次任务事件。"
-    )
-    return "\n".join((*header, instruction))
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        lines.append(f"{label}：{value}\n")
+    return "".join(lines)
 
 
 def task_dispatch_target(

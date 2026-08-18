@@ -8,9 +8,11 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from .daemon import _daemon_request
+from .prompt_catalog import tool_descriptions
 
 
 mcp = FastMCP("TeamFlow")
+TOOL_DESCRIPTIONS = tool_descriptions()
 CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata"
 DAEMON_RECOVERY_TIMEOUT = 60
 DAEMON_RETRY_INTERVAL = 0.25
@@ -109,31 +111,27 @@ def _daemon_unavailable(error: Exception) -> bool:
     ))
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["get_assignment"])
 def get_assignment(context: Context) -> dict[str, Any]:
-    """Return the caller's trusted TeamFlow workspace, workflow, role, and agent assignment."""
     return _invoke("get_assignment", {}, context)
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["list_available_tasks"])
 def list_available_tasks(context: Context) -> dict[str, Any]:
-    """List tasks in workflow-defined states that the caller is currently allowed to claim."""
     return _invoke("list_available_tasks", {}, context)
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["get_task"])
 def get_task(record_id: str, context: Context) -> dict[str, Any]:
-    """Read one complete TeamFlow task by its Lark record ID."""
     return _invoke("get_task", {"record_id": record_id}, context)
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["claim_task"])
 def claim_task(record_id: str, context: Context) -> dict[str, Any]:
-    """Claim one task through the caller's workflow rules. The daemon verifies role, state, and executor identity."""
     return _invoke("claim_task", {"record_id": record_id}, context)
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["create_task"])
 def create_task(
     title: str,
     context: Context,
@@ -146,11 +144,6 @@ def create_task(
     dependencies: str = "",
     delivery_mode: str = "",
 ) -> dict[str, Any]:
-    """Create a workflow task. The workflow decides who may create it and its required initial state.
-
-    delivery_mode picks how the task ships: "standard", or "repository" when the workspace
-    has version control enabled. get_assignment reports which modes this workspace allows.
-    """
     return _invoke("create_task", {
         "title": title,
         "task_type": task_type,
@@ -164,19 +157,13 @@ def create_task(
     }, context)
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["update_task"])
 def update_task(
     record_id: str,
     context: Context,
     fields: dict[str, Any] | None = None,
     delivery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Update ordinary task fields allowed for the caller, current state, and workflow. Lifecycle fields are rejected.
-
-    delivery records repository facts and accepts delivery_mode, candidate_sha, verified_sha,
-    promoted_sha (full 40-character commit ids) and resources {branches, worktrees}. It may be
-    sent on its own, without fields. target_branch and base_sha are set by TeamFlow.
-    """
     return _invoke(
         "update_task",
         {"record_id": record_id, "fields": fields, "delivery": delivery},
@@ -184,13 +171,12 @@ def update_task(
     )
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["route_task"])
 def route_task(record_id: str, role: str, context: Context) -> dict[str, Any]:
-    """Route a prepared, unblocked, or recoverable task to a role's claimable queue according to the workflow."""
     return _invoke("route_task", {"record_id": record_id, "role": role}, context)
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["submit_task"])
 def submit_task(
     record_id: str,
     outcome: str,
@@ -200,11 +186,6 @@ def submit_task(
     next_action: str = "",
     delivery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Submit claimed work with a workflow-defined outcome and evidence for its next review stage.
-
-    delivery carries the same repository facts as update_task and is how a repository task
-    records the candidate it produced or the promotion it completed.
-    """
     return _invoke("submit_task", {
         "record_id": record_id,
         "outcome": outcome,
@@ -215,7 +196,7 @@ def submit_task(
     }, context)
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["block_task"])
 def block_task(
     record_id: str,
     waiting_on: str,
@@ -224,7 +205,6 @@ def block_task(
     context: Context,
     progress: str = "",
 ) -> dict[str, Any]:
-    """Block a task with an explicit reason, waiting target, and concrete next action permitted by the workflow."""
     return _invoke("block_task", {
         "record_id": record_id,
         "waiting_on": waiting_on,
@@ -234,7 +214,7 @@ def block_task(
     }, context)
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["review_task"])
 def review_task(
     record_id: str,
     decision: str,
@@ -243,7 +223,6 @@ def review_task(
     role: str = "",
     next_action: str = "",
 ) -> dict[str, Any]:
-    """Apply a workflow-defined review decision such as approve, rework, or send_to_qa."""
     return _invoke("review_task", {
         "record_id": record_id,
         "decision": decision,
@@ -253,14 +232,13 @@ def review_task(
     }, context)
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["stop_task_execution"])
 def stop_task_execution(
     record_id: str,
     reason: str,
     context: Context,
     confirmed: bool = False,
 ) -> dict[str, Any]:
-    """Stop the task's current executor turn after workflow authorization and explicit confirmation. This does not cancel the task."""
     return _invoke("stop_task_execution", {
         "record_id": record_id,
         "reason": reason,
@@ -268,14 +246,13 @@ def stop_task_execution(
     }, context)
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTIONS["cancel_task"])
 def cancel_task(
     record_id: str,
     result_evidence: str,
     context: Context,
     confirmed: bool = False,
 ) -> dict[str, Any]:
-    """Cancel a task only after an explicit confirmation and the workflow's cancellation preconditions are satisfied."""
     return _invoke("cancel_task", {
         "record_id": record_id,
         "result_evidence": result_evidence,

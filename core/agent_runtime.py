@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import prompt_catalog
 from .codex import codex_developer_context_evidence
 from .config import resolve_workspace_paths
 from .db import bootstrap_workspace, connect, now, workspace_id_for_root
@@ -323,21 +324,15 @@ def render_agent_context(
     onboarding: bool,
     recovery: bool = False,
 ) -> str:
-    lines = [
-        "TeamFlow 当前职责上下文：",
-        f"工作区：{assignment['workspace_name']} ({assignment['workspace_root']})",
-        f"协作模式：{assignment['workflow_name']} ({assignment['workflow_key']})",
-        f"职责：{assignment['role_name']} ({assignment['role_key']})",
-        "TeamFlow 看板是团队共享事实源。读取或变更任务时使用 TeamFlow MCP 工具，不要直接调用底层 Lark CLI 或飞书 API。",
-        "收到可执行任务通知不代表已经认领；只有 claim_task 成功后才开始执行。",
-        "通过 TeamFlow 将任务交给其他职责后，结束当前 turn，不要轮询看板等待；后续需要你处理时，等待新的 TeamFlow 通知。",
-    ]
-    if onboarding or recovery:
-        lines[0] = (
-            "你已被注册为 TeamFlow Agent。"
-            if onboarding
-            else "TeamFlow 职责上下文已在会话压缩后恢复。"
-        )
-        lines.insert(4, f"职责说明：{assignment['role_description']}")
-        lines.append("如果工具拒绝某个状态转换，保留错误信息并按协作模式选择合法下一步，不要绕过工具直接改表。")
-    return "\n".join(lines)
+    prompt_id, trigger = (
+        ("assignment-context.onboarding", "onboarding")
+        if onboarding
+        else ("assignment-context.recovery", "compact_recovery")
+        if recovery
+        else ("assignment-context.current", "status_snapshot")
+    )
+    variables = {
+        key: assignment[key]
+        for key in prompt_catalog.entry(prompt_id)["required_variables"]
+    }
+    return prompt_catalog.render(prompt_id, trigger=trigger, variables=variables)
