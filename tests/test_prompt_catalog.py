@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from core.lark_events import LarkEventContext
 from core.mcp_server import mcp
 from core.prompt_catalog import PromptError
 from core.task_routing import render_task_prompt
+from core.tool_runtime import ToolRuntime
 from core.workflow import load_workflow_definition
 
 
@@ -79,9 +81,10 @@ class CatalogStructureTest(unittest.TestCase):
                 template = (prompt_catalog.PROMPTS_DIR / declared["template_file"]).read_text(
                     encoding="utf-8"
                 )
+                found = prompt_catalog._placeholders(prompt_id, template)
+
                 self.assertEqual(
-                    set(prompt_catalog.PLACEHOLDER.findall(template)),
-                    set(declared["required_variables"]),
+                    {name for _, _, name in found}, set(declared["required_variables"])
                 )
 
     def test_every_prompt_renders_for_each_trigger_it_declares(self):
@@ -90,7 +93,10 @@ class CatalogStructureTest(unittest.TestCase):
             for trigger in declared["allowed_triggers"]:
                 with self.subTest(prompt_id=prompt_id, trigger=trigger):
                     rendered = prompt_catalog.render(
-                        prompt_id, trigger=trigger, variables=variables
+                        prompt_id,
+                        surface=declared["injection_surface"],
+                        trigger=trigger,
+                        variables=variables,
                     )
                     self.assertTrue(rendered)
                     self.assertFalse(rendered.endswith("\n"))
@@ -99,12 +105,18 @@ class CatalogStructureTest(unittest.TestCase):
 class RendererRefusalTest(unittest.TestCase):
     def test_an_unknown_prompt_id_is_refused(self):
         with self.assertRaises(PromptError):
-            prompt_catalog.render("no-such-prompt", trigger="onboarding", variables={})
+            prompt_catalog.render(
+                "no-such-prompt",
+                surface="hook_additional_context",
+                trigger="onboarding",
+                variables={},
+            )
 
     def test_a_trigger_the_prompt_does_not_declare_is_refused(self):
         with self.assertRaises(PromptError):
             prompt_catalog.render(
                 "assignment-context.onboarding",
+                surface="hook_additional_context",
                 trigger="compact_recovery",
                 variables={name: "x" for name in ASSIGNMENT},
             )
@@ -118,15 +130,101 @@ class RendererRefusalTest(unittest.TestCase):
         with self.assertRaises(PromptError):
             prompt_catalog.render(
                 "assignment-context.onboarding",
+                surface="hook_additional_context",
                 trigger="onboarding",
                 variables={key: value for key, value in list(complete.items())[:-1]},
             )
         with self.assertRaises(PromptError):
             prompt_catalog.render(
                 "assignment-context.onboarding",
+                surface="hook_additional_context",
                 trigger="onboarding",
                 variables={**complete, "unexpected": "x"},
             )
+
+    def staged_prompts(self) -> Path:
+        temporary = tempfile.TemporaryDirectory(prefix="prompts-", dir=ROOT / "tmp")
+        self.addCleanup(temporary.cleanup)
+        staged = Path(temporary.name) / "prompts"
+        shutil.copytree(prompt_catalog.PROMPTS_DIR, staged)
+        return staged
+
+    def render_reason(self, staged: Path, surface: str = "tool_result_turn_control") -> str:
+        with patch.object(prompt_catalog, "PROMPTS_DIR", staged):
+            return prompt_catalog.render(
+                "turn-control.reason", surface=surface, trigger="handoff_complete"
+            )
+
+    def test_a_surface_the_catalog_does_not_declare_is_refused(self):
+        staged = self.staged_prompts()
+
+        with self.assertRaises(PromptError):
+            self.render_reason(staged, surface="turn_input")
+
+        catalog_path = staged / prompt_catalog.CATALOG_NAME
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        catalog["prompts"]["turn-control.reason"]["injection_surface"] = "wrong_surface"
+        catalog_path.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
+
+        # The caller keeps naming the surface it really injects on, so a catalog that
+        # drifts to a different one can no longer be rendered at all.
+        with self.assertRaises(PromptError):
+            self.render_reason(staged)
+
+    def test_a_catalog_entry_that_breaks_its_own_contract_is_refused(self):
+        broken = (
+            ("injection_surface", ""),
+            ("injection_surface", None),
+            ("allowed_triggers", []),
+            ("allowed_triggers", ["handoff_complete", 3]),
+            ("allowed_triggers", "handoff_complete"),
+            ("required_variables", ["Bad"]),
+            ("required_variables", ["same", "same"]),
+            ("template_file", "../secrets.md"),
+            ("template_file", "no-such-template.md"),
+        )
+        for field, value in broken:
+            with self.subTest(field=field, value=value):
+                staged = self.staged_prompts()
+                catalog_path = staged / prompt_catalog.CATALOG_NAME
+                catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+                catalog["prompts"]["turn-control.reason"][field] = value
+                catalog_path.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
+
+                with self.assertRaises(PromptError):
+                    self.render_reason(staged)
+
+    def test_a_placeholder_that_is_not_a_lower_snake_case_name_is_refused(self):
+        for malformed in (
+            "{{bad-name}}\n",
+            "{{BadName}}\n",
+            "{{ name }}\n",
+            "{{}}\n",
+            "文本 {{ 未闭合\n",
+            "文本 }} 未开启\n",
+            "{{outer{{inner}}\n",
+        ):
+            with self.subTest(template=malformed):
+                staged = self.staged_prompts()
+                template = staged / prompt_catalog.entry("turn-control.reason")["template_file"]
+                template.write_text(malformed, encoding="utf-8")
+
+                with self.assertRaises(PromptError):
+                    self.render_reason(staged)
+
+    def test_a_variable_value_may_contain_double_braces(self):
+        declared = prompt_catalog.entry("assignment-context.onboarding")
+        value = "{{not_a_placeholder}} 与 }} 与 {{"
+        variables = {name: value for name in declared["required_variables"]}
+
+        rendered = prompt_catalog.render(
+            "assignment-context.onboarding",
+            surface="hook_additional_context",
+            trigger="onboarding",
+            variables=variables,
+        )
+
+        self.assertEqual(rendered.count(value), len(declared["required_variables"]))
 
     def test_a_template_placeholder_the_catalog_never_declared_is_refused(self):
         temporary = tempfile.TemporaryDirectory(prefix="prompts-", dir=ROOT / "tmp")
@@ -139,7 +237,11 @@ class RendererRefusalTest(unittest.TestCase):
 
         with patch.object(prompt_catalog, "PROMPTS_DIR", staged):
             with self.assertRaises(PromptError):
-                prompt_catalog.render("turn-control.reason", trigger="handoff_complete")
+                prompt_catalog.render(
+                    "turn-control.reason",
+                    surface="tool_result_turn_control",
+                    trigger="handoff_complete",
+                )
 
     def test_an_unreadable_catalog_refuses_instead_of_rendering_nothing(self):
         temporary = tempfile.TemporaryDirectory(prefix="prompts-", dir=ROOT / "tmp")
@@ -147,7 +249,11 @@ class RendererRefusalTest(unittest.TestCase):
 
         with patch.object(prompt_catalog, "PROMPTS_DIR", Path(temporary.name)):
             with self.assertRaises(PromptError):
-                prompt_catalog.render("turn-control.reason", trigger="handoff_complete")
+                prompt_catalog.render(
+                    "turn-control.reason",
+                    surface="tool_result_turn_control",
+                    trigger="handoff_complete",
+                )
 
 
 class InjectionSurfaceTest(unittest.TestCase):
@@ -159,6 +265,7 @@ class InjectionSurfaceTest(unittest.TestCase):
                 declared = prompt_catalog.entry(prompt_id)
                 expected = prompt_catalog.render(
                     prompt_id,
+                    surface=declared["injection_surface"],
                     trigger=declared["allowed_triggers"][0],
                     variables={
                         name: ASSIGNMENT[name] for name in declared["required_variables"]
@@ -260,7 +367,7 @@ class InjectionSurfaceTest(unittest.TestCase):
 
     def test_a_state_without_an_instruction_falls_back_to_the_catalog_default(self):
         default = prompt_catalog.render(
-            "task-event.default-instruction", trigger="task_event"
+            "task-event.default-instruction", surface="turn_input", trigger="task_event"
         )
 
         prompt = render_task_prompt(
@@ -274,6 +381,65 @@ class InjectionSurfaceTest(unittest.TestCase):
         )
 
         self.assertTrue(prompt.endswith(default))
+
+
+class TurnControlSurfaceTest(unittest.TestCase):
+    """The end-turn notice a handed-off agent reads must come from the catalog too."""
+
+    def runtime(self) -> ToolRuntime:
+        return ToolRuntime(
+            sync_lock=threading.RLock(),
+            assignment_context=lambda *args, **kwargs: {},
+            workspace_active=lambda *args: True,
+            invoke_tool=lambda *args, **kwargs: {},
+            sync_task_activity=lambda *args, **kwargs: None,
+            delivery_record_id=lambda *args, **kwargs: "recHandoff",
+            delivery_turn_is_current=lambda *args, **kwargs: True,
+        )
+
+    def handoff(self) -> dict[str, object]:
+        result = {"ok": True, "task": {"record_id": "recHandoff"}}
+        self.runtime()._apply_turn_control(
+            {"turn_id": "turn1", "assignment": dict(ASSIGNMENT)},
+            "route_task",
+            result,
+        )
+        return result
+
+    def test_a_successful_handoff_renders_both_notices_through_the_catalog(self):
+        notices = ["reason", "instruction"]
+        with patch.object(prompt_catalog, "render", side_effect=notices) as rendered:
+            result = self.handoff()
+
+        self.assertEqual(result["turn_control"]["action"], "end_turn")
+        self.assertEqual(result["turn_control"]["reason"], "reason")
+        self.assertEqual(result["turn_control"]["instruction"], "instruction")
+        self.assertEqual(
+            [call.args for call in rendered.call_args_list],
+            [("turn-control.reason",), ("turn-control.instruction",)],
+        )
+        for call in rendered.call_args_list:
+            self.assertEqual(call.kwargs["surface"], "tool_result_turn_control")
+            self.assertEqual(call.kwargs["trigger"], "handoff_complete")
+
+    def test_the_notices_are_exactly_what_the_catalog_renders(self):
+        expected = {
+            field: prompt_catalog.render(
+                f"turn-control.{field}",
+                surface="tool_result_turn_control",
+                trigger="handoff_complete",
+            )
+            for field in ("reason", "instruction")
+        }
+
+        control = self.handoff()["turn_control"]
+
+        self.assertEqual({key: control[key] for key in expected}, expected)
+
+    def test_a_catalog_that_cannot_render_never_yields_a_silent_turn_control(self):
+        with patch.object(prompt_catalog, "render", side_effect=PromptError("broken")):
+            with self.assertRaises(PromptError):
+                self.handoff()
 
 
 class ToolDescriptionTest(unittest.TestCase):

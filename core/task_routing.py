@@ -30,10 +30,13 @@ def render_task_prompt(
         None,
     )
     instruction = (state or {}).get("dispatch_instructions", {}).get("zh-CN") or (
-        prompt_catalog.render("task-event.default-instruction", trigger="task_event")
+        prompt_catalog.render(
+            "task-event.default-instruction", surface="turn_input", trigger="task_event"
+        )
     )
     return prompt_catalog.render(
         "task-event.dispatch",
+        surface="turn_input",
         trigger="task_event",
         variables={
             "workflow_key": workflow_key,

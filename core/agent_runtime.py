@@ -335,4 +335,9 @@ def render_agent_context(
         key: assignment[key]
         for key in prompt_catalog.entry(prompt_id)["required_variables"]
     }
-    return prompt_catalog.render(prompt_id, trigger=trigger, variables=variables)
+    return prompt_catalog.render(
+        prompt_id,
+        surface="hook_additional_context",
+        trigger=trigger,
+        variables=variables,
+    )

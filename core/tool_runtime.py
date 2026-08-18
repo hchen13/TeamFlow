@@ -357,9 +357,15 @@ class ToolRuntime:
             return
         result["turn_control"] = {
             "action": "end_turn",
-            "reason": prompt_catalog.render("turn-control.reason", trigger="handoff_complete"),
+            "reason": prompt_catalog.render(
+                "turn-control.reason",
+                surface="tool_result_turn_control",
+                trigger="handoff_complete",
+            ),
             "instruction": prompt_catalog.render(
-                "turn-control.instruction", trigger="handoff_complete"
+                "turn-control.instruction",
+                surface="tool_result_turn_control",
+                trigger="handoff_complete",
             ),
         }
 
