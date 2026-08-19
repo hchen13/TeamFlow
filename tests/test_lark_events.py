@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import shutil
 import tempfile
 import threading
 import unittest
@@ -84,9 +85,11 @@ from core.task_dispatch import (
 from core.teamflow_tools import list_available_tasks
 from core.workflow import load_workflow_definition, validate_workflow_definition
 from scripts.teamflow import (
+    UI_LAUNCHERS,
     cmd_inspect_agent_context,
     cmd_serve_ui,
     cmd_verify_lark_user_identity,
+    ensure_ui_dependencies,
     ui_dist_dir,
 )
 
@@ -4062,6 +4065,77 @@ class LarkEventsTest(unittest.TestCase):
         self.assertFalse(dist_dir.startswith(".next/"))
         self.assertEqual(dist_dir, ui_dist_dir(self.workspace))
         self.assertNotEqual(dist_dir, ui_dist_dir(f"{self.workspace}-other"))
+
+    def ui_tree(self, *, packages=(), launchers=()) -> Path:
+        ui_dir = Path(tempfile.mkdtemp(prefix="ui-", dir=ROOT / "tmp"))
+        self.addCleanup(shutil.rmtree, ui_dir, True)
+        for package in packages:
+            (ui_dir / "node_modules" / package).mkdir(parents=True)
+        for name in launchers:
+            launcher = ui_dir / "node_modules" / ".bin" / name
+            launcher.parent.mkdir(parents=True, exist_ok=True)
+            launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+            launcher.chmod(0o755)
+        return ui_dir
+
+    def install(self, ui_dir: Path, *, restores=()):
+        def npm_ci(*args, **kwargs):
+            for name in restores:
+                launcher = ui_dir / "node_modules" / ".bin" / name
+                launcher.parent.mkdir(parents=True, exist_ok=True)
+                launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+                launcher.chmod(0o755)
+
+        return patch("scripts.teamflow.subprocess.run", side_effect=npm_ci)
+
+    def test_a_restored_package_without_its_launcher_still_installs(self):
+        ui_dir = self.ui_tree(packages=("next", "@larksuite"))
+
+        with self.install(ui_dir, restores=UI_LAUNCHERS) as npm_ci:
+            ensure_ui_dependencies(ui_dir)
+
+        npm_ci.assert_called_once_with(["npm", "ci"], cwd=ui_dir, check=True)
+
+    def test_a_single_missing_or_unusable_launcher_installs(self):
+        for present in (UI_LAUNCHERS[:1], UI_LAUNCHERS[1:]):
+            with self.subTest(present=present):
+                ui_dir = self.ui_tree(packages=("next",), launchers=present)
+
+                with self.install(ui_dir, restores=UI_LAUNCHERS) as npm_ci:
+                    ensure_ui_dependencies(ui_dir)
+
+                npm_ci.assert_called_once_with(["npm", "ci"], cwd=ui_dir, check=True)
+
+    def test_a_dangling_or_unexecutable_launcher_installs(self):
+        for break_it in (
+            lambda path: path.unlink() or path.symlink_to(path.parent / "gone"),
+            lambda path: path.chmod(0o644),
+        ):
+            with self.subTest(break_it=break_it):
+                ui_dir = self.ui_tree(packages=("next",), launchers=UI_LAUNCHERS)
+                break_it(ui_dir / "node_modules" / ".bin" / UI_LAUNCHERS[0])
+
+                with self.install(ui_dir, restores=UI_LAUNCHERS) as npm_ci:
+                    ensure_ui_dependencies(ui_dir)
+
+                npm_ci.assert_called_once_with(["npm", "ci"], cwd=ui_dir, check=True)
+
+    def test_every_usable_launcher_skips_the_install(self):
+        ui_dir = self.ui_tree(launchers=UI_LAUNCHERS)
+
+        with self.install(ui_dir) as npm_ci:
+            ensure_ui_dependencies(ui_dir)
+
+        npm_ci.assert_not_called()
+
+    def test_an_install_that_leaves_a_launcher_missing_fails_before_the_ui_starts(self):
+        ui_dir = self.ui_tree(packages=("next",))
+
+        with self.install(ui_dir, restores=UI_LAUNCHERS[:1]) as npm_ci:
+            with self.assertRaises(ValueError):
+                ensure_ui_dependencies(ui_dir)
+
+        npm_ci.assert_called_once_with(["npm", "ci"], cwd=ui_dir, check=True)
 
     def test_ui_stops_cleanly_on_keyboard_interrupt(self):
         args = Mock(workspace=self.workspace, host="127.0.0.1", port=12346)

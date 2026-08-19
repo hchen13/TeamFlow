@@ -71,6 +71,9 @@ from core.lark_events import listen_lark_board_events, verify_lark_board_listene
 
 
 CONFIG_PATH = ROOT / "teamflow.config.json"
+# npm run dev and the Lark CLI both resolve through node_modules/.bin, so these are
+# what "the UI is installed" has to mean.
+UI_LAUNCHERS = ("next", "lark-cli")
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 8766
 
@@ -883,24 +886,51 @@ def cmd_self_check(args: argparse.Namespace) -> int:
     assert load_ui_config()["port"] > 0
     with tempfile.TemporaryDirectory(prefix="ui-", dir=checks_dir) as ui_workspace:
         ui_dir = Path(ui_workspace)
-        with patch("subprocess.run") as npm_run:
-            ensure_ui_dependencies(ui_dir)
-        npm_run.assert_called_once_with(["npm", "ci"], cwd=ui_dir, check=True)
-        (ui_dir / "node_modules" / "next").mkdir(parents=True)
+        launchers = ui_dir / "node_modules" / ".bin"
+        launchers.mkdir(parents=True)
+        for name in UI_LAUNCHERS:
+            launcher = launchers / name
+            launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+            launcher.chmod(0o755)
         with patch("subprocess.run") as npm_run:
             ensure_ui_dependencies(ui_dir)
         npm_run.assert_not_called()
+        (launchers / UI_LAUNCHERS[0]).unlink()
+        with patch("subprocess.run") as npm_run:
+            try:
+                ensure_ui_dependencies(ui_dir)
+                started = True
+            except ValueError:
+                started = False
+        assert not started, "a launcher npm ci did not restore must stop the UI"
+        npm_run.assert_called_once_with(["npm", "ci"], cwd=ui_dir, check=True)
     print("OK: TeamFlow local config self-check passed")
     return 0
 
 
 def ensure_ui_dependencies(ui_dir: Path) -> None:
-    if (ui_dir / "node_modules" / "next").exists():
+    if not missing_ui_launchers(ui_dir):
         return
     try:
         subprocess.run(["npm", "ci"], cwd=ui_dir, check=True)
     except FileNotFoundError as error:
         raise ValueError("npm is required to start the TeamFlow UI") from error
+    unresolved = missing_ui_launchers(ui_dir)
+    if unresolved:
+        raise ValueError(
+            f"npm ci did not install an executable {', '.join(unresolved)} in "
+            f"{ui_dir / 'node_modules' / '.bin'}"
+        )
+
+
+def missing_ui_launchers(ui_dir: Path) -> list[str]:
+    """A restored package directory is not a runnable command; only its launcher is."""
+    launchers = ui_dir / "node_modules" / ".bin"
+    return [
+        name
+        for name in UI_LAUNCHERS
+        if not (launchers / name).is_file() or not os.access(launchers / name, os.X_OK)
+    ]
 
 
 def load_ui_config() -> dict[str, int | str]:
