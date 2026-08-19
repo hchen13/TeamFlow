@@ -7,6 +7,19 @@ description: Use when setting up or operating TeamFlow itself - initializing a w
 
 本 Skill 只负责 TeamFlow 自身的配置、启动、诊断与运行管理。它不处理业务任务卡片；已注册 Agent 执行看板任务时使用 `teamflow-agent`。
 
+## 先判定操作范围
+
+用户明确告诉当前 Session“你是本项目的 TeamFlow QA/TL/Design/PM”等角色时，只授权**当前 Session 的角色注册**，不等于授权它接管整个项目的 TeamFlow 配置。代号或显示名可以同时指定，也可以省略。此时走下面的受限流程：
+
+1. 只读确认当前目录已有 TeamFlow 工作区、已选择协作模式，且用户指定的角色确实存在。当前 Session ID 无法准确识别时停止，不猜测或绑定其他 Session。
+2. 先用 `inspect-agent-context --session-id CURRENT_THREAD_ID` 检查当前 Session。已有相同绑定时保持不变；没有绑定时，只用第 7 节的 `register-agent` 绑定当前 Session、明确角色和可选代号。已有不同绑定、角色冲突或需要替换时停止并交给用户或 PM 处理，不默认使用 `--replace-role`。
+3. 再次用 `inspect-agent-context --session-id CURRENT_THREAD_ID` 确认本地注册记录。工作区尚未启用时，状态保持待入职是正常结果。
+4. 注册成功后立即结束本轮。不要在同一轮继续初始化或修复工作区，也不要处理业务卡片；下一次真实用户消息或 TeamFlow 投递会完成隐藏职责注入。
+
+这个受限流程不得执行 `init`、选择协作模式、配置飞书身份或看板、修改应用权限、`initialize-lark-board`、验证监听、授权 Codex 工具、启动或启用 daemon，也不得注册其他 Session。缺少任何这些前置条件时，只说明需要由 PM/协调者与用户完成什么，不自行补齐。
+
+只有用户明确要求 PM/协调者 Session 初始化、配置、修复或运行 TeamFlow 时，才进入后面的完整流程。单纯指定角色不是完整 setup 请求；已注册的非协调者发现配置缺口时只报告给用户和 PM/协调者，不自行补齐。
+
 不要假设用户项目里存在 `./teamflow`。从 Codex 加载本 Skill 时给出的绝对 `SKILL.md` 路径推导插件根目录；无论源码态还是安装缓存态，插件根目录都是该路径的上两级：
 
 ```bash

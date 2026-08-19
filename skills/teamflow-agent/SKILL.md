@@ -11,6 +11,10 @@ description: Use when a Codex session registered as a TeamFlow agent needs to in
 
 永远先调用 `get_assignment`。身份由可信 MCP 调用上下文解析，不需要也不应该自行传入 `agent_id`、`role` 或 `workflow_key`。返回结果给出当前工作区、协作模式、职责和 Agent。
 
+如果工具明确返回当前 Session 尚未注册，而用户本轮已经明确指定了当前 Session 的 TeamFlow 角色（以及可选代号），则转到 `teamflow-setup` 的“当前 Session 角色注册”受限流程。该授权只覆盖本地绑定：注册成功后结束本轮，不继续初始化看板、处理飞书权限、启用 daemon 或执行任务。正式职责上下文由下一次真实用户消息或 TeamFlow 投递隐藏注入。
+
+用户没有明确指定角色、指定角色不存在，或当前 Session ID 无法准确识别时，不自行推断或注册。
+
 ## 第二步：按 workflow_key 读取协作模式指引
 
 | `workflow_key` | 指引 |
