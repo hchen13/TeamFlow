@@ -62,6 +62,9 @@ TEAMFLOW_APP_SCOPES = (
 )
 
 
+LARK_DOMAINS = ("feishu", "larksuite")
+
+
 class LarkRequestError(ValueError):
     def __init__(
         self,
@@ -965,6 +968,78 @@ def _lark_request_error(payload: dict[str, Any], message: str) -> LarkRequestErr
     )
 
 
+def required_lark_bot_permissions(
+    workspace: str | None,
+    *,
+    identity_id: str | None = None,
+    domain: str = "",
+) -> dict[str, Any]:
+    """Every Bot scope TeamFlow needs, and one link that grants them, before touching the board."""
+    paths = resolve_workspace_paths(workspace)
+    if not paths.db_path.exists():
+        raise ValueError("TeamFlow workspace is not initialized")
+    # Deliberately no bootstrap_workspace: this command runs before the board exists
+    # and must not migrate or touch a single row on the way to printing a link.
+    with connect(paths.db_path) as conn:
+        workspace_id = workspace_id_for_root(conn, paths.root)
+        identities = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT * FROM lark_identities
+                WHERE workspace_id = ? AND auth_mode = 'bot'
+                ORDER BY created_at, id
+                """,
+                (workspace_id,),
+            ).fetchall()
+        ]
+        board = conn.execute(
+            "SELECT base_url FROM lark_boards WHERE workspace_id = ?",
+            (workspace_id,),
+        ).fetchone()
+
+    identity = _selected_bot_identity(identities, identity_id)
+    if not str(identity.get("app_id") or "").strip():
+        raise ValueError(f"{identity['id']} has no app_id, so its permission page cannot be addressed")
+    base_url = str((board["base_url"] if board else "") or "") or _domain_base_url(domain)
+    scopes = list(TEAMFLOW_APP_SCOPES)
+    return {
+        "ok": True,
+        "identity_id": identity["id"],
+        "app_id": identity["app_id"],
+        "required_scopes": scopes,
+        "permission_url": _permission_url(identity, {"base_url": base_url}, scopes),
+    }
+
+
+def _selected_bot_identity(
+    identities: list[dict[str, Any]],
+    identity_id: str | None,
+) -> dict[str, Any]:
+    """Which app the scopes belong to is never guessed; the wrong one sends the user nowhere."""
+    wanted = str(identity_id or "").strip()
+    if wanted:
+        identity = next((row for row in identities if row["id"] == wanted), None)
+        if identity is None:
+            raise ValueError(f"{wanted} is not a saved Lark bot identity in this workspace")
+        return identity
+    if not identities:
+        raise ValueError("configure a Lark bot identity before asking for its permissions")
+    if len(identities) > 1:
+        candidates = ", ".join(sorted(row["id"] for row in identities))
+        raise ValueError(f"this workspace has several Lark bot identities; choose one of {candidates}")
+    return identities[0]
+
+
+def _domain_base_url(domain: str) -> str:
+    value = str(domain or "").strip().lower()
+    if value not in LARK_DOMAINS:
+        raise ValueError(
+            f"no Bitable URL is configured yet, so the domain must be one of {', '.join(LARK_DOMAINS)}"
+        )
+    return "https://open.larksuite.com" if value == "larksuite" else "https://open.feishu.cn"
+
+
 def initialize_lark_board(
     workspace: str | None,
     *,
@@ -1090,7 +1165,27 @@ def initialize_lark_board(
         }
     except Exception as error:
         _save_board_failure(paths, board["id"], error)
-        raise
+        scoped = _missing_scope_error(error, identity, board)
+        if scoped is None:
+            raise
+        raise scoped from error
+
+
+def _missing_scope_error(
+    error: Exception,
+    identity: dict[str, Any],
+    board: dict[str, Any],
+) -> LarkRequestError | None:
+    """Report the whole scope set, not whichever write happened to trip over one of them."""
+    details = _access_error_details(error, identity, board, "initialize")
+    if details["failure_kind"] != "missing_scope":
+        return None
+    return LarkRequestError(
+        details["last_error"],
+        code=str(getattr(error, "code", "")),
+        missing_scopes=tuple(details["missing_scopes"]),
+        repair_url=str(details["repair_url"] or ""),
+    )
 
 
 def list_lark_tasks(workspace: str | None, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:

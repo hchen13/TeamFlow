@@ -115,6 +115,18 @@ export TEAMFLOW_LARK_APP_SECRET='replace-me'
 "$TF" remove-lark-identity  --workspace "$PROJECT_ROOT" --identity-id ID
 ```
 
+保存 Bot 身份之后、任何看板写入之前（含 `grant-lark-board-access`、`verify-lark-board`、`initialize-lark-board`），先取一次完整权限清单：
+
+```bash
+"$TF" required-lark-bot-permissions --workspace "$PROJECT_ROOT"
+```
+
+该命令只读本地数据库，不调用飞书、不写库。输出的 `required_scopes` 是 TeamFlow 需要的全部 Bot 权限，`permission_url` 是一次性开通它们的入口。把这个链接原样交给用户，等用户勾选全部权限并**发布应用版本**后再继续；不要边跑边试、让用户一个一个补。
+
+工作区尚未配置看板 URL 时用 `--domain feishu` 或 `--domain larksuite` 指定域；有多个 Bot 身份时用 `--identity-id` 明确选择，命令不会替你猜。
+
+这一步属于 PM/协调者的完整 setup。第 1 节的受限自注册流程不执行它。
+
 ## 4. 配置并验证看板
 
 连接已有多维表格，或用已保存身份新建：

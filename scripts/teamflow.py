@@ -60,10 +60,12 @@ from core.db import (
     verify_lark_user_identity,
 )
 from core.lark_board import (
+    LARK_DOMAINS,
     get_lark_task,
     grant_lark_board_access,
     initialize_lark_board,
     list_lark_tasks,
+    required_lark_bot_permissions,
     upsert_lark_task,
     verify_lark_board,
 )
@@ -145,6 +147,19 @@ def main() -> int:
     add_workspace_args(grant_board_parser)
     grant_board_parser.add_argument("--identity-id", required=True, help="Identity to add as a collaborator.")
     grant_board_parser.set_defaults(func=cmd_grant_lark_board_access)
+
+    bot_permissions_parser = subparsers.add_parser(
+        "required-lark-bot-permissions",
+        help="Print every Bot scope TeamFlow needs and one link that grants them.",
+    )
+    add_workspace_args(bot_permissions_parser)
+    bot_permissions_parser.add_argument("--identity-id", help="Bot identity to report, when the workspace has several.")
+    bot_permissions_parser.add_argument(
+        "--domain",
+        choices=LARK_DOMAINS,
+        help="Lark domain to address, when no Bitable URL is configured yet.",
+    )
+    bot_permissions_parser.set_defaults(func=cmd_required_lark_bot_permissions)
 
     initialize_board_parser = subparsers.add_parser("initialize-lark-board", help="Initialize the TeamFlow task table and board view.")
     add_workspace_args(initialize_board_parser)
@@ -405,6 +420,15 @@ def cmd_verify_lark_board(args: argparse.Namespace) -> int:
 
 def cmd_grant_lark_board_access(args: argparse.Namespace) -> int:
     print_json(grant_lark_board_access(args.workspace, identity_id=args.identity_id))
+    return 0
+
+
+def cmd_required_lark_bot_permissions(args: argparse.Namespace) -> int:
+    print_json(required_lark_bot_permissions(
+        args.workspace,
+        identity_id=args.identity_id,
+        domain=args.domain or "",
+    ))
     return 0
 
 

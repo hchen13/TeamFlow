@@ -36,6 +36,7 @@ from core.lark_board import (
     grant_lark_board_access,
     initialize_lark_board,
     list_lark_tasks,
+    required_lark_bot_permissions,
     upsert_lark_task,
     verify_lark_board,
 )
@@ -878,6 +879,219 @@ class LarkBoardTest(unittest.TestCase):
             )
         finally:
             self.client_patch.start()
+
+
+class InitializationScopeFallbackTest(unittest.TestCase):
+    """Skipping the preflight must still surface the whole set, not one scope per attempt."""
+
+    def setUp(self):
+        (ROOT / "tmp").mkdir(exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(prefix="init-scopes-", dir=ROOT / "tmp")
+        self.addCleanup(self.temp.cleanup)
+        self.workspace = self.temp.name
+        init_workspace(self.workspace)
+        with patch("core.db.fetch_lark_app_info", return_value=("Test app", None, None)):
+            configure_lark_identity(
+                self.workspace, app_id="cli_test", app_secret="secret", domain="feishu"
+            )
+        configure_lark_board(
+            self.workspace,
+            board_url="https://example.feishu.cn/base/bascnTest?table=tblDefault&view=vewGrid",
+        )
+        client = FakeBoardClient()
+        started = patch("core.lark_board.LarkBoardClient", return_value=client)
+        started.start()
+        self.addCleanup(started.stop)
+        self.client = client
+        verify_lark_board(self.workspace)
+
+    def failing_initialize(self, error: Exception) -> LarkRequestError:
+        with patch.object(type(self.client), "create_field", side_effect=error):
+            with self.assertRaises(ValueError) as raised:
+                initialize_lark_board(self.workspace)
+        return raised.exception
+
+    def test_one_scope_denial_during_a_write_reports_the_whole_set(self):
+        raised = self.failing_initialize(
+            LarkRequestError(
+                "Forbidden",
+                code="99991672",
+                missing_scopes=("base:field:create",),
+                repair_url="https://open.feishu.cn/app/cli_test/auth?q=base:field:create",
+            )
+        )
+
+        self.assertEqual(
+            set(raised.missing_scopes) >= set(TEAMFLOW_APP_SCOPES),
+            True,
+        )
+        self.assertEqual(
+            parse_qs(urlparse(raised.repair_url).query)["q"][0].split(","),
+            sorted(set(TEAMFLOW_APP_SCOPES)),
+        )
+
+    def test_the_fallback_link_matches_what_the_preflight_would_have_given(self):
+        raised = self.failing_initialize(
+            LarkRequestError("Forbidden", code="99991672", missing_scopes=("base:field:create",))
+        )
+        preflight = required_lark_bot_permissions(self.workspace)
+
+        self.assertEqual(
+            parse_qs(urlparse(raised.repair_url).query)["q"][0].split(","),
+            sorted(preflight["required_scopes"]),
+        )
+        self.assertEqual(
+            urlparse(raised.repair_url).path, urlparse(preflight["permission_url"]).path
+        )
+
+    def test_the_original_failure_is_still_readable(self):
+        original = LarkRequestError(
+            "field create denied", code="99991672", missing_scopes=("base:field:create",)
+        )
+
+        raised = self.failing_initialize(original)
+
+        self.assertEqual(str(raised), "field create denied")
+        self.assertIs(raised.__cause__, original)
+
+    def test_a_failure_that_is_not_about_scopes_is_left_alone(self):
+        original = ValueError("the table is locked")
+
+        with patch.object(type(self.client), "create_field", side_effect=original):
+            with self.assertRaises(ValueError) as raised:
+                initialize_lark_board(self.workspace)
+
+        self.assertIs(raised.exception, original)
+
+
+class BotPermissionPreflightTest(unittest.TestCase):
+    """Setup asks once for the whole scope set instead of discovering it one API at a time."""
+
+    def setUp(self):
+        (ROOT / "tmp").mkdir(exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(prefix="bot-scopes-", dir=ROOT / "tmp")
+        self.addCleanup(self.temp.cleanup)
+        self.workspace = self.temp.name
+        init_workspace(self.workspace)
+
+    def add_bot(self, app_id: str, domain: str = "feishu") -> str:
+        with patch("core.db.fetch_lark_app_info", return_value=(app_id, None, None)):
+            saved = configure_lark_identity(
+                self.workspace, app_id=app_id, app_secret="secret", domain=domain
+            )
+        return saved["lark_identity_id"]
+
+    def query(self, url: str) -> dict[str, list[str]]:
+        return parse_qs(urlparse(url).query)
+
+    def test_the_link_carries_every_scope_teamflow_needs(self):
+        self.add_bot("cli_only")
+
+        reported = required_lark_bot_permissions(self.workspace, domain="feishu")
+
+        self.assertEqual(reported["required_scopes"], list(TEAMFLOW_APP_SCOPES))
+        self.assertEqual(
+            self.query(reported["permission_url"])["q"][0].split(","),
+            list(TEAMFLOW_APP_SCOPES),
+        )
+        self.assertEqual(reported["app_id"], "cli_only")
+
+    def test_one_link_covers_the_whole_set(self):
+        self.add_bot("cli_only")
+
+        urls = {
+            required_lark_bot_permissions(self.workspace, domain="feishu")["permission_url"]
+        }
+
+        self.assertEqual(len(urls), 1)
+        self.assertEqual(
+            self.query(urls.pop())["token_type"], ["tenant"]
+        )
+
+    def test_the_domain_selects_the_open_platform_host(self):
+        self.add_bot("cli_only")
+
+        for domain, host in (("feishu", "open.feishu.cn"), ("larksuite", "open.larksuite.com")):
+            with self.subTest(domain=domain):
+                reported = required_lark_bot_permissions(self.workspace, domain=domain)
+
+                self.assertEqual(urlparse(reported["permission_url"]).hostname, host)
+
+    def test_a_configured_board_url_decides_the_host_without_a_domain(self):
+        self.add_bot("cli_only")
+        configure_lark_board(
+            self.workspace, board_url="https://example.larksuite.com/base/bascnTest"
+        )
+
+        reported = required_lark_bot_permissions(self.workspace)
+
+        self.assertEqual(urlparse(reported["permission_url"]).hostname, "open.larksuite.com")
+
+    def test_without_a_board_url_or_a_domain_it_refuses_to_guess(self):
+        self.add_bot("cli_only")
+
+        with self.assertRaises(ValueError):
+            required_lark_bot_permissions(self.workspace)
+
+    def test_several_bots_must_be_disambiguated(self):
+        first = self.add_bot("cli_first")
+        second = self.add_bot("cli_second")
+
+        with self.assertRaises(ValueError):
+            required_lark_bot_permissions(self.workspace, domain="feishu")
+
+        for identity_id, app_id in ((first, "cli_first"), (second, "cli_second")):
+            with self.subTest(app_id=app_id):
+                reported = required_lark_bot_permissions(
+                    self.workspace, identity_id=identity_id, domain="feishu"
+                )
+
+                self.assertEqual(reported["identity_id"], identity_id)
+                self.assertEqual(reported["app_id"], app_id)
+                self.assertIn(f"/app/{app_id}/auth", reported["permission_url"])
+
+    def test_an_unknown_or_missing_bot_is_an_error(self):
+        with self.assertRaises(ValueError):
+            required_lark_bot_permissions(self.workspace, domain="feishu")
+
+        self.add_bot("cli_only")
+        with self.assertRaises(ValueError):
+            required_lark_bot_permissions(
+                self.workspace, identity_id="no-such-identity", domain="feishu"
+            )
+
+    def test_a_user_identity_is_not_a_bot(self):
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO lark_identities (
+                  id, workspace_id, auth_mode, app_id, created_at, updated_at
+                )
+                SELECT 'identity_user', id, 'user', 'cli_user', '2026-01-01', '2026-01-01'
+                FROM workspaces LIMIT 1
+                """
+            )
+
+        with self.assertRaises(ValueError):
+            required_lark_bot_permissions(self.workspace, domain="feishu")
+
+    def test_it_reads_nothing_from_lark_and_writes_nothing_back(self):
+        self.add_bot("cli_only")
+        paths = resolve_workspace_paths(self.workspace)
+        before = paths.db_path.read_bytes()
+
+        with patch("core.lark_board.LarkBoardClient") as client, patch(
+            "core.db.run_lark_cli_json"
+        ) as cli, patch("core.lark_board.read_json") as read, patch(
+            "core.lark_board.post_json"
+        ) as post:
+            required_lark_bot_permissions(self.workspace, domain="feishu")
+
+        for probe in (client, cli, read, post):
+            probe.assert_not_called()
+        self.assertEqual(paths.db_path.read_bytes(), before)
+
+
 
 
 if __name__ == "__main__":
