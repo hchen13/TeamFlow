@@ -21,10 +21,11 @@ from .codex_app_server_protocol import (
 )
 from .codex_ipc import (
     CodexIpcConnection as _CodexIpcConnection,
-    CodexIpcUnavailable as _CodexIpcUnavailable,
+    CodexIpcNoOwner as _CodexIpcNoOwner,
     CodexThreadStream as _CodexThreadStream,
     notify_codex_clients_thread_changed,
     run_codex_ipc_turn,
+    stop_codex_ipc_turn,
 )
 from .codex_permissions import require_teamflow_mcp_authorization
 from .codex_rollout import (
@@ -153,7 +154,7 @@ def run_codex_turn(
             on_started=on_started,
             stop_event=stop_event,
         )
-    except _CodexIpcUnavailable:
+    except _CodexIpcNoOwner:
         return _run_codex_app_server_turn(
             thread,
             prompt,
@@ -174,10 +175,23 @@ def stop_codex_turn(
         raise ValueError("thread_id is required")
     if not expected_turn:
         raise ValueError("expected_turn_id is required")
-    return _APP_SERVER_RUNTIME.stop_turn(
-        thread,
-        expected_turn_id=expected_turn,
-    )
+    with _ACTIVE_APP_SERVER_TURNS_LOCK:
+        app_server_owned = thread in _ACTIVE_APP_SERVER_TURNS
+    if app_server_owned:
+        return _APP_SERVER_RUNTIME.stop_turn(
+            thread,
+            expected_turn_id=expected_turn,
+        )
+    try:
+        return _stop_codex_ipc_turn(
+            thread,
+            expected_turn_id=expected_turn,
+        )
+    except _CodexIpcNoOwner:
+        return _APP_SERVER_RUNTIME.stop_turn(
+            thread,
+            expected_turn_id=expected_turn,
+        )
 
 
 def _run_codex_app_server_turn(
@@ -237,6 +251,18 @@ def _run_codex_ipc_turn(
         interrupt_competing_turn=_interrupt_competing_codex_turn,
         on_started=on_started,
         stop_event=stop_event,
+    )
+
+
+def _stop_codex_ipc_turn(
+    thread: str,
+    *,
+    expected_turn_id: str,
+) -> dict[str, Any]:
+    return stop_codex_ipc_turn(
+        thread,
+        expected_turn_id=expected_turn_id,
+        connection_type=_CodexIpcConnection,
     )
 
 
