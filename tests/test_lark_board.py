@@ -41,6 +41,7 @@ from core.lark_board import (
     verify_lark_board,
 )
 from core.workflow import load_workflow_definition, task_field_specs
+from scripts.teamflow import cli_error_lines
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -953,6 +954,17 @@ class InitializationScopeFallbackTest(unittest.TestCase):
 
         self.assertEqual(str(raised), "field create denied")
         self.assertIs(raised.__cause__, original)
+
+    def test_cli_exposes_the_complete_fallback_repair(self):
+        raised = self.failing_initialize(
+            LarkRequestError("Forbidden", code="99991672", missing_scopes=("base:field:create",))
+        )
+
+        output = "\n".join(cli_error_lines(raised))
+
+        for scope in TEAMFLOW_APP_SCOPES:
+            self.assertIn(scope, output)
+        self.assertIn(raised.repair_url, output)
 
     def test_a_failure_that_is_not_about_scopes_is_left_alone(self):
         original = ValueError("the table is locked")

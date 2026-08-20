@@ -293,12 +293,28 @@ def main() -> int:
     try:
         return args.func(args)
     except Exception as error:
-        print(f"teamflow: {error}", file=sys.stderr)
+        for line in cli_error_lines(error):
+            print(f"teamflow: {line}", file=sys.stderr)
         return 1
 
 
 def add_workspace_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", default=".", help="Project root that owns .teamflow/teamflow.db.")
+
+
+def cli_error_lines(error: Exception) -> list[str]:
+    lines = [str(error)]
+    missing_scopes = list(getattr(error, "missing_scopes", ()))
+    repair_url = str(getattr(error, "repair_url", "") or "")
+    if missing_scopes or repair_url:
+        lines.append(json.dumps(
+            {
+                "missing_scopes": missing_scopes,
+                "repair_url": repair_url or None,
+            },
+            ensure_ascii=False,
+        ))
+    return lines
 
 
 def cmd_init(args: argparse.Namespace) -> int:
