@@ -3271,6 +3271,7 @@ class LarkEventsTest(unittest.TestCase):
                 "UPDATE task_event_deliveries SET next_attempt_at = NULL"
             )
         runtime = TeamFlowDaemon()
+        runtime.delivery_runtime.turn_completed = lambda *_args, **_kwargs: True
         retry_output = io.StringIO()
         try:
             with (
@@ -3315,6 +3316,7 @@ class LarkEventsTest(unittest.TestCase):
                 """
             )
         runtime = TeamFlowDaemon()
+        runtime.delivery_runtime.turn_completed = lambda *_args, **_kwargs: True
         failed_output = io.StringIO()
         try:
             with (
@@ -3931,7 +3933,7 @@ class LarkEventsTest(unittest.TestCase):
             expired_output = io.StringIO()
             with (
                 patch("core.daemon.read_codex_thread", return_value={
-                    "status": {"type": "active"},
+                    "status": {"type": "idle"},
                     "turns": [],
                 }),
                 redirect_stdout(expired_output),

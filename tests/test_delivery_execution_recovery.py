@@ -334,6 +334,52 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
         self.assertEqual(row["turn_status"], "inProgress")
         self.assertIn("interrupted", row["last_error"])
 
+    def test_interrupted_dispatch_before_claim_stays_reconcilable(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+
+        def run_turn(
+            _session_id,
+            _prompt,
+            *,
+            client_message_id,
+            on_started,
+            stop_event,
+        ):
+            self.assertEqual(client_message_id, delivery["client_message_id"])
+            self.assertFalse(stop_event.is_set())
+            on_started("turn_original")
+            return {
+                "ok": False,
+                "turn_id": "turn_original",
+                "status": "interrupted",
+                "error": "interrupted",
+                "transport": "codex-ipc",
+            }
+
+        self.runtime(run_turn=run_turn).execute(context, delivery)
+
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT status, turn_status, last_error FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["turn_status"], "inProgress")
+        self.assertIn("interrupted", row["last_error"])
+        self.assertTrue(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_original",
+            agent_id="agent_recovery",
+        ))
+
     def test_same_turn_handoff_after_interrupt_converges_delivery(self) -> None:
         context = self.context()
         delivery = self.start_delivery()
@@ -376,6 +422,194 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 "SELECT status, turn_status FROM task_event_deliveries"
             ).fetchone()
         self.assertEqual((saved["status"], saved["turn_status"]), ("completed", "completed"))
+
+    def test_late_interrupted_turn_stays_admitted_until_rollout_completion(self) -> None:
+        context = self.context()
+        delivery = self.start_delivery(turn_id="turn_placeholder")
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET attempts = 4,
+                    next_attempt_at = NULL,
+                    started_at = '2000-01-01T00:00:00+00:00'
+                """
+            )
+
+        thread = {
+            "status": {"type": "active"},
+            "turns": [{
+                "id": "turn_visible",
+                "status": "interrupted",
+                "items": [{
+                    "type": "userMessage",
+                    "clientId": delivery["client_message_id"],
+                }],
+            }],
+        }
+        runtime = self.runtime(
+            read_thread=lambda *_args, **_kwargs: thread,
+            turn_completed=lambda *_args, **_kwargs: False,
+        )
+        runtime.reconcile(context)
+
+        with connect(self.db_path) as conn:
+            pending = conn.execute(
+                """
+                SELECT status, turn_id, turn_status
+                FROM task_event_deliveries
+                """
+            ).fetchone()
+        self.assertEqual(
+            (pending["status"], pending["turn_id"], pending["turn_status"]),
+            ("processing", "turn_visible", "inProgress"),
+        )
+        self.assertFalse(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_placeholder",
+            agent_id="agent_recovery",
+        ))
+        self.assertTrue(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_visible",
+            agent_id="agent_recovery",
+        ))
+
+        assignment = {
+            "workspace_root": self.workspace,
+            "workflow_key": "software-development",
+            "agent_id": "agent_recovery",
+        }
+        tool_runtime = ToolRuntime(
+            sync_lock=threading.RLock(),
+            assignment_context=lambda **_kwargs: {"assignment": assignment},
+            workspace_active=lambda _workspace: True,
+            invoke_tool=lambda *_args, **_kwargs: {"ok": True},
+            sync_task_activity=lambda *_args, **_kwargs: None,
+            delivery_record_id=lambda *_args, **_kwargs: "recRecovery",
+            delivery_turn_is_current=lambda _assignment, **kwargs: (
+                task_delivery_turn_is_current(
+                    context,
+                    agent_id="agent_recovery",
+                    **kwargs,
+                )
+            ),
+        )
+        grant = tool_runtime.authorize(
+            invocation_id="read-after-late-materialization",
+            session_id="session_recovery",
+            cwd=self.workspace,
+            turn_id="turn_visible",
+            tool_name="mcp__teamflow__get_task",
+            tool_input={"record_id": "recRecovery"},
+        )
+        self.assertTrue(grant["grant"])
+
+        thread["status"] = {"type": "idle"}
+        thread["turns"][0]["status"] = "completed"
+        runtime.turn_completed = lambda *_args, **_kwargs: True
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
+            )
+        runtime.reconcile(context)
+
+        with connect(self.db_path) as conn:
+            completed = conn.execute(
+                "SELECT status, turn_id, turn_status FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (completed["status"], completed["turn_id"], completed["turn_status"]),
+            ("completed", "turn_visible", "completed"),
+        )
+
+    def test_active_interrupted_unclaimed_turn_outlives_lease(self) -> None:
+        context = self.context()
+        delivery = self.start_delivery()
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET attempts = 4,
+                    next_attempt_at = NULL,
+                    started_at = '2000-01-01T00:00:00+00:00'
+                """
+            )
+        thread = {
+            "status": {"type": "active"},
+            "turns": [{
+                "id": "turn_original",
+                "status": "interrupted",
+                "items": [{
+                    "type": "userMessage",
+                    "clientId": delivery["client_message_id"],
+                }],
+            }],
+        }
+
+        self.runtime(
+            read_thread=lambda *_args, **_kwargs: thread,
+            turn_completed=lambda *_args, **_kwargs: False,
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            pending = conn.execute(
+                "SELECT status, turn_status FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (pending["status"], pending["turn_status"]),
+            ("processing", "inProgress"),
+        )
+
+    def test_stale_interrupted_claimed_turn_eventually_stops(self) -> None:
+        context = self.context()
+        delivery = self.start_delivery()
+        self.claim_execution()
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET attempts = 3,
+                    next_attempt_at = NULL,
+                    started_at = '2000-01-01T00:00:00+00:00'
+                """
+            )
+
+        thread = {
+            "status": {"type": "idle"},
+            "turns": [{
+                "id": "turn_original",
+                "status": "interrupted",
+                "items": [{
+                    "type": "userMessage",
+                    "clientId": delivery["client_message_id"],
+                }],
+            }],
+        }
+        self.runtime(
+            read_thread=lambda *_args, **_kwargs: thread,
+            turn_completed=lambda *_args, **_kwargs: False,
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            failed = conn.execute(
+                "SELECT status, turn_status FROM task_event_deliveries"
+            ).fetchone()
+            execution = conn.execute(
+                """
+                SELECT state, stop_status
+                FROM task_executions WHERE record_id = ?
+                """,
+                ("recRecovery",),
+            ).fetchone()
+        self.assertEqual(
+            (failed["status"], failed["turn_status"]),
+            ("failed", "interrupted"),
+        )
+        self.assertEqual(
+            (execution["state"], execution["stop_status"]),
+            ("stopped", "continuation_exhausted"),
+        )
 
     def test_completed_interrupted_turn_rebinds_one_continuation_atomically(self) -> None:
         context = self.context()

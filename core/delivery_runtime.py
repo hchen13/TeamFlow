@@ -246,7 +246,7 @@ class DeliveryRuntime:
         waiting_permission = False
         waiting_session = False
         claimed_turn_ended = False
-        claimed_turn_reconciling = False
+        turn_reconciling = False
         try:
             if delivery["harness_type"] != "codex":
                 raise ValueError(
@@ -352,6 +352,11 @@ class DeliveryRuntime:
                     turn_id=started_turn_id,
                 )
             )
+            turn_reconciling = bool(
+                started_turn_id
+                and status in {"cancelled", "canceled", "interrupted"}
+                and not self.turn_completed(session_id, started_turn_id)
+            )
             if active_execution and status in {
                 "completed",
                 "success",
@@ -360,14 +365,12 @@ class DeliveryRuntime:
                 "canceled",
                 "interrupted",
             }:
-                claimed_turn_reconciling = (
-                    status in {"cancelled", "canceled", "interrupted"}
-                    and not self.turn_completed(session_id, started_turn_id)
-                )
-                claimed_turn_ended = not claimed_turn_reconciling
+                claimed_turn_ended = not turn_reconciling
                 error = ValueError(
                     str(result.get("error") or status or "execution turn ended before handoff")
                 )
+            elif turn_reconciling:
+                error = ValueError(str(result.get("error") or status))
             elif not result.get("ok"):
                 retry = (
                     status in {"cancelled", "canceled", "interrupted"}
@@ -400,7 +403,7 @@ class DeliveryRuntime:
             )
         finally:
             reconciling = bool(
-                claimed_turn_reconciling
+                turn_reconciling
                 or error and (turn_started or acceptance_unknown) and not claimed_turn_ended
             )
             if canceled:
@@ -563,7 +566,7 @@ class DeliveryRuntime:
                             )
                         )
                         turn_id = recovered_turn_id
-                        mark_task_delivery_turn_started(
+                        delivery["started_at"] = mark_task_delivery_turn_started(
                             context,
                             delivery_id=int(delivery["id"]),
                             turn_id=turn_id,
@@ -802,30 +805,24 @@ class DeliveryRuntime:
                     or error_data.get("additionalDetails")
                     or status
                 ))
+                if (
+                    status in {"cancelled", "canceled", "interrupted"}
+                    and not self.turn_completed(session_id, turn_id)
+                ):
+                    # Desktop can briefly expose an interrupted snapshot while the owner is
+                    # still appending the same turn. The rollout completion event is durable.
+                    self._reconcile_unconfirmed_turn(
+                        context,
+                        delivery,
+                        task=task,
+                        target=target,
+                        agent=agent,
+                        thread_status=thread_status,
+                        reason=str(error),
+                        turn_status=status,
+                    )
+                    continue
                 if active_execution:
-                    if (
-                        status in {"cancelled", "canceled", "interrupted"}
-                        and not self.turn_completed(session_id, turn_id)
-                    ):
-                        defer_task_delivery_reconciliation(
-                            context,
-                            delivery_id=int(delivery["id"]),
-                            error=error,
-                        )
-                        self.log_dispatch(
-                            context,
-                            "reconciling",
-                            event_id=delivery["source_event_id"],
-                            task=task,
-                            record_id=delivery["record_id"],
-                            target=target,
-                            agent=agent,
-                            session=session_id,
-                            turn=turn_id,
-                            reason=str(error),
-                            attempt=int(delivery["attempts"]),
-                        )
-                        continue
                     retry = self._finish_claimed_turn(
                         context,
                         delivery,
@@ -891,6 +888,7 @@ class DeliveryRuntime:
         agent: str,
         thread_status: str,
         reason: str,
+        turn_status: str = "unconfirmed",
     ) -> None:
         turn_id = str(delivery.get("turn_id") or "")
         active_execution = bool(
@@ -924,11 +922,40 @@ class DeliveryRuntime:
                     attempt=int(delivery["attempts"]),
                 )
             else:
-                defer_task_delivery_reconciliation(
-                    context,
-                    delivery_id=int(delivery["id"]),
-                    error=ValueError(reason),
-                )
+                if (
+                    thread_status == "active"
+                    or not _reconciliation_lease_expired(delivery)
+                ):
+                    defer_task_delivery_reconciliation(
+                        context,
+                        delivery_id=int(delivery["id"]),
+                        error=ValueError(reason),
+                    )
+                else:
+                    exhausted_reason = (
+                        f"{reason}; acceptance remained unconfirmed for "
+                        f"{int(_UNCONFIRMED_TURN_LEASE.total_seconds() // 60)} minutes"
+                    )
+                    retry = self._finish_claimed_turn(
+                        context,
+                        delivery,
+                        turn_id=turn_id,
+                        turn_status=turn_status,
+                        reason=exhausted_reason,
+                    )
+                    self.log_dispatch(
+                        context,
+                        "retry" if retry else "failed",
+                        event_id=delivery["source_event_id"],
+                        task=task,
+                        record_id=delivery["record_id"],
+                        target=target,
+                        agent=agent,
+                        session=str(delivery["session_id"]),
+                        turn=turn_id,
+                        reason=exhausted_reason,
+                        attempt=int(delivery["attempts"]),
+                    )
             return
         if not task_delivery_is_current(
             context,
@@ -953,7 +980,10 @@ class DeliveryRuntime:
                 reason=stale_reason,
             )
             return
-        if not _reconciliation_lease_expired(delivery):
+        if (
+            thread_status == "active"
+            or not _reconciliation_lease_expired(delivery)
+        ):
             defer_task_delivery_reconciliation(
                 context,
                 delivery_id=int(delivery["id"]),

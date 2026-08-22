@@ -472,7 +472,8 @@ def mark_task_delivery_turn_started(
     turn_id: str,
     previous_turn_id: str | None = None,
     require_execution_rebind: bool = False,
-) -> None:
+) -> str:
+    timestamp = now()
     with connect(context.db_path) as conn:
         if require_execution_rebind:
             if not previous_turn_id:
@@ -488,12 +489,14 @@ def mark_task_delivery_turn_started(
             UPDATE task_event_deliveries
             SET turn_id = ?,
                 turn_status = 'inProgress',
+                started_at = ?,
                 next_attempt_at = ?
             WHERE id = ? AND status = 'processing'
               AND (? IS NULL OR turn_id = ?)
             """,
             (
                 turn_id,
+                timestamp,
                 (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat(),
                 delivery_id,
                 previous_turn_id,
@@ -508,8 +511,9 @@ def mark_task_delivery_turn_started(
               delivery_id, turn_id, created_at
             ) VALUES (?, ?, ?)
             """,
-            (delivery_id, turn_id, now()),
+            (delivery_id, turn_id, timestamp),
         )
+    return timestamp
 
 
 def due_processing_task_deliveries(
