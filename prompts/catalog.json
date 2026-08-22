@@ -81,6 +81,21 @@
       "allowed_triggers": ["task_event"],
       "required_variables": []
     },
+    "task-execution.continuation": {
+      "template_file": "task-execution-continuation.md",
+      "injection_surface": "turn_input",
+      "allowed_triggers": ["execution_continuation"],
+      "required_variables": [
+        "workflow_key",
+        "role_name",
+        "task_id",
+        "title",
+        "record_id",
+        "status",
+        "board_url",
+        "snapshot"
+      ]
+    },
     "turn-control.reason": {
       "template_file": "turn-control-reason.md",
       "injection_surface": "tool_result_turn_control",

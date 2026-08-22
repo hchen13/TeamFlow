@@ -182,6 +182,32 @@ def codex_turn_by_client_message_id(
     return None
 
 
+def codex_turn_completed(thread_id: str, turn_id: str) -> bool:
+    rollout_path = _codex_rollout_path(thread_id)
+    if rollout_path is None or not turn_id:
+        return False
+    try:
+        for raw_line in _reverse_lines(rollout_path):
+            if b'"task_complete"' not in raw_line and b'"task_started"' not in raw_line:
+                continue
+            try:
+                record = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            payload = record.get("payload")
+            if record.get("type") != "event_msg" or not isinstance(payload, dict):
+                continue
+            if str(payload.get("turn_id") or "") != turn_id:
+                continue
+            if payload.get("type") == "task_complete":
+                return True
+            if payload.get("type") == "task_started":
+                return False
+    except OSError:
+        return False
+    return False
+
+
 def codex_turn_unresolved_teamflow_mcp_failures(
     turn: dict[str, Any],
 ) -> list[dict[str, Any]]:

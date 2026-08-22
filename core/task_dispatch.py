@@ -13,6 +13,7 @@ from .task_delivery_store import (
     claim_task_deliveries as _claim_task_deliveries,
     defer_task_delivery_reconciliation,
     due_processing_task_deliveries,
+    fail_claimed_task_delivery,
     finish_task_delivery,
     has_task_deliveries_waiting_for_permission,
     mark_task_delivery_waiting_for_permission,
@@ -25,11 +26,13 @@ from .task_delivery_store import (
     resume_task_deliveries_waiting_for_permission,
     refresh_task_delivery_prompt,
     task_delivery_record_id,
+    task_delivery_has_active_execution as _task_delivery_has_active_execution,
     task_delivery_sessions_waiting_for_owner,
     task_delivery_is_current as _task_delivery_is_current,
     task_delivery_turn_is_current as _task_delivery_turn_is_current,
 )
 from .task_routing import (
+    render_task_continuation_prompt as _render_task_continuation_prompt,
     render_task_prompt as _render_task_prompt,
     task_dispatch_target as _task_dispatch_target,
 )
@@ -90,6 +93,20 @@ def task_delivery_turn_is_current(
     )
 
 
+def task_delivery_has_active_execution(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+    turn_id: str | None = None,
+) -> bool:
+    return _task_delivery_has_active_execution(
+        context,
+        delivery_id=delivery_id,
+        turn_id=turn_id,
+        load_workflow=load_workflow_definition,
+    )
+
+
 def render_task_prompt(
     context: LarkEventContext,
     *,
@@ -110,6 +127,21 @@ def render_task_prompt(
     )
 
 
+def render_task_continuation_prompt(
+    context: LarkEventContext,
+    *,
+    workflow_key: str,
+    role_name: str,
+    task: dict[str, Any],
+) -> str:
+    return _render_task_continuation_prompt(
+        context,
+        workflow_key=workflow_key,
+        role_name=role_name,
+        task=task,
+    )
+
+
 def task_dispatch_target(
     workflow_key: str,
     task: dict[str, Any],
@@ -127,6 +159,7 @@ __all__ = [
     "claim_task_deliveries",
     "defer_task_delivery_reconciliation",
     "due_processing_task_deliveries",
+    "fail_claimed_task_delivery",
     "finish_task_delivery",
     "has_task_deliveries_waiting_for_permission",
     "mark_task_delivery_waiting_for_permission",
@@ -139,9 +172,11 @@ __all__ = [
     "recover_task_deliveries",
     "resume_task_deliveries_waiting_for_permission",
     "refresh_task_delivery_prompt",
+    "render_task_continuation_prompt",
     "render_task_prompt",
     "resume_task_deliveries_waiting_for_session",
     "task_delivery_is_current",
+    "task_delivery_has_active_execution",
     "task_delivery_record_id",
     "task_delivery_sessions_waiting_for_owner",
     "task_delivery_turn_is_current",

@@ -55,6 +55,30 @@ def render_task_prompt(
     )
 
 
+def render_task_continuation_prompt(
+    context: LarkEventContext,
+    *,
+    workflow_key: str,
+    role_name: str,
+    task: dict[str, Any],
+) -> str:
+    return prompt_catalog.render(
+        "task-execution.continuation",
+        surface="turn_input",
+        trigger="execution_continuation",
+        variables={
+            "workflow_key": workflow_key,
+            "role_name": role_name,
+            "task_id": str(task.get("task_id") or task.get("record_id") or "-"),
+            "title": str(task.get("title") or "未命名任务"),
+            "record_id": str(task.get("record_id") or "-"),
+            "status": str(task.get("status") or "-"),
+            "board_url": context.board_url,
+            "snapshot": _task_snapshot(task),
+        },
+    )
+
+
 def _task_snapshot(task: dict[str, Any]) -> str:
     lines = []
     for label, key in prompt_catalog.entry("task-event.dispatch")["snapshot_fields"]:

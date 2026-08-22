@@ -24,6 +24,7 @@ from .codex import (
     codex_thread_is_permanently_unavailable,
     codex_turn,
     codex_turn_by_client_message_id,
+    codex_turn_completed,
     codex_turn_unresolved_teamflow_mcp_failures,
     read_codex_thread,
     run_codex_turn,
@@ -289,6 +290,7 @@ class TeamFlowDaemon:
             delivery_error_is_terminal=lambda error: (
                 codex_delivery_error_is_terminal(error)
             ),
+            turn_completed=codex_turn_completed,
             session_has_owner=codex_session_has_owner,
             background_mcp_ready=inspect_teamflow_mcp_authorization,
             log_dispatch=lambda *args, **kwargs: self._log_dispatch(

@@ -8,11 +8,18 @@ from typing import Any
 from .config import resolve_workspace_paths
 from .db import connect, now
 from .lark_events import LarkEventContext
+from .task_delivery_execution import (
+    active_delivery_execution,
+    active_delivery_execution_in,
+    rebind_active_delivery_execution,
+    stop_active_delivery_execution,
+)
 from .task_routing import (
     WorkflowLoader,
     current_dispatch,
     dispatch_event_state,
     dispatch_states,
+    render_task_continuation_prompt,
     render_task_prompt,
     target_role,
 )
@@ -100,7 +107,20 @@ def claim_task_deliveries(
         ).fetchall()
         for row in rows:
             current = current_dispatch(conn, row, states)
-            if not current or current["event"]["event_key"] != row["event_key"]:
+            continuation = (
+                active_delivery_execution_in(
+                    conn,
+                    delivery_id=int(row["id"]),
+                    workflow_key=context.workflow_key,
+                    load_workflow=load_workflow,
+                    turn_id=str(row["turn_id"] or "") or None,
+                )
+                if row["status"] == "retry" and row["turn_id"]
+                else None
+            )
+            if continuation is None and (
+                not current or current["event"]["event_key"] != row["event_key"]
+            ):
                 expected_status = (
                     (dispatch_event_state(states, row) or {}).get("key")
                     or "an actionable state"
@@ -131,14 +151,18 @@ def claim_task_deliveries(
                     ),
                 )
                 continue
-            task = current["task"]
-            target = target_role(
-                context.workflow_key,
-                current["state"]["key"],
-                task,
-                load_workflow=load_workflow,
+            task = continuation["task"] if continuation else current["task"]
+            target = (
+                str(row["role_key"])
+                if continuation
+                else target_role(
+                    context.workflow_key,
+                    current["state"]["key"],
+                    task,
+                    load_workflow=load_workflow,
+                )
             )
-            if target != row["role_key"]:
+            if not continuation and target != row["role_key"]:
                 conn.execute(
                     """
                     UPDATE task_event_deliveries
@@ -159,14 +183,23 @@ def claim_task_deliveries(
             session_id = str(row["session_id"])
             if session_id in reserved_sessions:
                 continue
-            prompt = render_task_prompt(
-                context,
-                event_type=str(row["event_type"]),
-                event_key=str(row["event_key"]),
-                workflow_key=context.workflow_key,
-                role_name=str(row["role_name"] or row["role_key"]),
-                task=task,
-                load_workflow=load_workflow,
+            prompt = (
+                render_task_continuation_prompt(
+                    context,
+                    workflow_key=context.workflow_key,
+                    role_name=str(row["role_name"] or row["role_key"]),
+                    task=task,
+                )
+                if continuation
+                else render_task_prompt(
+                    context,
+                    event_type=str(row["event_type"]),
+                    event_key=str(row["event_key"]),
+                    workflow_key=context.workflow_key,
+                    role_name=str(row["role_name"] or row["role_key"]),
+                    task=task,
+                    load_workflow=load_workflow,
+                )
             )
             client_message_id = str(row["client_message_id"] or "")
             if not client_message_id or row["turn_id"] is not None:
@@ -176,7 +209,7 @@ def claim_task_deliveries(
                 UPDATE task_event_deliveries
                 SET status = 'processing',
                     attempts = attempts + 1,
-                    turn_id = NULL,
+                    turn_id = CASE WHEN ? THEN turn_id ELSE NULL END,
                     turn_status = NULL,
                     last_error = NULL,
                     next_attempt_at = NULL,
@@ -192,6 +225,7 @@ def claim_task_deliveries(
                   )
                 """,
                 (
+                    int(continuation is not None),
                     timestamp,
                     prompt,
                     client_message_id,
@@ -205,6 +239,9 @@ def claim_task_deliveries(
                 item["attempts"] = int(item["attempts"]) + 1
                 item["prompt"] = prompt
                 item["client_message_id"] = client_message_id
+                item["continuation_turn_id"] = (
+                    str(continuation["turn_id"]) if continuation else None
+                )
                 item["after_json"] = json.dumps(
                     task,
                     ensure_ascii=False,
@@ -268,11 +305,54 @@ def finish_task_delivery(
         )
 
 
+def fail_claimed_task_delivery(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+    turn_id: str,
+    turn_status: str,
+    reason: str,
+) -> bool:
+    timestamp = now()
+    with connect(context.db_path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE task_event_deliveries
+            SET status = 'failed', turn_status = ?, last_error = ?,
+                next_attempt_at = NULL, completed_at = ?, delivered_at = NULL
+            WHERE id = ? AND status = 'processing' AND turn_id = ?
+              AND EXISTS (
+                SELECT 1
+                FROM task_events AS event
+                JOIN task_executions AS execution
+                  ON execution.record_id = event.record_id
+                WHERE event.event_key = task_event_deliveries.event_key
+                  AND execution.agent_id = task_event_deliveries.agent_id
+                  AND execution.session_id = task_event_deliveries.session_id
+                  AND execution.turn_id = task_event_deliveries.turn_id
+                  AND execution.state = 'active'
+              )
+            """,
+            (turn_status, reason, timestamp, delivery_id, turn_id),
+        )
+        if cursor.rowcount != 1:
+            return False
+        if not stop_active_delivery_execution(
+            conn,
+            delivery_id=delivery_id,
+            turn_id=turn_id,
+            reason=reason,
+        ):
+            raise RuntimeError("TeamFlow active execution changed during finalization")
+    return True
+
+
 def mark_task_delivery_waiting_for_permission(
     context: LarkEventContext,
     *,
     delivery_id: int,
     error: Exception,
+    continuation: bool = False,
 ) -> None:
     with connect(context.db_path) as conn:
         conn.execute(
@@ -286,9 +366,9 @@ def mark_task_delivery_waiting_for_permission(
                 delivered_at = NULL
             WHERE id = ?
               AND status = 'processing'
-              AND turn_id IS NULL
+              AND (turn_id IS NULL OR ?)
             """,
-            (str(error), delivery_id),
+            (str(error), delivery_id, int(continuation)),
         )
 
 
@@ -297,6 +377,7 @@ def mark_task_delivery_waiting_for_session(
     *,
     delivery_id: int,
     error: Exception,
+    continuation: bool = False,
 ) -> None:
     with connect(context.db_path) as conn:
         conn.execute(
@@ -310,11 +391,12 @@ def mark_task_delivery_waiting_for_session(
                 delivered_at = NULL
             WHERE id = ?
               AND status = 'processing'
-              AND turn_id IS NULL
+              AND (turn_id IS NULL OR ?)
             """,
             (
                 str(error),
                 delivery_id,
+                int(continuation),
             ),
         )
 
@@ -388,21 +470,45 @@ def mark_task_delivery_turn_started(
     *,
     delivery_id: int,
     turn_id: str,
+    previous_turn_id: str | None = None,
+    require_execution_rebind: bool = False,
 ) -> None:
     with connect(context.db_path) as conn:
-        conn.execute(
+        if require_execution_rebind:
+            if not previous_turn_id:
+                raise ValueError("TeamFlow continuation needs its previous turn ID")
+            rebind_active_delivery_execution(
+                conn,
+                delivery_id=delivery_id,
+                previous_turn_id=previous_turn_id,
+                turn_id=turn_id,
+            )
+        cursor = conn.execute(
             """
             UPDATE task_event_deliveries
             SET turn_id = ?,
                 turn_status = 'inProgress',
                 next_attempt_at = ?
             WHERE id = ? AND status = 'processing'
+              AND (? IS NULL OR turn_id = ?)
             """,
             (
                 turn_id,
                 (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat(),
                 delivery_id,
+                previous_turn_id,
+                previous_turn_id,
             ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("TeamFlow delivery changed before its turn started")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO task_delivery_turns (
+              delivery_id, turn_id, created_at
+            ) VALUES (?, ?, ?)
+            """,
+            (delivery_id, turn_id, now()),
         )
 
 
@@ -492,12 +598,15 @@ def task_delivery_record_id(
             FROM task_event_deliveries AS delivery
             JOIN task_events AS event
               ON event.event_key = delivery.event_key
-            WHERE delivery.turn_id = ?
+            LEFT JOIN task_delivery_turns AS delivery_turn
+              ON delivery_turn.delivery_id = delivery.id
+             AND delivery_turn.turn_id = ?
+            WHERE (delivery.turn_id = ? OR delivery_turn.turn_id IS NOT NULL)
               AND delivery.agent_id = ?
             ORDER BY delivery.started_at DESC, delivery.id DESC
             LIMIT 1
             """,
-            (turn_id, agent_id),
+            (turn_id, turn_id, agent_id),
         ).fetchone()
     return str(row["record_id"]) if row else None
 
@@ -512,39 +621,57 @@ def task_delivery_turn_is_current(
     with connect(context.db_path) as conn:
         row = conn.execute(
             """
-            SELECT delivery.id, delivery.status, event.record_id
+            SELECT delivery.id, delivery.status, delivery.turn_id, event.record_id
             FROM task_event_deliveries AS delivery
             JOIN task_events AS event
               ON event.event_key = delivery.event_key
-            WHERE delivery.turn_id = ?
+            LEFT JOIN task_delivery_turns AS delivery_turn
+              ON delivery_turn.delivery_id = delivery.id
+             AND delivery_turn.turn_id = ?
+            WHERE (delivery.turn_id = ? OR delivery_turn.turn_id IS NOT NULL)
               AND delivery.agent_id = ?
-            ORDER BY started_at DESC, id DESC
+            ORDER BY delivery.started_at DESC, delivery.id DESC
             LIMIT 1
             """,
-            (turn_id, agent_id),
+            (turn_id, turn_id, agent_id),
         ).fetchone()
         if row is None:
             return None
+        if str(row["turn_id"] or "") != turn_id:
+            return False
+        execution = active_delivery_execution_in(
+            conn,
+            delivery_id=int(row["id"]),
+            workflow_key=context.workflow_key,
+            load_workflow=load_workflow,
+            turn_id=turn_id,
+        )
+        if execution is not None:
+            return True
         if row["status"] != "processing":
             return False
-        execution = conn.execute(
-            """
-            SELECT 1
-            FROM task_executions
-            WHERE record_id = ?
-              AND agent_id = ?
-              AND turn_id = ?
-              AND state = 'active'
-            """,
-            (row["record_id"], agent_id, turn_id),
-        ).fetchone()
-    if execution is not None:
-        return True
     return task_delivery_is_current(
         context,
         delivery_id=int(row["id"]),
         load_workflow=load_workflow,
     )
+
+
+def task_delivery_has_active_execution(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+    load_workflow: WorkflowLoader,
+    turn_id: str | None = None,
+) -> bool:
+    if active_delivery_execution(
+        context,
+        delivery_id=delivery_id,
+        load_workflow=load_workflow,
+        turn_id=turn_id,
+    ) is not None:
+        return True
+    return False
 
 
 def defer_task_delivery_reconciliation(
