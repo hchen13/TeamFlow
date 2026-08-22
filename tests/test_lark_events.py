@@ -10,6 +10,7 @@ import sys
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from copy import deepcopy
 from contextlib import redirect_stdout
@@ -3507,10 +3508,22 @@ class LarkEventsTest(unittest.TestCase):
             )
             self.assertIn("Session is not loaded", waiting["last_error"])
 
-            owner_probe = Mock(return_value=False)
+            slow_probe_started = threading.Event()
+            release_slow_probe = threading.Event()
+            probe_results = iter((False, True))
+
+            def probe_owner(_session_id):
+                available = next(probe_results)
+                if available:
+                    slow_probe_started.set()
+                    release_slow_probe.wait(1)
+                return available
+
+            owner_probe = Mock(side_effect=probe_owner)
             runtime.delivery_runtime.session_has_owner = owner_probe
             runtime.delivery_runtime.resume_session_waiting(context)
             runtime.delivery_runtime.resume_session_waiting(context)
+            self._wait_for_owner_probes(runtime.delivery_runtime)
             with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
                 still_waiting = conn.execute(
                     """
@@ -3528,8 +3541,15 @@ class LarkEventsTest(unittest.TestCase):
             )
             owner_probe.assert_called_once_with("session_unloaded")
 
-            owner_probe.return_value = True
             runtime.delivery_runtime._session_owner_checked_at.clear()
+            started_at = time.monotonic()
+            runtime.delivery_runtime.resume_session_waiting(context)
+            self.assertLess(time.monotonic() - started_at, 0.1)
+            self.assertTrue(slow_probe_started.wait(1))
+            runtime.delivery_runtime.resume_session_waiting(context)
+            self.assertEqual(owner_probe.call_count, 2)
+            release_slow_probe.set()
+            self._wait_for_owner_probes(runtime.delivery_runtime)
             runtime.delivery_runtime.resume_session_waiting(context)
         finally:
             runtime.close()
@@ -3559,6 +3579,17 @@ class LarkEventsTest(unittest.TestCase):
         self.assertIn("DISPATCH WAITING", output.getvalue())
         self.assertNotIn("DISPATCH STARTED", output.getvalue())
         self.assertNotIn("DISPATCH RETRY", output.getvalue())
+
+    def _wait_for_owner_probes(self, runtime):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with runtime.sync_lock:
+                probes = list(runtime._session_owner_probes.values())
+            if not probes:
+                return
+            for probe in probes:
+                probe.join(0.05)
+        self.fail("owner probe did not finish")
 
     def test_daemon_waits_for_background_mcp_authorization_before_starting_turn(self):
         context = self.context()

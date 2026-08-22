@@ -21,7 +21,10 @@ _CODEX_IPC_LOAD_HISTORY_VERSION = 1
 _CODEX_IPC_START_TURN_VERSION = 2
 _CODEX_IPC_INTERRUPT_TURN_VERSION = 4
 _CODEX_IPC_READ_STATE_VERSION = 2
-_CODEX_IPC_OWNER_SNAPSHOT_TIMEOUT = 2.0
+_CODEX_IPC_OWNER_DISCOVERY_VERSION = 1
+# Match the Desktop client's own IPC request window. This is a response deadline,
+# not a cached Session-state timeout; callers run this probe off the daemon loop.
+_CODEX_IPC_OWNER_DISCOVERY_TIMEOUT = 5.0
 
 
 class CodexIpcUnavailable(ValueError):
@@ -29,6 +32,18 @@ class CodexIpcUnavailable(ValueError):
 
 
 class CodexIpcNoOwner(CodexIpcUnavailable):
+    pass
+
+
+class CodexIpcClientUnavailable(CodexIpcNoOwner):
+    pass
+
+
+class CodexIpcSessionNotLoaded(CodexIpcNoOwner):
+    pass
+
+
+class CodexIpcOwnerUnconfirmed(CodexIpcNoOwner):
     pass
 
 
@@ -57,9 +72,14 @@ class CodexIpcConnection:
         try:
             metadata = os.stat(path)
         except OSError as error:
-            raise CodexIpcNoOwner("Codex client IPC is unavailable") from error
+            raise CodexIpcClientUnavailable(
+                "No Codex client IPC is available; start Codex Desktop or another "
+                "Codex client and TeamFlow will retry automatically"
+            ) from error
         if not stat.S_ISSOCK(metadata.st_mode):
-            raise CodexIpcNoOwner("Codex client IPC path is not a socket")
+            raise CodexIpcClientUnavailable(
+                "Codex client IPC path is not a socket"
+            )
         if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
             raise CodexIpcUnavailable("Codex client IPC socket belongs to another user")
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -68,7 +88,10 @@ class CodexIpcConnection:
             connection.connect(path)
         except OSError as error:
             connection.close()
-            raise CodexIpcNoOwner("Codex client IPC is unavailable") from error
+            raise CodexIpcClientUnavailable(
+                "No Codex client IPC is available; start Codex Desktop or another "
+                "Codex client and TeamFlow will retry automatically"
+            ) from error
         try:
             client = cls(connection, "initializing-client")
             request_id = str(uuid.uuid4())
@@ -211,24 +234,58 @@ class CodexIpcConnection:
         thread_id: str,
         *,
         stop_event: threading.Event | None,
-        timeout: float = _CODEX_IPC_OWNER_SNAPSHOT_TIMEOUT,
+        timeout: float | None = None,
     ) -> str:
+        if timeout is None:
+            timeout = _CODEX_IPC_OWNER_DISCOVERY_TIMEOUT
         self.follow(thread_id)
         stream = self.streams.setdefault(thread_id, CodexThreadStream())
-        deadline = time.monotonic() + timeout
-        while not (stream.initialized and self.owner_client_id):
-            if stop_event is not None and stop_event.is_set():
-                raise InterruptedError(
-                    "TeamFlow daemon stopped before Codex accepted the turn"
+        if (
+            stream.initialized
+            and self.owner_client_id
+            and self.owner_client_id not in self.disconnected_clients
+        ):
+            return self.owner_client_id
+        request_id = str(uuid.uuid4())
+        try:
+            self._send({
+                "type": "request",
+                "requestId": request_id,
+                "sourceClientId": self.client_id,
+                "version": _CODEX_IPC_OWNER_DISCOVERY_VERSION,
+                "method": "thread-owner-discovery",
+                "params": {
+                    "conversationId": thread_id,
+                    "hostId": "local",
+                },
+                "timeoutMs": max(1, int(timeout * 1000)),
+            })
+            response = self._wait_for_response(
+                request_id,
+                timeout=timeout + 1,
+                stop_event=stop_event,
+            )
+        except CodexIpcUnavailable as error:
+            raise CodexIpcOwnerUnconfirmed(
+                "Codex IPC is running, but the Agent Session owner could not be "
+                "confirmed; TeamFlow will retry automatically"
+            ) from error
+        if response.get("resultType") != "success":
+            message = str(response.get("error") or "Codex session has no owner")
+            if message == "no-client-found":
+                raise CodexIpcSessionNotLoaded(
+                    "Codex is running, but no active client has loaded this Agent "
+                    "Session; open the Session and TeamFlow will retry automatically"
                 )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise CodexIpcNoOwner(
-                    "Codex Desktop has not loaded this Agent Session; "
-                    "open the Session and TeamFlow will retry automatically"
-                )
-            self._receive_once(min(0.05, remaining))
-        return self.owner_client_id
+            raise CodexIpcUnavailable(message)
+        owner_client_id = str(response.get("handledByClientId") or "")
+        if not owner_client_id:
+            raise CodexIpcSessionNotLoaded(
+                "Codex is running, but no active client has loaded this Agent "
+                "Session; open the Session and TeamFlow will retry automatically"
+            )
+        self.owner_client_id = owner_client_id
+        return owner_client_id
 
     def load_owner_snapshot(
         self,
@@ -603,7 +660,8 @@ def stop_codex_ipc_turn(
 def codex_ipc_session_has_owner(
     thread: str,
     *,
-    timeout: float = 0.25,
+    timeout: float | None = None,
+    stop_event: threading.Event | None = None,
     connection_type: type[CodexIpcConnection] = CodexIpcConnection,
 ) -> bool:
     try:
@@ -615,10 +673,10 @@ def codex_ipc_session_has_owner(
         try:
             connection.discover_owner(
                 thread,
-                stop_event=None,
+                stop_event=stop_event,
                 timeout=timeout,
             )
-        except CodexIpcNoOwner:
+        except (CodexIpcUnavailable, InterruptedError):
             return False
         return True
     finally:
@@ -662,7 +720,9 @@ def notify_codex_clients_thread_changed(
 
 def codex_ipc_path() -> str:
     if os.name == "nt":
-        raise CodexIpcNoOwner("Codex client IPC is not supported on Windows yet")
+        raise CodexIpcClientUnavailable(
+            "Codex client IPC is not supported on Windows yet"
+        )
     codex_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
     return os.path.join(codex_home, "ipc", "ipc.sock")
 

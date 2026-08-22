@@ -5,6 +5,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -31,9 +32,13 @@ from core.codex import (
     codex_delivery_error_is_terminal,
 )
 from core.codex_ipc import (
+    CodexIpcClientUnavailable,
     CodexIpcEmptyTurn,
+    CodexIpcOwnerUnconfirmed,
+    CodexIpcSessionNotLoaded,
     CodexIpcUnavailable,
     CodexTurnAcceptanceUnknown,
+    codex_ipc_session_has_owner,
 )
 from core.codex_permissions import CodexBackgroundMcpPermissionRequired
 
@@ -112,7 +117,7 @@ class CodexTurnTest(unittest.TestCase):
             patch("core.codex.os.getuid", return_value=1000),
             patch("core.codex.socket.socket", return_value=client_socket),
         ):
-            with self.assertRaises(CodexIpcUnavailable):
+            with self.assertRaises(CodexIpcClientUnavailable):
                 _CodexIpcConnection.connect()
 
         client_socket.close.assert_called_once_with()
@@ -186,12 +191,92 @@ class CodexTurnTest(unittest.TestCase):
     def test_reports_an_explicitly_unowned_session(self):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")
         with (
-            patch.object(connection, "_send"),
-            patch.object(connection, "_receive_once"),
-            patch("core.codex_ipc._CODEX_IPC_OWNER_SNAPSHOT_TIMEOUT", 0),
-            self.assertRaisesRegex(_CodexIpcNoOwner, "has not loaded"),
+            patch.object(connection, "_send") as send,
+            patch.object(connection, "_wait_for_response", return_value={
+                "resultType": "error",
+                "error": "no-client-found",
+            }),
+            self.assertRaisesRegex(
+                CodexIpcSessionNotLoaded,
+                "Codex is running.*has loaded",
+            ),
         ):
             connection.discover_owner("thread_1", stop_event=None)
+
+        self.assertEqual(send.call_args.args[0]["method"], "thread-owner-discovery")
+
+    def test_liveness_probe_waits_beyond_the_old_250ms_cutoff(self):
+        connection = Mock()
+
+        def discover_owner(_thread_id, *, stop_event, timeout):
+            self.assertIsNone(stop_event)
+            self.assertIsNone(timeout)
+            time.sleep(0.3)
+            return "desktop-client"
+
+        connection.discover_owner.side_effect = discover_owner
+        connection_type = Mock()
+        connection_type.connect.return_value = connection
+
+        self.assertTrue(codex_ipc_session_has_owner(
+            "thread_1",
+            connection_type=connection_type,
+        ))
+        connection.unfollow.assert_called_once_with("thread_1")
+        connection.close.assert_called_once_with()
+
+    def test_discovers_owner_without_waiting_for_a_stream_snapshot(self):
+        connection = _CodexIpcConnection(Mock(), "teamflow-client")
+        with (
+            patch.object(connection, "_send") as send,
+            patch.object(connection, "_wait_for_response", return_value={
+                "resultType": "success",
+                "handledByClientId": "desktop-client",
+                "result": {},
+            }),
+        ):
+            owner = connection.discover_owner("thread_1", stop_event=None)
+
+        self.assertEqual(owner, "desktop-client")
+        self.assertEqual(connection.owner_client_id, "desktop-client")
+        request = send.call_args.args[0]
+        self.assertEqual(request["method"], "thread-owner-discovery")
+        self.assertEqual(request["version"], 1)
+        self.assertEqual(request["params"], {
+            "conversationId": "thread_1",
+            "hostId": "local",
+        })
+
+    def test_owner_discovery_timeout_becomes_a_waiting_condition(self):
+        connection = _CodexIpcConnection(Mock(), "teamflow-client")
+        with (
+            patch.object(connection, "_send"),
+            patch.object(
+                connection,
+                "_wait_for_response",
+                side_effect=CodexIpcUnavailable("request timed out"),
+            ),
+            self.assertRaisesRegex(
+                CodexIpcOwnerUnconfirmed,
+                "owner could not be confirmed",
+            ),
+        ):
+            connection.discover_owner("thread_1", stop_event=None)
+
+    def test_liveness_probe_treats_an_unconfirmed_owner_as_unavailable(self):
+        connection = Mock()
+        connection.discover_owner.side_effect = CodexIpcOwnerUnconfirmed(
+            "owner could not be confirmed"
+        )
+        connection_type = Mock()
+        connection_type.connect.return_value = connection
+
+        self.assertFalse(codex_ipc_session_has_owner(
+            "thread_1",
+            connection_type=connection_type,
+        ))
+        connection.unfollow.assert_called_once_with("thread_1")
+        connection.close.assert_called_once_with()
 
     def test_records_the_owner_from_its_stream_snapshot(self):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")

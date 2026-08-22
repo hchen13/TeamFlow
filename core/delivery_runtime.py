@@ -91,6 +91,7 @@ class DeliveryRuntime:
         self.session_has_owner = session_has_owner
         self.background_mcp_ready = background_mcp_ready
         self._session_owner_checked_at: dict[tuple[str, str], float] = {}
+        self._session_owner_probes: dict[tuple[str, str], threading.Thread] = {}
 
     def consume(self) -> None:
         while not self.stopping.is_set():
@@ -131,31 +132,56 @@ class DeliveryRuntime:
             (context.db_path, session_id)
             for session_id in waiting_sessions
         }
-        self._session_owner_checked_at = {
-            key: checked_at
-            for key, checked_at in self._session_owner_checked_at.items()
-            if key[0] != context.db_path or key in waiting_keys
-        }
         timestamp = time.monotonic()
-        for session_id in waiting_sessions:
-            key = (context.db_path, session_id)
-            last_checked_at = self._session_owner_checked_at.get(key)
-            if (
-                last_checked_at is not None
-                and timestamp - last_checked_at < _SESSION_OWNER_CHECK_INTERVAL
-            ):
-                continue
-            self._session_owner_checked_at[key] = timestamp
-            try:
-                owner_available = self.session_has_owner(session_id)
-            except Exception:
-                owner_available = False
+        with self.sync_lock:
+            self._session_owner_checked_at = {
+                key: checked_at
+                for key, checked_at in self._session_owner_checked_at.items()
+                if key[0] != context.db_path or key in waiting_keys
+            }
+            for session_id in waiting_sessions:
+                key = (context.db_path, session_id)
+                if key in self._session_owner_probes:
+                    continue
+                last_checked_at = self._session_owner_checked_at.get(key)
+                if (
+                    last_checked_at is not None
+                    and timestamp - last_checked_at < _SESSION_OWNER_CHECK_INTERVAL
+                ):
+                    continue
+                self._session_owner_checked_at[key] = timestamp
+                probe = threading.Thread(
+                    target=self._probe_session_owner,
+                    args=(context, session_id, key),
+                    name=f"teamflow-owner-{session_id[:8]}",
+                    daemon=True,
+                )
+                self._session_owner_probes[key] = probe
+                probe.start()
+
+    def _probe_session_owner(
+        self,
+        context: LarkEventContext,
+        session_id: str,
+        key: tuple[str, str],
+    ) -> None:
+        owner_available = False
+        try:
+            owner_available = self.session_has_owner(session_id)
             if owner_available:
                 resume_task_deliveries_waiting_for_session(
                     context,
                     session_id=session_id,
                 )
-                self._session_owner_checked_at.pop(key, None)
+                self.wakeup.set()
+        except Exception:
+            owner_available = False
+        finally:
+            with self.sync_lock:
+                if self._session_owner_probes.get(key) is threading.current_thread():
+                    self._session_owner_probes.pop(key, None)
+                if owner_available:
+                    self._session_owner_checked_at.pop(key, None)
 
     def schedule(self, context: LarkEventContext) -> None:
         with self.sync_lock:

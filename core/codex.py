@@ -157,9 +157,14 @@ def run_codex_turn(
     )
 
 
-def codex_session_has_owner(thread_id: str) -> bool:
+def codex_session_has_owner(
+    thread_id: str,
+    *,
+    stop_event: threading.Event | None = None,
+) -> bool:
     return codex_ipc_session_has_owner(
         thread_id.strip(),
+        stop_event=stop_event,
         connection_type=_CodexIpcConnection,
     )
 

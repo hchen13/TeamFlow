@@ -291,7 +291,10 @@ class TeamFlowDaemon:
                 codex_delivery_error_is_terminal(error)
             ),
             turn_completed=codex_turn_completed,
-            session_has_owner=codex_session_has_owner,
+            session_has_owner=lambda session_id: codex_session_has_owner(
+                session_id,
+                stop_event=self.stopping,
+            ),
             background_mcp_ready=inspect_teamflow_mcp_authorization,
             log_dispatch=lambda *args, **kwargs: self._log_dispatch(
                 *args,
