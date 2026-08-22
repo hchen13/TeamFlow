@@ -7,7 +7,11 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 if [ -z "${LARK_CLI:-}" ]; then
-  LARK_CLI="$ROOT/ui/node_modules/.bin/lark-cli"
+  if command -v lark-cli >/dev/null 2>&1; then
+    LARK_CLI=$(command -v lark-cli)
+  else
+    LARK_CLI="$ROOT/ui/node_modules/.bin/lark-cli"
+  fi
   export LARK_CLI
 fi
 

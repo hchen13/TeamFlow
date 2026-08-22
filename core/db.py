@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -1378,7 +1379,12 @@ def resolve_lark_cli_command() -> str:
         return command
     ui_dir = path.parents[2]
     if not (ui_dir / "package-lock.json").is_file():
-        return command
+        if global_command := shutil.which("lark-cli"):
+            return global_command
+        raise ValueError(
+            "the configured local lark-cli is no longer available; restart the "
+            "TeamFlow daemon after refreshing the plugin cache"
+        )
 
     print("teamflow: installing local Lark dependencies...", file=sys.stderr)
     try:

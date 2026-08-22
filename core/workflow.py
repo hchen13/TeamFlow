@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,9 +52,9 @@ OPTION_COLORS = (
 )
 
 
-def load_workflow_definitions(root: Path | None = None) -> dict[str, dict[str, Any]]:
+def _read_workflow_definitions(root: Path) -> dict[str, dict[str, Any]]:
     definitions: dict[str, dict[str, Any]] = {}
-    for path in sorted((root or DEFINITIONS_DIR).glob("*/workflow.json")):
+    for path in sorted(root.glob("*/workflow.json")):
         try:
             definition = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -64,14 +65,28 @@ def load_workflow_definitions(root: Path | None = None) -> dict[str, dict[str, A
             raise ValueError(f"duplicate workflow definition: {key}")
         definitions[key] = definition
     if not definitions:
-        raise ValueError(f"no workflow definitions found in {root or DEFINITIONS_DIR}")
+        raise ValueError(f"no workflow definitions found in {root}")
     return definitions
 
 
+# Codex replaces a plugin cache directory in place while already-started daemon and MCP
+# processes may keep running. Keep this build's validated definitions in memory so those
+# processes remain coherent until they are restarted onto the next build.
+_RUNTIME_WORKFLOW_DEFINITIONS = _read_workflow_definitions(DEFINITIONS_DIR)
+
+
+def load_workflow_definitions(root: Path | None = None) -> dict[str, dict[str, Any]]:
+    definitions = (
+        _RUNTIME_WORKFLOW_DEFINITIONS
+        if root is None
+        else _read_workflow_definitions(root)
+    )
+    return deepcopy(definitions)
+
+
 def load_workflow_definition(key: str) -> dict[str, Any]:
-    definitions = load_workflow_definitions()
     try:
-        return definitions[key]
+        return deepcopy(_RUNTIME_WORKFLOW_DEFINITIONS[key])
     except KeyError as error:
         raise ValueError(f"workflow definition is not installed: {key}") from error
 
