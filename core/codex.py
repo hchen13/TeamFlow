@@ -23,6 +23,7 @@ from .codex_ipc import (
     CodexIpcConnection as _CodexIpcConnection,
     CodexIpcNoOwner as _CodexIpcNoOwner,
     CodexThreadStream as _CodexThreadStream,
+    codex_ipc_session_has_owner,
     notify_codex_clients_thread_changed,
     run_codex_ipc_turn,
     stop_codex_ipc_turn,
@@ -146,22 +147,20 @@ def run_codex_turn(
     if required_tools:
         require_teamflow_mcp_authorization(required_tools)
 
-    try:
-        return _run_codex_ipc_turn(
-            thread,
-            prompt,
-            client_message_id=message_id,
-            on_started=on_started,
-            stop_event=stop_event,
-        )
-    except _CodexIpcNoOwner:
-        return _run_codex_app_server_turn(
-            thread,
-            prompt,
-            client_message_id=message_id,
-            on_started=on_started,
-            stop_event=stop_event,
-        )
+    return _run_codex_ipc_turn(
+        thread,
+        prompt,
+        client_message_id=message_id,
+        on_started=on_started,
+        stop_event=stop_event,
+    )
+
+
+def codex_session_has_owner(thread_id: str) -> bool:
+    return codex_ipc_session_has_owner(
+        thread_id.strip(),
+        connection_type=_CodexIpcConnection,
+    )
 
 
 def stop_codex_turn(

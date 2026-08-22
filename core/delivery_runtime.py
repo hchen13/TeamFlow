@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from .codex_ipc import CodexTurnAcceptanceUnknown
+from .codex_ipc import CodexIpcNoOwner, CodexTurnAcceptanceUnknown
 from .codex_permissions import (
     TEAMFLOW_MCP_TOOLS,
     CodexBackgroundMcpPermissionRequired,
@@ -20,18 +21,22 @@ from .task_dispatch import (
     finish_task_delivery,
     has_task_deliveries_waiting_for_permission,
     mark_task_delivery_waiting_for_permission,
+    mark_task_delivery_waiting_for_session,
     mark_task_delivery_turn_started,
     prepare_task_deliveries,
     refresh_task_delivery_prompt,
     render_task_prompt,
     resume_task_deliveries_waiting_for_permission,
+    resume_task_deliveries_waiting_for_session,
     task_delivery_is_current,
+    task_delivery_sessions_waiting_for_owner,
     task_dispatch_target,
 )
 
 
 _UNCONFIRMED_TURN_LEASE = timedelta(minutes=10)
 _MAX_ACCEPTED_TURN_ATTEMPTS = 3
+_SESSION_OWNER_CHECK_INTERVAL = 2.0
 
 
 class DeliveryRuntime:
@@ -58,6 +63,7 @@ class DeliveryRuntime:
         unresolved_mcp_failures: Callable[[dict[str, Any]], list[dict[str, Any]]],
         delivery_error_is_terminal: Callable[[Exception], bool],
         log_dispatch: Callable[..., None],
+        session_has_owner: Callable[[str], bool] = lambda _session_id: False,
         background_mcp_ready: Callable[[], bool | dict[str, Any]] = lambda: True,
     ) -> None:
         self.sync_lock = sync_lock
@@ -77,7 +83,9 @@ class DeliveryRuntime:
         self.unresolved_mcp_failures = unresolved_mcp_failures
         self.delivery_error_is_terminal = delivery_error_is_terminal
         self.log_dispatch = log_dispatch
+        self.session_has_owner = session_has_owner
         self.background_mcp_ready = background_mcp_ready
+        self._session_owner_checked_at: dict[tuple[str, str], float] = {}
 
     def consume(self) -> None:
         while not self.stopping.is_set():
@@ -88,6 +96,7 @@ class DeliveryRuntime:
                     return
                 try:
                     self.resume_permission_waiting(context)
+                    self.resume_session_waiting(context)
                     self.reconcile(context)
                     self.schedule(context)
                 except Exception as error:
@@ -110,6 +119,38 @@ class DeliveryRuntime:
             and self._background_mcp_status()["authorized"]
         ):
             resume_task_deliveries_waiting_for_permission(context)
+
+    def resume_session_waiting(self, context: LarkEventContext) -> None:
+        waiting_sessions = task_delivery_sessions_waiting_for_owner(context)
+        waiting_keys = {
+            (context.db_path, session_id)
+            for session_id in waiting_sessions
+        }
+        self._session_owner_checked_at = {
+            key: checked_at
+            for key, checked_at in self._session_owner_checked_at.items()
+            if key[0] != context.db_path or key in waiting_keys
+        }
+        timestamp = time.monotonic()
+        for session_id in waiting_sessions:
+            key = (context.db_path, session_id)
+            last_checked_at = self._session_owner_checked_at.get(key)
+            if (
+                last_checked_at is not None
+                and timestamp - last_checked_at < _SESSION_OWNER_CHECK_INTERVAL
+            ):
+                continue
+            self._session_owner_checked_at[key] = timestamp
+            try:
+                owner_available = self.session_has_owner(session_id)
+            except Exception:
+                owner_available = False
+            if owner_available:
+                resume_task_deliveries_waiting_for_session(
+                    context,
+                    session_id=session_id,
+                )
+                self._session_owner_checked_at.pop(key, None)
 
     def schedule(self, context: LarkEventContext) -> None:
         with self.sync_lock:
@@ -169,6 +210,7 @@ class DeliveryRuntime:
         retry = False
         acceptance_unknown = False
         waiting_permission = False
+        waiting_session = False
         try:
             if delivery["harness_type"] != "codex":
                 raise ValueError(
@@ -261,6 +303,7 @@ class DeliveryRuntime:
                 error,
                 CodexBackgroundMcpPermissionRequired,
             )
+            waiting_session = isinstance(error, CodexIpcNoOwner)
             acceptance_unknown = isinstance(error, CodexTurnAcceptanceUnknown)
             retry = (
                 not waiting_permission
@@ -275,6 +318,12 @@ class DeliveryRuntime:
                 pass
             elif waiting_permission:
                 mark_task_delivery_waiting_for_permission(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    error=error,
+                )
+            elif waiting_session:
+                mark_task_delivery_waiting_for_session(
                     context,
                     delivery_id=int(delivery["id"]),
                     error=error,
@@ -295,7 +344,7 @@ class DeliveryRuntime:
                 )
             if canceled:
                 log_result = "not-required"
-            elif waiting_permission:
+            elif waiting_permission or waiting_session:
                 log_result = "waiting"
             elif reconciling:
                 log_result = "reconciling"

@@ -305,7 +305,7 @@ DISPATCH NOT-REQUIRED reason="当前变更不通知 Agent"
 - 已完成 turn 出现 `DISPATCH RECOVERED`，不重复注入。
 - 未完成或永久失败按真实状态重试或失败，不能误报恢复成功。
 
-目标 Session 未加载时，TeamFlow 会使用 daemon 持有的独立 app-server。停止 daemon 会同时中断该 turn；此时重启后应记录 `DISPATCH RETRY`，并在新 turn 中只产生一次最终回复，不能误报 `DISPATCH RECOVERED`。
+目标 Session 未加载时，TeamFlow 不会使用独立 app-server 接管该 Session，而是记录 `DISPATCH WAITING`。在 Codex Desktop 中加载该 Session 后，daemon 应自动重试并通过实时 IPC 投递。
 
 ### MCP 重连
 

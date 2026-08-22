@@ -102,7 +102,7 @@ class CodexTurnTest(unittest.TestCase):
         process.stdout.close.assert_called_once_with()
         process.stderr.close.assert_called_once_with()
 
-    def test_stale_ipc_socket_falls_back_instead_of_leaking_connection_refused(self):
+    def test_connection_refusal_is_reported_as_ipc_unavailable(self):
         metadata = Mock(st_mode=0, st_uid=1000)
         client_socket = Mock()
         client_socket.connect.side_effect = ConnectionRefusedError(61, "Connection refused")
@@ -117,21 +117,17 @@ class CodexTurnTest(unittest.TestCase):
 
         client_socket.close.assert_called_once_with()
 
-    def test_discovers_owner_and_starts_v2_without_a_reported_follower(self):
+    def test_uses_the_owner_snapshot_and_starts_v2(self):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")
         connection.streams["thread_1"] = _CodexThreadStream()
         connection.streams["thread_1"].initialized = True
+        connection.owner_client_id = "desktop-client"
         with (
             patch.object(connection, "_send") as send,
             patch.object(
                 connection,
                 "_wait_for_response",
                 side_effect=[
-                    {
-                        "resultType": "success",
-                        "handledByClientId": "desktop-client",
-                        "result": {},
-                    },
                     {
                         "resultType": "success",
                         "handledByClientId": "desktop-client",
@@ -158,7 +154,7 @@ class CodexTurnTest(unittest.TestCase):
         self.assertEqual(
             [call.args[0]["method"] for call in send.call_args_list],
             [
-                "thread-owner-discovery",
+                "thread-stream-following-changed",
                 "thread-follower-load-complete-history",
                 "thread-follower-start-turn",
             ],
@@ -191,22 +187,42 @@ class CodexTurnTest(unittest.TestCase):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")
         with (
             patch.object(connection, "_send"),
-            patch.object(
-                connection,
-                "_wait_for_response",
-                return_value={
-                    "resultType": "error",
-                    "error": "no-client-found",
-                },
-            ),
-            self.assertRaisesRegex(_CodexIpcNoOwner, "currently owns"),
+            patch.object(connection, "_receive_once"),
+            patch("core.codex_ipc._CODEX_IPC_OWNER_SNAPSHOT_TIMEOUT", 0),
+            self.assertRaisesRegex(_CodexIpcNoOwner, "has not loaded"),
         ):
             connection.discover_owner("thread_1", stop_event=None)
+
+    def test_records_the_owner_from_its_stream_snapshot(self):
+        connection = _CodexIpcConnection(Mock(), "teamflow-client")
+        message = {
+            "type": "broadcast",
+            "method": "thread-stream-state-changed",
+            "sourceClientId": "desktop-client",
+            "version": 11,
+            "params": {
+                "conversationId": "thread_1",
+                "change": {
+                    "type": "snapshot",
+                    "revision": 1,
+                    "conversationState": {"requests": []},
+                },
+            },
+        }
+        with (
+            patch("core.codex_ipc.select.select", return_value=([connection.connection], [], [])),
+            patch.object(connection, "_receive", return_value=message),
+        ):
+            connection._receive_once(0)
+
+        self.assertEqual(connection.owner_client_id, "desktop-client")
+        self.assertTrue(connection.streams["thread_1"].initialized)
 
     def test_rejects_an_ipc_turn_when_the_owner_session_is_active(self):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")
         connection.streams["thread_1"] = _CodexThreadStream()
         connection.streams["thread_1"].initialized = True
+        connection.owner_client_id = "desktop-client"
         connection.streams["thread_1"].entries["active"] = {
             "turnId": "turn_active",
             "status": "inProgress",
@@ -218,11 +234,6 @@ class CodexTurnTest(unittest.TestCase):
                 connection,
                 "_wait_for_response",
                 side_effect=[
-                    {
-                        "resultType": "success",
-                        "handledByClientId": "desktop-client",
-                        "result": {},
-                    },
                     {
                         "resultType": "success",
                         "handledByClientId": "desktop-client",
@@ -349,28 +360,25 @@ class CodexTurnTest(unittest.TestCase):
 
     def test_interrupts_a_turn_through_the_codex_owner_client(self):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")
+        connection.streams["thread_1"] = _CodexThreadStream()
+        connection.streams["thread_1"].initialized = True
+        connection.following_threads.add("thread_1")
+        connection.owner_client_id = "desktop-client"
         with (
             patch.object(connection, "_send") as send,
             patch.object(
                 connection,
                 "_wait_for_response",
-                side_effect=[
-                    {
-                        "resultType": "success",
-                        "handledByClientId": "desktop-client",
-                        "result": {},
-                    },
-                    {
-                        "resultType": "success",
-                        "handledByClientId": "desktop-client",
+                return_value={
+                    "resultType": "success",
+                    "handledByClientId": "desktop-client",
+                    "result": {
                         "result": {
-                            "result": {
-                                "ok": True,
-                                "interruptedTurnId": "turn_1",
-                            }
-                        },
+                            "ok": True,
+                            "interruptedTurnId": "turn_1",
+                        }
                     },
-                ],
+                },
             ),
         ):
             result = connection.interrupt_turn(
@@ -378,7 +386,7 @@ class CodexTurnTest(unittest.TestCase):
                 expected_turn_id="turn_1",
             )
 
-        request = send.call_args_list[1].args[0]
+        request = send.call_args_list[0].args[0]
         self.assertEqual(request["method"], "thread-follower-interrupt-turn")
         self.assertEqual(request["targetClientId"], "desktop-client")
         self.assertEqual(request["version"], 4)
@@ -692,29 +700,22 @@ class CodexTurnTest(unittest.TestCase):
         connection.unfollow.assert_called_once_with("thread_1")
         connection.close.assert_called_once_with()
 
-    def test_falls_back_to_app_server_when_no_client_owns_an_unfocused_thread(self):
-        expected = {"ok": True, "turn_id": "turn_1"}
+    def test_does_not_fall_back_when_no_client_owns_an_unfocused_thread(self):
         with (
             patch(
                 "core.codex._run_codex_ipc_turn",
                 side_effect=_CodexIpcNoOwner("no owner"),
             ),
-            patch("core.codex._run_codex_app_server_turn", return_value=expected) as fallback,
+            patch("core.codex._run_codex_app_server_turn") as fallback,
+            self.assertRaisesRegex(_CodexIpcNoOwner, "no owner"),
         ):
-            result = run_codex_turn(
+            run_codex_turn(
                 "thread_1",
                 "New work",
                 client_message_id="message_1",
             )
 
-        self.assertIs(result, expected)
-        fallback.assert_called_once_with(
-            "thread_1",
-            "New work",
-            client_message_id="message_1",
-            on_started=None,
-            stop_event=None,
-        )
+        fallback.assert_not_called()
 
     def test_does_not_fall_back_when_owner_discovery_is_uncertain(self):
         with (
@@ -733,7 +734,7 @@ class CodexTurnTest(unittest.TestCase):
 
         fallback.assert_not_called()
 
-    def test_background_mcp_authorization_is_required_before_app_server_fallback(self):
+    def test_background_mcp_authorization_is_required_before_ipc_dispatch(self):
         with (
             patch(
                 "core.codex._run_codex_ipc_turn",

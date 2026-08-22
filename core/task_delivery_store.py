@@ -292,6 +292,66 @@ def mark_task_delivery_waiting_for_permission(
         )
 
 
+def mark_task_delivery_waiting_for_session(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+    error: Exception,
+) -> None:
+    with connect(context.db_path) as conn:
+        conn.execute(
+            """
+            UPDATE task_event_deliveries
+            SET status = 'waiting_session',
+                last_error = ?,
+                next_attempt_at = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                delivered_at = NULL
+            WHERE id = ?
+              AND status = 'processing'
+              AND turn_id IS NULL
+            """,
+            (
+                str(error),
+                delivery_id,
+            ),
+        )
+
+
+def task_delivery_sessions_waiting_for_owner(
+    context: LarkEventContext,
+) -> list[str]:
+    with connect(context.db_path) as conn:
+        return [
+            str(row["session_id"])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT session_id
+                FROM task_event_deliveries
+                WHERE status = 'waiting_session'
+                ORDER BY session_id
+                """
+            )
+        ]
+
+
+def resume_task_deliveries_waiting_for_session(
+    context: LarkEventContext,
+    *,
+    session_id: str,
+) -> None:
+    with connect(context.db_path) as conn:
+        conn.execute(
+            """
+            UPDATE task_event_deliveries
+            SET status = 'retry', next_attempt_at = NULL, last_error = NULL
+            WHERE status = 'waiting_session' AND session_id = ?
+            """,
+            (session_id,),
+        )
+
+
 def has_task_deliveries_waiting_for_permission(
     context: LarkEventContext,
 ) -> bool:

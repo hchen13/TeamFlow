@@ -30,6 +30,7 @@ from core.agent_runtime import (
     mark_agent_context_recovery_pending,
 )
 from core.config import resolve_workspace_paths
+from core.codex_ipc import CodexIpcNoOwner
 from core.codex_permissions import (
     TEAMFLOW_MCP_TOOLS,
     CodexBackgroundMcpPermissionRequired,
@@ -3430,6 +3431,134 @@ class LarkEventsTest(unittest.TestCase):
         self.assertNotIn("session_busy", runtime.active_sessions)
         self.assertIn("DISPATCH RETRY", output.getvalue())
         self.assertNotIn("DISPATCH STARTED", output.getvalue())
+
+    def test_daemon_waits_without_app_server_when_the_session_has_no_ipc_owner(self):
+        context = self.context()
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'tl'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES ('agent_unloaded', ?, ?, ?, 'tl', 'codex',
+                          'session_unloaded', 'Unloaded TL', ?, ?)
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        save_task_snapshot(
+            context,
+            record_id="recUnloaded",
+            task={
+                "record_id": "recUnloaded",
+                "task_id": "TF-UNLOADED",
+                "title": "Wait for the unloaded session",
+                "status": "ready",
+                "role": "tl",
+            },
+            source_event_id="evtUnloaded",
+            source_revision="50",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        runtime = TeamFlowDaemon()
+        runtime.active_sessions.add("session_unloaded")
+
+        try:
+            output = io.StringIO()
+            with (
+                patch("core.daemon.get_lark_task", return_value={
+                    "task": json.loads(delivery["after_json"])
+                }),
+                patch(
+                    "core.daemon.run_codex_turn",
+                    side_effect=CodexIpcNoOwner("Session is not loaded"),
+                ),
+                redirect_stdout(output),
+            ):
+                runtime._execute_task_delivery(context, delivery)
+
+            runtime.stopping.set()
+            with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+                waiting = conn.execute(
+                    """
+                    SELECT status, attempts, turn_id, turn_status, last_error
+                    FROM task_event_deliveries
+                    """
+                ).fetchone()
+            self.assertEqual(
+                (
+                    waiting["status"],
+                    waiting["attempts"],
+                    waiting["turn_id"],
+                    waiting["turn_status"],
+                ),
+                ("waiting_session", 1, None, None),
+            )
+            self.assertIn("Session is not loaded", waiting["last_error"])
+
+            owner_probe = Mock(return_value=False)
+            runtime.delivery_runtime.session_has_owner = owner_probe
+            runtime.delivery_runtime.resume_session_waiting(context)
+            runtime.delivery_runtime.resume_session_waiting(context)
+            with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+                still_waiting = conn.execute(
+                    """
+                    SELECT status, attempts, next_attempt_at
+                    FROM task_event_deliveries
+                    """
+                ).fetchone()
+            self.assertEqual(
+                (
+                    still_waiting["status"],
+                    still_waiting["attempts"],
+                    still_waiting["next_attempt_at"],
+                ),
+                ("waiting_session", 1, None),
+            )
+            owner_probe.assert_called_once_with("session_unloaded")
+
+            owner_probe.return_value = True
+            runtime.delivery_runtime._session_owner_checked_at.clear()
+            runtime.delivery_runtime.resume_session_waiting(context)
+        finally:
+            runtime.close()
+
+        with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
+            saved = conn.execute(
+                """
+                SELECT status, attempts, turn_id, turn_status, last_error
+                FROM task_event_deliveries
+                """
+            ).fetchone()
+        self.assertEqual(
+            (
+                saved["status"],
+                saved["attempts"],
+                saved["turn_id"],
+                saved["turn_status"],
+            ),
+            ("retry", 1, None, None),
+        )
+        self.assertIsNone(saved["last_error"])
+        self.assertEqual(owner_probe.call_args_list, [
+            unittest.mock.call("session_unloaded"),
+            unittest.mock.call("session_unloaded"),
+        ])
+        self.assertNotIn("session_unloaded", runtime.active_sessions)
+        self.assertIn("DISPATCH WAITING", output.getvalue())
+        self.assertNotIn("DISPATCH STARTED", output.getvalue())
+        self.assertNotIn("DISPATCH RETRY", output.getvalue())
 
     def test_daemon_waits_for_background_mcp_authorization_before_starting_turn(self):
         context = self.context()

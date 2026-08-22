@@ -598,7 +598,7 @@ def register_agent(
                 SET status = 'canceled', completed_at = ?, last_error = 'agent role was replaced'
                 WHERE agent_id IN (
                   SELECT id FROM agents WHERE workspace_id = ? AND role_id = ?
-                ) AND status IN ('pending', 'retry')
+                ) AND status IN ('pending', 'retry', 'waiting_session')
                 """,
                 (now(), workspace_id, role_row["id"]),
             )
@@ -815,7 +815,7 @@ def update_agent(
             SET status = 'canceled', completed_at = ?,
                 last_error = 'agent session was replaced'
             WHERE agent_id = ? AND assignment_revision = ?
-              AND status IN ('pending', 'retry')
+              AND status IN ('pending', 'retry', 'waiting_session')
             """,
             (timestamp, agent_id, previous_revision),
         )
@@ -916,7 +916,7 @@ def unregister_agent(
                 """
                 UPDATE task_event_deliveries
                 SET status = 'canceled', completed_at = ?, last_error = 'agent was removed'
-                WHERE agent_id = ? AND status IN ('pending', 'retry')
+                WHERE agent_id = ? AND status IN ('pending', 'retry', 'waiting_session')
                 """,
                 (now(), agent_id),
             )
@@ -946,7 +946,7 @@ def unregister_agent(
                     """
                     UPDATE task_event_deliveries
                     SET status = 'canceled', completed_at = ?, last_error = 'agent was removed'
-                    WHERE agent_id = ? AND status IN ('pending', 'retry')
+                    WHERE agent_id = ? AND status IN ('pending', 'retry', 'waiting_session')
                     """,
                     (now(), item["id"]),
                 )

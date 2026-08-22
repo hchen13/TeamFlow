@@ -20,6 +20,7 @@ from .agent_runtime import (
 )
 from .codex import (
     codex_delivery_error_is_terminal,
+    codex_session_has_owner,
     codex_thread_is_permanently_unavailable,
     codex_turn,
     codex_turn_by_client_message_id,
@@ -288,6 +289,7 @@ class TeamFlowDaemon:
             delivery_error_is_terminal=lambda error: (
                 codex_delivery_error_is_terminal(error)
             ),
+            session_has_owner=codex_session_has_owner,
             background_mcp_ready=inspect_teamflow_mcp_authorization,
             log_dispatch=lambda *args, **kwargs: self._log_dispatch(
                 *args,

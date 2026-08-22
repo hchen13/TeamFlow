@@ -80,7 +80,7 @@ npm --prefix ui run build
 
 ### 第四层：Codex 与界面
 
-`test_codex.py` 验证 Codex Desktop IPC、独立 app-server 回退、长 turn、rollout 证据和 Session 元数据读取。
+`test_codex.py` 验证 Codex Desktop IPC、无 owner 等待、长 turn、rollout 证据和 Session 元数据读取。
 
 `ui/lib/codex-ipc.test.cjs` 验证界面使用的 Codex 状态聚合。真实客户端启停、名称和模型设置变化仍需手工验收。
 

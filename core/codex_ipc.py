@@ -17,11 +17,11 @@ from .codex_ipc_stream import CodexThreadStream
 _CODEX_IPC_FRAME_LIMIT = 256 * 1024 * 1024
 _CODEX_IPC_STREAM_VERSION = 11
 _CODEX_IPC_FOLLOWING_VERSION = 1
-_CODEX_IPC_OWNER_DISCOVERY_VERSION = 1
 _CODEX_IPC_LOAD_HISTORY_VERSION = 1
 _CODEX_IPC_START_TURN_VERSION = 2
 _CODEX_IPC_INTERRUPT_TURN_VERSION = 4
 _CODEX_IPC_READ_STATE_VERSION = 2
+_CODEX_IPC_OWNER_SNAPSHOT_TIMEOUT = 2.0
 
 
 class CodexIpcUnavailable(ValueError):
@@ -48,6 +48,7 @@ class CodexIpcConnection:
         self.followers: dict[str, set[str]] = {}
         self.disconnected_clients: set[str] = set()
         self.streams: dict[str, CodexThreadStream] = {}
+        self.following_threads: set[str] = set()
         self.owner_client_id: str | None = None
 
     @classmethod
@@ -98,6 +99,8 @@ class CodexIpcConnection:
             raise
 
     def follow(self, thread_id: str) -> None:
+        if thread_id in self.following_threads:
+            return
         self.streams.setdefault(thread_id, CodexThreadStream())
         self._send({
             "type": "broadcast",
@@ -110,8 +113,11 @@ class CodexIpcConnection:
             },
             "version": _CODEX_IPC_FOLLOWING_VERSION,
         })
+        self.following_threads.add(thread_id)
 
     def unfollow(self, thread_id: str) -> None:
+        if thread_id not in self.following_threads:
+            return
         try:
             self._send({
                 "type": "broadcast",
@@ -126,6 +132,8 @@ class CodexIpcConnection:
             })
         except (OSError, ValueError):
             pass
+        finally:
+            self.following_threads.discard(thread_id)
 
     def start_turn(
         self,
@@ -203,35 +211,24 @@ class CodexIpcConnection:
         thread_id: str,
         *,
         stop_event: threading.Event | None,
+        timeout: float = _CODEX_IPC_OWNER_SNAPSHOT_TIMEOUT,
     ) -> str:
-        request_id = str(uuid.uuid4())
-        self._send({
-            "type": "request",
-            "requestId": request_id,
-            "sourceClientId": self.client_id,
-            "version": _CODEX_IPC_OWNER_DISCOVERY_VERSION,
-            "method": "thread-owner-discovery",
-            "params": {
-                "conversationId": thread_id,
-                "hostId": "local",
-            },
-            "timeoutMs": 5000,
-        })
-        response = self._wait_for_response(
-            request_id,
-            timeout=5,
-            stop_event=stop_event,
-        )
-        if response.get("resultType") != "success":
-            message = str(response.get("error") or "Codex owner discovery failed")
-            if message == "no-client-found":
-                raise CodexIpcNoOwner("No Codex client currently owns this session")
-            raise ValueError(message)
-        owner_client_id = str(response.get("handledByClientId") or "")
-        if not owner_client_id:
-            raise ValueError("Codex owner discovery did not return a client ID")
-        self.owner_client_id = owner_client_id
-        return owner_client_id
+        self.follow(thread_id)
+        stream = self.streams.setdefault(thread_id, CodexThreadStream())
+        deadline = time.monotonic() + timeout
+        while not (stream.initialized and self.owner_client_id):
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError(
+                    "TeamFlow daemon stopped before Codex accepted the turn"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CodexIpcNoOwner(
+                    "Codex Desktop has not loaded this Agent Session; "
+                    "open the Session and TeamFlow will retry automatically"
+                )
+            self._receive_once(min(0.05, remaining))
+        return self.owner_client_id
 
     def load_owner_snapshot(
         self,
@@ -478,6 +475,8 @@ class CodexIpcConnection:
         thread_id = str(params.get("conversationId") or "")
         change = params.get("change")
         if isinstance(change, dict):
+            if change.get("type") == "snapshot" and source_client_id:
+                self.owner_client_id = source_client_id
             self.streams.setdefault(thread_id, CodexThreadStream()).apply(change)
 
     def _send(self, payload: dict[str, Any]) -> None:
@@ -597,6 +596,33 @@ def stop_codex_ipc_turn(
             expected_turn_id=expected_turn_id,
         )
     finally:
+        connection.unfollow(thread)
+        connection.close()
+
+
+def codex_ipc_session_has_owner(
+    thread: str,
+    *,
+    timeout: float = 0.25,
+    connection_type: type[CodexIpcConnection] = CodexIpcConnection,
+) -> bool:
+    try:
+        connection = connection_type.connect()
+    except CodexIpcNoOwner:
+        return False
+    try:
+        connection.follow(thread)
+        try:
+            connection.discover_owner(
+                thread,
+                stop_event=None,
+                timeout=timeout,
+            )
+        except CodexIpcNoOwner:
+            return False
+        return True
+    finally:
+        connection.unfollow(thread)
         connection.close()
 
 
