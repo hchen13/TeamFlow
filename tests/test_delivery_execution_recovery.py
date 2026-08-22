@@ -561,7 +561,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             ("processing", "inProgress"),
         )
 
-    def test_stale_interrupted_claimed_turn_eventually_stops(self) -> None:
+    def test_claimed_turn_outlives_stale_snapshot_and_daemon_restart(self) -> None:
         context = self.context()
         delivery = self.start_delivery()
         self.claim_execution()
@@ -586,13 +586,20 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 }],
             }],
         }
+        runtime = self.runtime(
+            read_thread=lambda *_args, **_kwargs: thread,
+            turn_completed=lambda *_args, **_kwargs: False,
+        )
+        runtime.reconcile(context)
+        # A daemon restart rebuilds the runtime from the same durable delivery and
+        # execution rows. The stale owner snapshot must still not revoke the turn.
         self.runtime(
             read_thread=lambda *_args, **_kwargs: thread,
             turn_completed=lambda *_args, **_kwargs: False,
         ).reconcile(context)
 
         with connect(self.db_path) as conn:
-            failed = conn.execute(
+            pending = conn.execute(
                 "SELECT status, turn_status FROM task_event_deliveries"
             ).fetchone()
             execution = conn.execute(
@@ -603,13 +610,47 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 ("recRecovery",),
             ).fetchone()
         self.assertEqual(
-            (failed["status"], failed["turn_status"]),
-            ("failed", "interrupted"),
+            (pending["status"], pending["turn_status"]),
+            ("processing", "inProgress"),
         )
         self.assertEqual(
             (execution["state"], execution["stop_status"]),
-            ("stopped", "continuation_exhausted"),
+            ("active", None),
         )
+        self.assertTrue(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_original",
+            agent_id="agent_recovery",
+        ))
+        assignment = {
+            "workspace_root": self.workspace,
+            "workflow_key": "software-development",
+            "agent_id": "agent_recovery",
+        }
+        tool_runtime = ToolRuntime(
+            sync_lock=threading.RLock(),
+            assignment_context=lambda **_kwargs: {"assignment": assignment},
+            workspace_active=lambda _workspace: True,
+            invoke_tool=lambda *_args, **_kwargs: {"ok": True},
+            sync_task_activity=lambda *_args, **_kwargs: None,
+            delivery_record_id=lambda *_args, **_kwargs: "recRecovery",
+            delivery_turn_is_current=lambda _assignment, **kwargs: (
+                task_delivery_turn_is_current(
+                    context,
+                    agent_id="agent_recovery",
+                    **kwargs,
+                )
+            ),
+        )
+        grant = tool_runtime.authorize(
+            invocation_id="submit-after-compaction-and-restart",
+            session_id="session_recovery",
+            cwd=self.workspace,
+            turn_id="turn_original",
+            tool_name="mcp__teamflow__submit_task",
+            tool_input={"record_id": "recRecovery", "outcome": "completed"},
+        )
+        self.assertTrue(grant["grant"])
 
     def test_completed_interrupted_turn_rebinds_one_continuation_atomically(self) -> None:
         context = self.context()

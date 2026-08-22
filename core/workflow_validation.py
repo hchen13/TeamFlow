@@ -57,7 +57,7 @@ WORKFLOW_DISPATCH_TARGETS = frozenset({"none", "task_role", "coordinator"})
 WORKFLOW_GUARDS = frozenset({"executor_unavailable", "execution_stopped"})
 WORKFLOW_GUARD_ACTIONS = {
     "executor_unavailable": frozenset({"route"}),
-    "execution_stopped": frozenset({"cancel"}),
+    "execution_stopped": frozenset({"route", "cancel"}),
 }
 RUNTIME_ACTION_SPECS = {
     "stop_execution": {

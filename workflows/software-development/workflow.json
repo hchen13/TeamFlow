@@ -554,7 +554,7 @@
               "agent_id"
             ],
             "guards": [
-              "executor_unavailable"
+              "execution_stopped"
             ]
           },
           {

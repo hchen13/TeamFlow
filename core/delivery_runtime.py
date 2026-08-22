@@ -819,7 +819,6 @@ class DeliveryRuntime:
                         agent=agent,
                         thread_status=thread_status,
                         reason=str(error),
-                        turn_status=status,
                     )
                     continue
                 if active_execution:
@@ -888,7 +887,6 @@ class DeliveryRuntime:
         agent: str,
         thread_status: str,
         reason: str,
-        turn_status: str = "unconfirmed",
     ) -> None:
         turn_id = str(delivery.get("turn_id") or "")
         active_execution = bool(
@@ -922,40 +920,14 @@ class DeliveryRuntime:
                     attempt=int(delivery["attempts"]),
                 )
             else:
-                if (
-                    thread_status == "active"
-                    or not _reconciliation_lease_expired(delivery)
-                ):
-                    defer_task_delivery_reconciliation(
-                        context,
-                        delivery_id=int(delivery["id"]),
-                        error=ValueError(reason),
-                    )
-                else:
-                    exhausted_reason = (
-                        f"{reason}; acceptance remained unconfirmed for "
-                        f"{int(_UNCONFIRMED_TURN_LEASE.total_seconds() // 60)} minutes"
-                    )
-                    retry = self._finish_claimed_turn(
-                        context,
-                        delivery,
-                        turn_id=turn_id,
-                        turn_status=turn_status,
-                        reason=exhausted_reason,
-                    )
-                    self.log_dispatch(
-                        context,
-                        "retry" if retry else "failed",
-                        event_id=delivery["source_event_id"],
-                        task=task,
-                        record_id=delivery["record_id"],
-                        target=target,
-                        agent=agent,
-                        session=str(delivery["session_id"]),
-                        turn=turn_id,
-                        reason=exhausted_reason,
-                        attempt=int(delivery["attempts"]),
-                    )
+                # A successful claim is durable acceptance of this exact turn. A stale
+                # owner/app-server snapshot must not revoke its MCP admission or create a
+                # concurrent continuation; task_complete or a task handoff ends it.
+                defer_task_delivery_reconciliation(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    error=ValueError(reason),
+                )
             return
         if not task_delivery_is_current(
             context,

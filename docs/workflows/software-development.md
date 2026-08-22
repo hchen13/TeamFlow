@@ -203,7 +203,7 @@ stateDiagram-v2
     Ready --> Blocked: 发现前置阻塞
     Ready --> Canceled: PM 取消
     InProgress --> Review: 智能体提交结果
-    InProgress --> Ready: 执行 Session 不可用，PM 恢复入队
+    InProgress --> Ready: 执行已可靠停止，PM 恢复入队
     InProgress --> Blocked: 无法继续
     InProgress --> Canceled: PM 停止执行并取消
     Review --> Done: PM 验收通过
@@ -222,7 +222,7 @@ stateDiagram-v2
 - 可执行任务后来发现无法继续时进入已阻塞；确认不再需要时进入已取消。
 - “可执行 -> 进行中”只能由实际执行者认领触发；daemon 的通知不能改变任务状态或执行智能体。
 - “进行中 -> 可执行”只用于当前执行 Session 经确认不可继续使用后的恢复，由 PM 执行并清空执行智能体。
-- daemon 发现执行 Session 异常时只通知 PM，不能自动恢复入队或指定新的执行智能体。
+- daemon 发现执行 Session 异常时只通知 PM，不能自动恢复入队或指定新的执行智能体。PM 只有取得 `execution_stopped` 事实后，才能通过 `route_task` 恢复入队。
 - “进行中 -> 已取消”由 PM 发起；当前执行仍为 active 时，PM 必须先通过 TeamFlow MCP 停止当前 turn，确认停止后再完成取消。
 - 所有待评审任务自动路由给 PM，不依赖负责人是否为 PM。
 - 进入待评审时保留提交结果的负责人和执行智能体。

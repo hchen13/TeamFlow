@@ -294,7 +294,19 @@ class TaskExecutionRuntime:
             return set()
         agent_id = str(task.get("agent_id") or "")
         if not agent_id:
-            return set()
+            paths = resolve_workspace_paths(assignment["workspace_root"])
+            with connect(paths.db_path) as conn:
+                bootstrap_workspace(conn)
+                active_execution = conn.execute(
+                    """
+                    SELECT 1 FROM task_executions
+                    WHERE record_id = ? AND state = 'active'
+                    """,
+                    (task.get("record_id"),),
+                ).fetchone()
+            if active_execution:
+                return set()
+            return {"executor_unavailable", "execution_stopped"}
         paths = resolve_workspace_paths(assignment["workspace_root"])
         with connect(paths.db_path) as conn:
             bootstrap_workspace(conn)

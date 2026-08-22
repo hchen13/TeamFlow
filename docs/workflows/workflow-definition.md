@@ -302,7 +302,7 @@ Agent 身份来自 MCP 可信调用上下文，不是工具参数，不能由模
 | 运行时事实 | 允许使用的生命周期动作 | 事实来源 |
 | --- | --- | --- |
 | `executor_unavailable` | `route` | 后台确认原执行 Session 永久不可用 |
-| `execution_stopped` | `cancel` | `stop_task_execution` 的可靠停止结果 |
+| `execution_stopped` | `route`、`cancel` | `stop_task_execution` 或既有执行回执给出的可靠停止结果 |
 
 其他动作不得声明 `guards`。新增事实或把事实用于新的动作需要先扩展固定 MCP 运行时契约，不能只修改 JSON。
 

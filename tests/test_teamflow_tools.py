@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from core.teamflow_tools import (
     block_task,
@@ -17,6 +17,7 @@ from core.teamflow_tools import (
     update_task,
     workflow_contract,
 )
+from core.task_execution import TaskExecutionRuntime
 from core.workflow_validation import WORKFLOW_SCHEMA_VERSION
 from core.workflow import (
     load_workflow_definition,
@@ -605,6 +606,68 @@ class WorkflowActionTest(unittest.TestCase):
         self.assertEqual(wrong_role["error"]["code"], "permission_denied")
         self.assertTrue(allowed["ok"])
         self.assertEqual(allowed["runtime_facts"], ["execution_stopped"])
+
+    def test_orphaned_in_progress_task_can_recover_without_overriding_active_execution(self):
+        runtime = TaskExecutionRuntime(
+            get_task=lambda *args, **kwargs: {},
+            stop_turn=lambda *args, **kwargs: {},
+            read_thread=lambda *args, **kwargs: {},
+            thread_permanently_unavailable=lambda error: False,
+            active_sessions=lambda: set(),
+            load_workflow=load_workflow_definition,
+        )
+        task = {
+            **self._ready_task(),
+            "status": "in_progress",
+            "agent": None,
+            "agent_id": None,
+        }
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.__exit__.return_value = False
+        with (
+            patch("core.task_execution.connect", return_value=connection),
+            patch("core.task_execution.bootstrap_workspace"),
+        ):
+            connection.execute.return_value.fetchone.return_value = None
+            facts = runtime.runtime_facts(self.pm, task)
+            connection.execute.return_value.fetchone.return_value = (1,)
+            active_facts = runtime.runtime_facts(self.pm, task)
+
+        board = FakeTaskBoard(task)
+        read, write = board.patches()
+        with read, write:
+            recovered = route_task(
+                self.pm,
+                record_id="recReady",
+                role="design",
+                runtime_facts=facts,
+            )
+
+        self.assertEqual(facts, {"executor_unavailable", "execution_stopped"})
+        self.assertEqual(active_facts, set())
+        self.assertTrue(recovered["ok"])
+        self.assertEqual(recovered["transition"], {"from": "in_progress", "to": "ready"})
+        self.assertEqual(recovered["task"]["role"], "design")
+
+        stopped_board = FakeTaskBoard({
+            **task,
+            "agent": "Design Agent",
+            "agent_id": "agent_design",
+        })
+        read, write = stopped_board.patches()
+        with read, write:
+            stopped_recovery = route_task(
+                self.pm,
+                record_id="recReady",
+                role="design",
+                runtime_facts={"execution_stopped"},
+            )
+        self.assertTrue(stopped_recovery["ok"])
+        self.assertEqual(
+            stopped_recovery["transition"],
+            {"from": "in_progress", "to": "ready"},
+        )
 
     def test_lifecycle_fields_and_terminal_states_cannot_be_bypassed(self):
         board = FakeTaskBoard(self._ready_task())
