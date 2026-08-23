@@ -122,7 +122,7 @@ class CodexTurnTest(unittest.TestCase):
 
         client_socket.close.assert_called_once_with()
 
-    def test_uses_the_owner_snapshot_and_starts_v2(self):
+    def test_discovers_the_owner_and_starts_v2(self):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")
         connection.streams["thread_1"] = _CodexThreadStream()
         connection.streams["thread_1"].initialized = True
@@ -132,18 +132,11 @@ class CodexTurnTest(unittest.TestCase):
             patch.object(
                 connection,
                 "_wait_for_response",
-                side_effect=[
-                    {
-                        "resultType": "success",
-                        "handledByClientId": "desktop-client",
-                        "result": {"revision": 7},
-                    },
-                    {
-                        "resultType": "success",
-                        "handledByClientId": "desktop-client",
-                        "result": {"result": {"turn": {"id": "turn_1"}}},
-                    },
-                ],
+                return_value={
+                    "resultType": "success",
+                    "handledByClientId": "desktop-client",
+                    "result": {"result": {"turn": {"id": "turn_1"}}},
+                },
             ),
         ):
             turn_id = connection.start_turn(
@@ -160,11 +153,10 @@ class CodexTurnTest(unittest.TestCase):
             [call.args[0]["method"] for call in send.call_args_list],
             [
                 "thread-stream-following-changed",
-                "thread-follower-load-complete-history",
                 "thread-follower-start-turn",
             ],
         )
-        start_request = send.call_args_list[2].args[0]
+        start_request = send.call_args_list[1].args[0]
         self.assertEqual(start_request["targetClientId"], "desktop-client")
         self.assertEqual(start_request["version"], 2)
         self.assertEqual(
@@ -303,7 +295,7 @@ class CodexTurnTest(unittest.TestCase):
         self.assertEqual(connection.owner_client_id, "desktop-client")
         self.assertTrue(connection.streams["thread_1"].initialized)
 
-    def test_rejects_an_ipc_turn_when_the_owner_session_is_active(self):
+    def test_propagates_owner_rejection_when_the_session_is_active(self):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")
         connection.streams["thread_1"] = _CodexThreadStream()
         connection.streams["thread_1"].initialized = True
@@ -318,13 +310,10 @@ class CodexTurnTest(unittest.TestCase):
             patch.object(
                 connection,
                 "_wait_for_response",
-                side_effect=[
-                    {
-                        "resultType": "success",
-                        "handledByClientId": "desktop-client",
-                        "result": {"revision": 7},
-                    },
-                ],
+                return_value={
+                    "resultType": "error",
+                    "error": "Codex agent is busy",
+                },
             ),
             self.assertRaisesRegex(ValueError, "Codex agent is busy"),
         ):
@@ -338,7 +327,7 @@ class CodexTurnTest(unittest.TestCase):
         self.assertEqual(send.call_count, 2)
         self.assertEqual(
             send.call_args_list[1].args[0]["method"],
-            "thread-follower-load-complete-history",
+            "thread-follower-start-turn",
         )
 
     def test_treats_an_in_progress_placeholder_as_a_busy_session(self):
@@ -351,7 +340,7 @@ class CodexTurnTest(unittest.TestCase):
 
         self.assertTrue(stream.has_active_turn())
 
-    def test_refuses_to_start_without_an_initial_owner_snapshot(self):
+    def test_starts_without_loading_the_owner_history(self):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")
         connection.streams["thread_1"] = _CodexThreadStream()
 
@@ -361,24 +350,30 @@ class CodexTurnTest(unittest.TestCase):
                 "discover_owner",
                 return_value="desktop-client",
             ),
+            patch.object(connection, "_send") as send,
             patch.object(
                 connection,
-                "load_owner_snapshot",
-                side_effect=ValueError(
-                    "Codex owner did not provide an initial session snapshot"
-                ),
-            ),
-            self.assertRaisesRegex(
-                ValueError,
-                "initial session snapshot",
+                "_wait_for_response",
+                return_value={
+                    "resultType": "success",
+                    "handledByClientId": "desktop-client",
+                    "result": {"result": {"turn": {"id": "turn_1"}}},
+                },
             ),
         ):
-            connection.start_turn(
+            turn_id = connection.start_turn(
                 "thread_1",
                 "New work",
                 client_message_id="message_1",
                 stop_event=None,
             )
+
+        self.assertEqual(turn_id, "turn_1")
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(
+            send.call_args.args[0]["method"],
+            "thread-follower-start-turn",
+        )
 
     def test_treats_a_transport_failure_after_start_as_unknown_acceptance(self):
         connection = _CodexIpcConnection(Mock(), "teamflow-client")
@@ -391,7 +386,6 @@ class CodexTurnTest(unittest.TestCase):
                 "discover_owner",
                 return_value="desktop-client",
             ),
-            patch.object(connection, "load_owner_snapshot"),
             patch.object(
                 connection,
                 "_send",
@@ -420,7 +414,6 @@ class CodexTurnTest(unittest.TestCase):
                 "discover_owner",
                 return_value="desktop-client",
             ),
-            patch.object(connection, "load_owner_snapshot"),
             patch.object(connection, "_send"),
             patch.object(
                 connection,

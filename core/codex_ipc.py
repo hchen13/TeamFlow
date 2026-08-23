@@ -17,7 +17,6 @@ from .codex_ipc_stream import CodexThreadStream
 _CODEX_IPC_FRAME_LIMIT = 256 * 1024 * 1024
 _CODEX_IPC_STREAM_VERSION = 11
 _CODEX_IPC_FOLLOWING_VERSION = 1
-_CODEX_IPC_LOAD_HISTORY_VERSION = 1
 _CODEX_IPC_START_TURN_VERSION = 2
 _CODEX_IPC_INTERRUPT_TURN_VERSION = 4
 _CODEX_IPC_READ_STATE_VERSION = 2
@@ -170,14 +169,8 @@ class CodexIpcConnection:
             thread_id,
             stop_event=stop_event,
         )
-        self.load_owner_snapshot(
-            thread_id,
-            owner_client_id=owner_client_id,
-            stop_event=stop_event,
-        )
-        stream = self.streams.setdefault(thread_id, CodexThreadStream())
-        if stream.has_active_turn():
-            raise ValueError("Codex agent is busy")
+        # The owner is authoritative for turn admission. Preloading its complete
+        # history makes dispatch latency grow with the thread transcript.
         request_id = str(uuid.uuid4())
         try:
             self._send({
@@ -287,37 +280,6 @@ class CodexIpcConnection:
         self.owner_client_id = owner_client_id
         return owner_client_id
 
-    def load_owner_snapshot(
-        self,
-        thread_id: str,
-        *,
-        owner_client_id: str,
-        stop_event: threading.Event | None,
-    ) -> None:
-        request_id = str(uuid.uuid4())
-        try:
-            self._send({
-                "type": "request",
-                "requestId": request_id,
-                "sourceClientId": self.client_id,
-                "targetClientId": owner_client_id,
-                "version": _CODEX_IPC_LOAD_HISTORY_VERSION,
-                "method": "thread-follower-load-complete-history",
-                "params": {"conversationId": thread_id},
-                "timeoutMs": 10000,
-            })
-            response = self._wait_for_response(
-                request_id,
-                timeout=11,
-                stop_event=stop_event,
-            )
-        except CodexIpcUnavailable as error:
-            raise ValueError("Codex owner snapshot request failed") from error
-        if response.get("resultType") != "success":
-            message = str(response.get("error") or "Codex owner snapshot request failed")
-            raise ValueError(message)
-        self._wait_for_owner_snapshot(thread_id, stop_event=stop_event)
-
     def wait_for_turn_started(
         self,
         thread_id: str,
@@ -393,30 +355,6 @@ class CodexIpcConnection:
             "already_stopped": not bool(payload.get("interruptedTurnId")),
             "transport": "codex-ipc",
         }
-
-    def _wait_for_owner_snapshot(
-        self,
-        thread_id: str,
-        *,
-        stop_event: threading.Event | None,
-    ) -> None:
-        deadline = time.monotonic() + 2
-        stream = self.streams.setdefault(thread_id, CodexThreadStream())
-        while not stream.initialized:
-            if self.owner_client_id in self.disconnected_clients:
-                raise ValueError(
-                    "Codex session owner disconnected before providing a snapshot"
-                )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ValueError(
-                    "Codex owner did not provide an initial session snapshot"
-                )
-            if stop_event is not None and stop_event.is_set():
-                raise InterruptedError(
-                    "TeamFlow daemon stopped before Codex accepted the turn"
-                )
-            self._receive_once(min(0.05, remaining))
 
     def wait_for_turn(
         self,
