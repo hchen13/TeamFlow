@@ -979,6 +979,15 @@ class InitializationScopeFallbackTest(unittest.TestCase):
 class BotPermissionPreflightTest(unittest.TestCase):
     """Setup asks once for the whole scope set instead of discovering it one API at a time."""
 
+    def test_initialization_mutation_scopes_are_required(self):
+        self.assertTrue(
+            {
+                "base:table:update",
+                "base:field:update",
+                "base:view:write_only",
+            }.issubset(TEAMFLOW_APP_SCOPES)
+        )
+
     def setUp(self):
         (ROOT / "tmp").mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(prefix="bot-scopes-", dir=ROOT / "tmp")

@@ -72,16 +72,40 @@ flowchart LR
 - `lark-cli`，仅飞书用户授权和用户身份调用需要；可通过 `LARK_CLI` 指定其他路径。
 - 一个已创建并发布的飞书/Lark 开放平台应用。
 
-用户授权流程会申请以下 scope：
+TeamFlow 有两套不同的飞书授权，不要混淆：
+
+用户身份通过 `lark-cli` 登录时会申请以下 OAuth scope：
 
 ```text
 bitable:app
+base:app:read
+base:table:read
+base:table:create
+base:table:update
+base:field:read
+base:field:create
+base:field:update
+base:view:read
+base:view:write_only
+base:record:read
+base:record:retrieve
+base:record:create
+base:record:update
+base:record:delete
 docs:event:subscribe
 docs:permission.member:auth
 docs:permission.member:create
 drive:drive.metadata:readonly
 offline_access
 ```
+
+Bot 身份需要在开放平台为应用开通同一组业务 scope，但不包含 `offline_access`。保存 Bot 身份后、执行任何看板写入之前，运行：
+
+```bash
+./teamflow required-lark-bot-permissions --workspace "$PROJECT_ROOT" --domain feishu
+```
+
+命令返回的 `required_scopes` 是当前版本的完整事实源，`permission_url` 可一次性开通全部权限。用户完成授权并**发布应用版本**后再继续初始化，不要等 API 逐项报错后再补权限。初始化任务表明确依赖 `base:table:update`、`base:field:update` 和 `base:view:write_only`，分别用于更新数据表、字段和视图。
 
 若要使用事件监听，还需在开放平台把事件订阅方式设为长连接，添加以下事件，并发布应用版本：
 
@@ -122,10 +146,11 @@ http://127.0.0.1:13145/
 
 1. 选择 `software-development` 或 `general-task` 协作模式。
 2. 连接飞书用户身份，或填写应用 ID 和应用密钥保存 Bot 身份。
-3. 粘贴已有多维表格链接，或用已保存身份创建新表。
-4. 验证各身份的看板访问权限，并选择拥有者/管理员作为主身份。
-5. 配置开放平台事件后，验证看板监听。
-6. 在 Agent 页面选择项目的 Codex Session，并绑定角色。
+3. 使用 Bot 身份时，由配置 Agent 运行 `required-lark-bot-permissions`，打开返回的完整权限链接，开通全部 scope 并发布应用版本。
+4. 粘贴已有多维表格链接，或用已保存身份创建新表。
+5. 验证各身份的看板访问权限，并选择拥有者/管理员作为主身份。
+6. 配置开放平台事件后，验证看板监听。
+7. 在 Agent 页面选择项目的 Codex Session，并绑定角色。
 
 UI 负责工作流、飞书身份、看板访问、事件监听和 Agent Session 的集中配置。
 
@@ -169,6 +194,10 @@ export TEAMFLOW_LARK_APP_SECRET='replace-me'
   --workspace "$PROJECT_ROOT" \
   --app-id cli_xxx \
   --app-secret-env TEAMFLOW_LARK_APP_SECRET \
+  --domain feishu
+
+./teamflow required-lark-bot-permissions \
+  --workspace "$PROJECT_ROOT" \
   --domain feishu
 
 ./teamflow configure-lark-board \
@@ -305,7 +334,7 @@ daemon 是全局单进程：同一 `brand + app_id` 只启动一个飞书 WebSoc
 | 分组 | 命令 |
 | --- | --- |
 | 工作区 | `init`、`inspect`、`select-workflow`、`serve-ui`、`self-check` |
-| 飞书身份 | `configure-lark-identity`、`verify-lark-user-identity`、`refresh-lark-identity`、`remove-lark-identity` |
+| 飞书身份 | `configure-lark-identity`、`required-lark-bot-permissions`、`verify-lark-user-identity`、`refresh-lark-identity`、`remove-lark-identity` |
 | 多维表格 | `configure-lark-board`、`create-lark-board`、`verify-lark-board`、`grant-lark-board-access`、`initialize-lark-board` |
 | 任务 | `list-lark-tasks`、`get-lark-task`、`upsert-lark-task` |
 | Agent | `list-codex-sessions`、`register-agent`、`update-agent`、`unregister-agent`、`verify-agent`、`send-agent` |
