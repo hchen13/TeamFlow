@@ -25,6 +25,7 @@ from .task_dispatch import (
     mark_task_delivery_waiting_for_session,
     mark_task_delivery_turn_started,
     prepare_task_deliveries,
+    recover_retryable_failed_task_deliveries,
     refresh_task_delivery_prompt,
     render_task_continuation_prompt,
     render_task_prompt,
@@ -33,6 +34,7 @@ from .task_dispatch import (
     task_delivery_is_current,
     task_delivery_has_active_execution,
     task_delivery_sessions_waiting_for_owner,
+    task_delivery_turn_count,
     task_dispatch_target,
 )
 
@@ -92,6 +94,7 @@ class DeliveryRuntime:
         self.background_mcp_ready = background_mcp_ready
         self._session_owner_checked_at: dict[tuple[str, str], float] = {}
         self._session_owner_probes: dict[tuple[str, str], threading.Thread] = {}
+        self._failed_recovery_workspaces: set[str] = set()
 
     def consume(self) -> None:
         while not self.stopping.is_set():
@@ -101,6 +104,12 @@ class DeliveryRuntime:
                 if self.stopping.is_set():
                     return
                 try:
+                    if context.workspace_root not in self._failed_recovery_workspaces:
+                        recover_retryable_failed_task_deliveries(
+                            context,
+                            max_turn_attempts=_MAX_ACCEPTED_TURN_ATTEMPTS,
+                        )
+                        self._failed_recovery_workspaces.add(context.workspace_root)
                     self.resume_permission_waiting(context)
                     self.resume_session_waiting(context)
                     self.reconcile(context)
@@ -374,7 +383,7 @@ class DeliveryRuntime:
             elif not result.get("ok"):
                 retry = (
                     status in {"cancelled", "canceled", "interrupted"}
-                    and int(delivery["attempts"]) < _MAX_ACCEPTED_TURN_ATTEMPTS
+                    and self._accepted_turn_retry_available(context, delivery)
                     and task_delivery_is_current(
                         context,
                         delivery_id=int(delivery["id"]),
@@ -494,7 +503,7 @@ class DeliveryRuntime:
         turn_status: str,
         reason: str,
     ) -> bool:
-        retry = int(delivery["attempts"]) < _MAX_ACCEPTED_TURN_ATTEMPTS
+        retry = self._accepted_turn_retry_available(context, delivery)
         if retry:
             finish_task_delivery(
                 context,
@@ -513,6 +522,16 @@ class DeliveryRuntime:
             )
             retry = not failed
         return retry
+
+    @staticmethod
+    def _accepted_turn_retry_available(
+        context: LarkEventContext,
+        delivery: dict[str, Any],
+    ) -> bool:
+        return task_delivery_turn_count(
+            context,
+            delivery_id=int(delivery["id"]),
+        ) < _MAX_ACCEPTED_TURN_ATTEMPTS
 
     def _background_mcp_status(self) -> dict[str, Any]:
         value = self.background_mcp_ready()
@@ -782,6 +801,36 @@ class DeliveryRuntime:
                         attempt=int(delivery["attempts"]),
                     )
                     continue
+                if task_delivery_is_current(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                ):
+                    error = ValueError(
+                        "Codex turn ended without accepting or advancing "
+                        "the TeamFlow task"
+                    )
+                    retry = self._accepted_turn_retry_available(context, delivery)
+                    finish_task_delivery(
+                        context,
+                        delivery_id=int(delivery["id"]),
+                        result={"ok": False, "status": status},
+                        error=error,
+                        retry=retry,
+                    )
+                    self.log_dispatch(
+                        context,
+                        "retry" if retry else "failed",
+                        event_id=delivery["source_event_id"],
+                        task=task,
+                        record_id=delivery["record_id"],
+                        target=target,
+                        agent=agent,
+                        session=session_id,
+                        turn=str(delivery["turn_id"]),
+                        reason=str(error),
+                        attempt=int(delivery["attempts"]) if retry else None,
+                    )
+                    continue
                 finish_task_delivery(
                     context,
                     delivery_id=int(delivery["id"]),
@@ -832,7 +881,7 @@ class DeliveryRuntime:
                 else:
                     retry = (
                         status in {"cancelled", "canceled", "interrupted"}
-                        and int(delivery["attempts"]) < _MAX_ACCEPTED_TURN_ATTEMPTS
+                        and self._accepted_turn_retry_available(context, delivery)
                         and task_delivery_is_current(
                             context,
                             delivery_id=int(delivery["id"]),

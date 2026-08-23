@@ -3315,6 +3315,17 @@ class LarkEventsTest(unittest.TestCase):
                     next_attempt_at = NULL
                 """
             )
+            delivery_id = int(delivery["id"])
+            conn.executemany(
+                """
+                INSERT INTO task_delivery_turns (delivery_id, turn_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    (delivery_id, "turn_interrupted_retry_1", now()),
+                    (delivery_id, "turn_interrupted_retry_2", now()),
+                ),
+            )
         runtime = TeamFlowDaemon()
         runtime.delivery_runtime.turn_completed = lambda *_args, **_kwargs: True
         failed_output = io.StringIO()
@@ -3728,6 +3739,19 @@ class LarkEventsTest(unittest.TestCase):
         )
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
             conn.execute("UPDATE task_event_deliveries SET next_attempt_at = NULL")
+        save_task_snapshot(
+            context,
+            record_id="recRestart",
+            task={
+                "record_id": "recRestart",
+                "task_id": "TF-0021",
+                "title": "Reconcile after restart",
+                "status": "review",
+                "role": "tl",
+            },
+            source_event_id="evtRestartSubmitted",
+            source_revision="51",
+        )
         runtime = TeamFlowDaemon()
         try:
             output = io.StringIO()
@@ -3803,6 +3827,19 @@ class LarkEventsTest(unittest.TestCase):
             conn.execute(
                 "UPDATE task_event_deliveries SET next_attempt_at = NULL"
             )
+        save_task_snapshot(
+            context,
+            record_id="recMessageRecovery",
+            task={
+                "record_id": "recMessageRecovery",
+                "task_id": "TF-MESSAGE-RECOVERY",
+                "title": "Recover unknown IPC acceptance",
+                "status": "review",
+                "role": "tl",
+            },
+            source_event_id="evtMessageRecoverySubmitted",
+            source_revision="73",
+        )
 
         runtime = TeamFlowDaemon()
         output = io.StringIO()

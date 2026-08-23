@@ -22,6 +22,7 @@ from .task_delivery_store import (
     processing_task_delivery_sessions,
     processing_task_delivery_sessions_for_workspace,
     recover_task_deliveries,
+    recover_retryable_failed_task_deliveries as _recover_retryable_failed_task_deliveries,
     resume_task_deliveries_waiting_for_session,
     resume_task_deliveries_waiting_for_permission,
     refresh_task_delivery_prompt,
@@ -30,6 +31,7 @@ from .task_delivery_store import (
     task_delivery_sessions_waiting_for_owner,
     task_delivery_is_current as _task_delivery_is_current,
     task_delivery_turn_is_current as _task_delivery_turn_is_current,
+    task_delivery_turn_count,
 )
 from .task_routing import (
     render_task_continuation_prompt as _render_task_continuation_prompt,
@@ -64,6 +66,18 @@ def claim_task_deliveries(
         load_workflow=load_workflow_definition,
         limit=limit,
         exclude_session_ids=exclude_session_ids,
+    )
+
+
+def recover_retryable_failed_task_deliveries(
+    context: LarkEventContext,
+    *,
+    max_turn_attempts: int,
+) -> int:
+    return _recover_retryable_failed_task_deliveries(
+        context,
+        max_turn_attempts=max_turn_attempts,
+        load_workflow=load_workflow_definition,
     )
 
 

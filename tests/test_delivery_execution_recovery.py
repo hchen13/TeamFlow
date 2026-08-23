@@ -31,6 +31,8 @@ from core.task_dispatch import (
     finish_task_delivery,
     mark_task_delivery_turn_started,
     prepare_task_deliveries,
+    recover_retryable_failed_task_deliveries,
+    task_delivery_turn_count,
     task_delivery_turn_is_current,
 )
 from core.tool_runtime import ToolRuntime
@@ -380,6 +382,57 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             agent_id="agent_recovery",
         ))
 
+    def test_owner_wait_attempts_do_not_exhaust_the_turn_retry_budget(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries SET attempts = 55"
+            )
+        delivery["attempts"] = 55
+
+        def run_turn(
+            _session_id,
+            _prompt,
+            *,
+            client_message_id,
+            on_started,
+            stop_event,
+        ):
+            self.assertEqual(client_message_id, delivery["client_message_id"])
+            self.assertFalse(stop_event.is_set())
+            on_started("turn_original")
+            return {
+                "ok": False,
+                "turn_id": "turn_original",
+                "status": "interrupted",
+                "error": "interrupted",
+                "transport": "codex-ipc",
+            }
+
+        self.runtime(
+            run_turn=run_turn,
+            turn_completed=lambda *_args, **_kwargs: True,
+        ).execute(context, delivery)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, attempts FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual((saved["status"], saved["attempts"]), ("retry", 55))
+        self.assertEqual(
+            task_delivery_turn_count(context, delivery_id=int(delivery["id"])),
+            1,
+        )
+
     def test_same_turn_handoff_after_interrupt_converges_delivery(self) -> None:
         context = self.context()
         delivery = self.start_delivery()
@@ -520,7 +573,45 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             ).fetchone()
         self.assertEqual(
             (completed["status"], completed["turn_id"], completed["turn_status"]),
-            ("completed", "turn_visible", "completed"),
+            ("retry", "turn_visible", "completed"),
+        )
+        self.assertFalse(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_visible",
+            agent_id="agent_recovery",
+        ))
+
+    def test_failed_unclaimed_current_delivery_is_recovered(self) -> None:
+        context = self.context()
+        delivery = self.start_delivery()
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET status = 'failed', attempts = 55,
+                    turn_status = 'interrupted', completed_at = ?
+                """,
+                (now(),),
+            )
+
+        recovered = recover_retryable_failed_task_deliveries(
+            context,
+            max_turn_attempts=3,
+        )
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                """
+                SELECT status, attempts, completed_at
+                FROM task_event_deliveries
+                """
+            ).fetchone()
+        self.assertEqual(recovered, 1)
+        self.assertEqual((saved["status"], saved["attempts"]), ("retry", 55))
+        self.assertIsNone(saved["completed_at"])
+        self.assertEqual(
+            task_delivery_turn_count(context, delivery_id=int(delivery["id"])),
+            1,
         )
 
     def test_active_interrupted_unclaimed_turn_outlives_lease(self) -> None:
@@ -741,6 +832,17 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 UPDATE task_event_deliveries
                 SET attempts = 3, next_attempt_at = NULL
                 """
+            )
+            delivery_id = int(delivery["id"])
+            conn.executemany(
+                """
+                INSERT INTO task_delivery_turns (delivery_id, turn_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    (delivery_id, "turn_retry_1", now()),
+                    (delivery_id, "turn_retry_2", now()),
+                ),
             )
         thread = {
             "status": {"type": "idle"},

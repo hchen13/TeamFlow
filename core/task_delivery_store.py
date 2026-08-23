@@ -47,6 +47,66 @@ def recover_task_deliveries(context: LarkEventContext) -> None:
         )
 
 
+def recover_retryable_failed_task_deliveries(
+    context: LarkEventContext,
+    *,
+    max_turn_attempts: int,
+    load_workflow: WorkflowLoader,
+) -> int:
+    states = dispatch_states(
+        context.workflow_key,
+        load_workflow=load_workflow,
+    )
+    recovered = 0
+    with connect(context.db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT delivery.id, delivery.event_key
+            FROM task_event_deliveries AS delivery
+            WHERE delivery.status = 'failed'
+              AND delivery.turn_status IN (
+                'interrupted', 'cancelled', 'canceled', 'unconfirmed'
+              )
+              AND (
+                SELECT COUNT(*)
+                FROM task_delivery_turns AS delivery_turn
+                WHERE delivery_turn.delivery_id = delivery.id
+              ) < ?
+              AND NOT EXISTS (
+                SELECT 1
+                FROM task_events AS event
+                JOIN task_executions AS execution
+                  ON execution.record_id = event.record_id
+                WHERE event.event_key = delivery.event_key
+                  AND execution.state = 'active'
+              )
+            ORDER BY delivery.completed_at, delivery.id
+            """,
+            (max_turn_attempts,),
+        ).fetchall()
+        for row in rows:
+            event = conn.execute(
+                "SELECT * FROM task_events WHERE event_key = ?",
+                (row["event_key"],),
+            ).fetchone()
+            current = current_dispatch(conn, event, states) if event else None
+            if not current or current["event"]["event_key"] != row["event_key"]:
+                continue
+            cursor = conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET status = 'retry',
+                    next_attempt_at = NULL,
+                    completed_at = NULL,
+                    delivered_at = NULL
+                WHERE id = ? AND status = 'failed'
+                """,
+                (row["id"],),
+            )
+            recovered += int(cursor.rowcount)
+    return recovered
+
+
 def claim_task_deliveries(
     context: LarkEventContext,
     *,
@@ -514,6 +574,23 @@ def mark_task_delivery_turn_started(
             (delivery_id, turn_id, timestamp),
         )
     return timestamp
+
+
+def task_delivery_turn_count(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+) -> int:
+    with connect(context.db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM task_delivery_turns
+            WHERE delivery_id = ?
+            """,
+            (delivery_id,),
+        ).fetchone()
+    return int(row["count"] if row else 0)
 
 
 def due_processing_task_deliveries(
