@@ -452,7 +452,7 @@ class ToolDescriptionTest(unittest.TestCase):
         )
         live = {name: tool.description for name, tool in mcp._tool_manager._tools.items()}
 
-        self.assertEqual(len(live), 12)
+        self.assertEqual(len(live), 13)
         self.assertEqual(live, asset)
 
     def test_no_tool_falls_back_to_a_docstring(self):

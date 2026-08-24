@@ -27,6 +27,7 @@ MUTATING_TOOL_NAMES = frozenset(LIFECYCLE_ACTION_TO_TOOL.values())
 RUNTIME_TOOL_NAMES = frozenset(RUNTIME_ACTION_TO_TOOL.values())
 TOOL_NAMES = frozenset({
     "get_assignment",
+    "list_tasks",
     "list_available_tasks",
     "get_task",
     *MUTATING_TOOL_NAMES,

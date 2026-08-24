@@ -218,7 +218,7 @@ Codex Session 必须先由用户在 Codex 中创建，CLI 只做发现与绑定�
 "$TF" authorize-codex-tools --confirmed
 ```
 
-`--confirmed` 表示用户已明确同意修改 Codex 配置；不传会直接拒绝。该命令写入 `$CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`），覆盖 12 个工具：`get_assignment`、`list_available_tasks`、`get_task`、`claim_task`、`cancel_task`、`stop_task_execution`、`create_task`、`update_task`、`route_task`、`block_task`、`review_task`、`submit_task`。
+`--confirmed` 表示用户已明确同意修改 Codex 配置；不传会直接拒绝。该命令写入 `$CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`），覆盖 13 个工具：`get_assignment`、`list_tasks`、`list_available_tasks`、`get_task`、`claim_task`、`cancel_task`、`stop_task_execution`、`create_task`、`update_task`、`route_task`、`block_task`、`review_task`、`submit_task`。
 
 前提是插件已在 Codex 中安装并启用。该命令只改配置文件；已运行的 Codex Desktop、VS Code 插件或 CLI 进程不会可靠热加载新批准规则。授权后先重启当前正在运行的 Codex 客户端，再依赖无人值守派发。插件代码更新后还需要刷新本机插件缓存；Skill 变更使用新会话验收。
 

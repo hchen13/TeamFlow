@@ -30,10 +30,23 @@ class TeamFlowToolDispatcher:
                 "assignment": assignment,
                 "workflow": self.resolve("workflow_contract")(assignment),
             }
+        if tool_name == "list_tasks":
+            return self.resolve("list_tasks")(
+                assignment,
+                status=_optional_text(arguments.get("status")),
+                role=_optional_text(arguments.get("role")),
+                task_id=_optional_text(arguments.get("task_id")),
+                limit=_integer(arguments.get("limit"), default=50),
+                offset=_integer(arguments.get("offset"), default=0),
+            )
         if tool_name == "list_available_tasks":
             return self.resolve("list_available_tasks")(assignment)
         if tool_name == "get_task":
-            return self.resolve("get_task")(assignment, record_id=record_id)
+            return self.resolve("get_task")(
+                assignment,
+                record_id=record_id or None,
+                task_id=_optional_text(arguments.get("task_id")),
+            )
         if tool_name == "create_task":
             return self.resolve("create_task")(
                 assignment,
@@ -144,4 +157,12 @@ def _optional_delivery(value: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(value, dict):
         raise ValueError("delivery must be an object")
+    return value
+
+
+def _integer(value: Any, *, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("pagination values must be integers")
     return value

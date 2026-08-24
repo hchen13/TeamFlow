@@ -10,6 +10,8 @@ from core.teamflow_tools import (
     cancel_task,
     claim_task,
     create_task,
+    get_task,
+    list_tasks,
     prepare_runtime_action,
     review_task,
     route_task,
@@ -83,6 +85,154 @@ class FakeTaskBoard:
             patch("core.teamflow_tools.get_lark_task", side_effect=self.read),
             patch("core.teamflow_tools.upsert_lark_task", side_effect=self.write),
         )
+
+
+class WorkflowReadTest(unittest.TestCase):
+    def setUp(self):
+        self.pm = assignment("pm", "agent_pm")
+        self.tl = assignment("tl", "agent_tl")
+        self.owner = assignment("owner", "agent_owner", "general-task")
+
+    @staticmethod
+    def task(
+        record_id: str,
+        task_id: str,
+        *,
+        status: str,
+        role: str,
+    ) -> dict[str, object]:
+        return {
+            "record_id": record_id,
+            "task_id": task_id,
+            "title": task_id,
+            "type": "development",
+            "priority": "P1",
+            "status": status,
+            "role": role,
+            "description": "Implement the task.",
+            "acceptance_criteria": "The requested behavior is verified.",
+            "agent": None,
+            "agent_id": None,
+            "delivery_mode": "standard",
+        }
+
+    def test_each_workflow_coordinator_can_read_the_entire_board(self):
+        tasks = [
+            self.task("recBacklog", "TF-0001", status="backlog", role="pm"),
+            self.task("recReady", "TF-0002", status="ready", role="tl"),
+            self.task("recDone", "TF-0003", status="done", role="qa"),
+        ]
+        page = {"ok": True, "tasks": tasks, "has_more": False}
+
+        for caller in (self.pm, self.owner):
+            with self.subTest(workflow=caller["workflow_key"]), patch(
+                "core.teamflow_tools.list_lark_tasks",
+                return_value=page,
+            ):
+                result = list_tasks(caller)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["count"], 3)
+            self.assertEqual(
+                [task["task_id"] for task in result["tasks"]],
+                ["TF-0001", "TF-0002", "TF-0003"],
+            )
+
+    def test_non_coordinator_cannot_read_the_global_board(self):
+        with patch("core.teamflow_tools.list_lark_tasks") as list_board:
+            result = list_tasks(self.tl)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "coordinator_required")
+        self.assertEqual(result["error"]["details"]["coordinator_role"], "pm")
+        list_board.assert_not_called()
+
+    def test_global_board_filters_and_paginates_after_filtering(self):
+        tasks = [
+            self.task("rec1", "TF-0001", status="backlog", role="tl"),
+            self.task("rec2", "TF-0002", status="backlog", role="tl"),
+            self.task("rec3", "TF-0003", status="backlog", role="tl"),
+            self.task("rec4", "TF-0004", status="ready", role="tl"),
+        ]
+        with patch(
+            "core.teamflow_tools.list_lark_tasks",
+            return_value={"ok": True, "tasks": tasks, "has_more": False},
+        ):
+            result = list_tasks(
+                self.pm,
+                status="backlog",
+                role="tl",
+                limit=1,
+                offset=1,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([task["task_id"] for task in result["tasks"]], ["TF-0002"])
+        self.assertTrue(result["has_more"])
+        self.assertEqual(
+            result["filters"],
+            {"status": "backlog", "role": "tl", "task_id": None},
+        )
+
+    def test_global_board_rejects_invalid_workflow_filters(self):
+        invalid_status = list_tasks(self.pm, status="unknown")
+        invalid_role = list_tasks(self.pm, role="unknown")
+        invalid_page = list_tasks(self.pm, limit=0)
+
+        self.assertEqual(invalid_status["error"]["code"], "invalid_status")
+        self.assertEqual(invalid_role["error"]["code"], "invalid_role")
+        self.assertEqual(invalid_page["error"]["code"], "invalid_pagination")
+
+    def test_get_task_accepts_exactly_one_stable_identifier(self):
+        task = self.task("recTarget", "PET-0008", status="backlog", role="pm")
+        with patch(
+            "core.teamflow_tools.list_lark_tasks",
+            return_value={"ok": True, "tasks": [task], "has_more": False},
+        ):
+            by_task_id = get_task(self.pm, task_id="pet-0008")
+        with patch(
+            "core.teamflow_tools.get_lark_task",
+            return_value={"ok": True, "task": task},
+        ) as read_record:
+            by_record_id = get_task(self.pm, record_id="recTarget")
+
+        self.assertEqual(by_task_id["task"]["record_id"], "recTarget")
+        self.assertEqual(by_record_id["task"]["task_id"], "PET-0008")
+        read_record.assert_called_once_with("/workspace", record_id="recTarget")
+        self.assertEqual(
+            get_task(self.pm)["error"]["code"],
+            "task_reference_required",
+        )
+        self.assertEqual(
+            get_task(
+                self.pm,
+                record_id="recTarget",
+                task_id="PET-0008",
+            )["error"]["code"],
+            "task_reference_required",
+        )
+
+    def test_get_task_reports_missing_and_ambiguous_task_ids(self):
+        duplicate = self.task("recA", "PET-0008", status="backlog", role="pm")
+        duplicate_two = {**duplicate, "record_id": "recB"}
+        with patch(
+            "core.teamflow_tools.list_lark_tasks",
+            return_value={
+                "ok": True,
+                "tasks": [duplicate, duplicate_two],
+                "has_more": False,
+            },
+        ):
+            ambiguous = get_task(self.pm, task_id="PET-0008")
+        with patch(
+            "core.teamflow_tools.list_lark_tasks",
+            return_value={"ok": True, "tasks": [], "has_more": False},
+        ):
+            missing = get_task(self.pm, task_id="PET-404")
+
+        self.assertEqual(ambiguous["error"]["code"], "task_id_not_unique")
+        self.assertEqual(ambiguous["error"]["details"]["record_ids"], ["recA", "recB"])
+        self.assertEqual(missing["error"]["code"], "task_not_found")
 
 
 class WorkflowActionTest(unittest.TestCase):

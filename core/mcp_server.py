@@ -116,14 +116,44 @@ def get_assignment(context: Context) -> dict[str, Any]:
     return _invoke("get_assignment", {}, context)
 
 
+@mcp.tool(description=TOOL_DESCRIPTIONS["list_tasks"])
+def list_tasks(
+    context: Context,
+    status: str = "",
+    role: str = "",
+    task_id: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    return _invoke(
+        "list_tasks",
+        {
+            "status": status,
+            "role": role,
+            "task_id": task_id,
+            "limit": limit,
+            "offset": offset,
+        },
+        context,
+    )
+
+
 @mcp.tool(description=TOOL_DESCRIPTIONS["list_available_tasks"])
 def list_available_tasks(context: Context) -> dict[str, Any]:
     return _invoke("list_available_tasks", {}, context)
 
 
 @mcp.tool(description=TOOL_DESCRIPTIONS["get_task"])
-def get_task(record_id: str, context: Context) -> dict[str, Any]:
-    return _invoke("get_task", {"record_id": record_id}, context)
+def get_task(
+    context: Context,
+    record_id: str = "",
+    task_id: str = "",
+) -> dict[str, Any]:
+    return _invoke(
+        "get_task",
+        {"record_id": record_id, "task_id": task_id},
+        context,
+    )
 
 
 @mcp.tool(description=TOOL_DESCRIPTIONS["claim_task"])

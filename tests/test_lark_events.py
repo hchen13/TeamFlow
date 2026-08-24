@@ -126,6 +126,15 @@ class LarkEventsTest(unittest.TestCase):
         self.home = tempfile.TemporaryDirectory(prefix="teamflow-home-", dir=ROOT / "tmp")
         self.home_env = patch.dict(os.environ, {"TEAMFLOW_HOME": self.home.name})
         self.home_env.start()
+        self.authorization = patch(
+            "core.daemon.inspect_teamflow_mcp_authorization",
+            return_value={
+                "authorized": True,
+                "configured": True,
+                "missing_tools": [],
+            },
+        )
+        self.authorization.start()
         self.temp = tempfile.TemporaryDirectory(prefix="lark-events-", dir=ROOT / "tmp")
         self.workspace = self.temp.name
         init_workspace(self.workspace)
@@ -146,6 +155,7 @@ class LarkEventsTest(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+        self.authorization.stop()
         self.home_env.stop()
         self.home.cleanup()
         try:
@@ -2914,8 +2924,15 @@ class LarkEventsTest(unittest.TestCase):
         }
 
         self.assertEqual(tools["get_assignment"]["properties"], {})
+        self.assertEqual(
+            set(tools["list_tasks"]["properties"]),
+            {"status", "role", "task_id", "limit", "offset"},
+        )
         self.assertEqual(tools["list_available_tasks"]["properties"], {})
-        self.assertEqual(set(tools["get_task"]["properties"]), {"record_id"})
+        self.assertEqual(
+            set(tools["get_task"]["properties"]),
+            {"record_id", "task_id"},
+        )
         self.assertEqual(set(tools["claim_task"]["properties"]), {"record_id"})
         self.assertEqual(
             set(tools),
@@ -2971,7 +2988,10 @@ class LarkEventsTest(unittest.TestCase):
                 {"ok": True, "task": {"record_id": "recMetadata"}},
             ],
         ) as daemon_request:
-            result = teamflow_mcp_server.get_task("recMetadata", context)
+            result = teamflow_mcp_server.get_task(
+                context,
+                record_id="recMetadata",
+            )
 
         self.assertEqual(result["task"]["record_id"], "recMetadata")
         invocation_id = daemon_request.call_args_list[0].args[0]["invocation_id"]
@@ -2984,7 +3004,10 @@ class LarkEventsTest(unittest.TestCase):
                 "session_id": "session_metadata",
                 "turn_id": "turn_metadata",
                 "tool_name": "mcp__teamflow__get_task",
-                "tool_input": {"record_id": "recMetadata"},
+                "tool_input": {
+                    "record_id": "recMetadata",
+                    "task_id": "",
+                },
             },
         )
         self.assertEqual(
@@ -2994,7 +3017,10 @@ class LarkEventsTest(unittest.TestCase):
                 "invocation_id": invocation_id,
                 "grant": "grant_metadata",
                 "tool_name": "get_task",
-                "arguments": {"record_id": "recMetadata"},
+                "arguments": {
+                    "record_id": "recMetadata",
+                    "task_id": "",
+                },
             },
         )
 

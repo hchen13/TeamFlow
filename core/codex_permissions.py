@@ -13,6 +13,7 @@ TEAMFLOW_PLUGIN_ID = "teamflow@teamflow"
 TEAMFLOW_MCP_SERVER = "teamflow"
 TEAMFLOW_MCP_TOOLS = (
     "get_assignment",
+    "list_tasks",
     "list_available_tasks",
     "get_task",
     "claim_task",

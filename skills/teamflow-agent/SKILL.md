@@ -27,6 +27,7 @@ description: Use when a Codex session registered as a TeamFlow agent needs to in
 ## 通用纪律
 
 - **TeamFlow MCP 是读写看板的唯一接口。** 不要降级调用 Lark CLI、飞书 API 或底层多维表格接口，即使 MCP 报错也不要绕过。
+- **协调职责维护全局视角。** 当前 workflow 的协调职责用 `list_tasks` 查看工作区全部卡片或按状态、职责、任务 ID 筛选；这只是只读总览，不代表卡片可认领。用户提供任务 ID 时可直接用 `get_task(task_id=...)` 读取完整卡片。
 - **通知不等于认领。** 收到可执行任务通知后，先用 `get_task` 读完整卡片（必要时用 `list_available_tasks` 查看队列），确认自己要亲自执行，才调用 `claim_task`。只有工具返回成功，任务才归当前 Agent。
 - **工具拒绝时保留结构化错误。** 错误里包含当前状态、失败原因、合法字段、合法选项和可执行下一步；按它修正后重试，不要换一条路径绕过规则。
 - **交接后立即结束 turn。** 路由、提交、评审或转交成功后不要轮询卡片等待其他 Agent。后续需要当前职责处理时，等待新的 TeamFlow 通知。

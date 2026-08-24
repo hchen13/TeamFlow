@@ -6,7 +6,7 @@ from typing import Any
 
 from .config import resolve_workspace_paths
 from .db import bootstrap_workspace, connect
-from .lark_board import get_lark_task, upsert_lark_task
+from .lark_board import get_lark_task, list_lark_tasks, upsert_lark_task
 from .workflow import same_value, workflow_definition_for_assignment
 from .workflow_contract import (
     ACTION_TO_TOOL,
@@ -93,13 +93,179 @@ def list_available_tasks(assignment: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "count": len(tasks), "tasks": tasks}
 
 
-def get_task(assignment: dict[str, Any], *, record_id: str) -> dict[str, Any]:
-    record_id = normalize_record_id(record_id)
-    task = get_lark_task(assignment["workspace_root"], record_id=record_id)["task"]
+def list_tasks(
+    assignment: dict[str, Any],
+    *,
+    status: str | None = None,
+    role: str | None = None,
+    task_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    definition = _definition(assignment)
+    coordinator_role = str(definition["coordinator_role"])
+    if assignment["role_key"] != coordinator_role:
+        return _read_error(
+            code="coordinator_required",
+            category="permission",
+            message="只有当前 workflow 的协调职责可以读取完整任务列表。",
+            details={
+                "coordinator_role": coordinator_role,
+                "caller_role": assignment["role_key"],
+            },
+        )
+
+    statuses = [state["key"] for state in definition["lifecycle"]["states"]]
+    roles = [item["key"] for item in definition["roles"]]
+    status = str(status or "").strip() or None
+    role = str(role or "").strip() or None
+    task_id = str(task_id or "").strip() or None
+    if status and status not in statuses:
+        return _read_error(
+            code="invalid_status",
+            message=f"status 必须是当前 workflow 的合法状态：{', '.join(statuses)}。",
+            details={"allowed_values": statuses, "received": status},
+        )
+    if role and role not in roles:
+        return _read_error(
+            code="invalid_role",
+            message=f"role 必须是当前 workflow 的合法职责：{', '.join(roles)}。",
+            details={"allowed_values": roles, "received": role},
+        )
+    if not 1 <= limit <= 200 or offset < 0:
+        return _read_error(
+            code="invalid_pagination",
+            message="limit 必须在 1 到 200 之间，offset 必须大于或等于 0。",
+            details={"limit": limit, "offset": offset},
+        )
+
+    tasks = []
+    skipped = 0
+    has_more = False
+    for task in _board_tasks(assignment["workspace_root"]):
+        if status and task.get("status") != status:
+            continue
+        if role and task.get("role") != role:
+            continue
+        if task_id and not _same_task_id(task.get("task_id"), task_id):
+            continue
+        if skipped < offset:
+            skipped += 1
+            continue
+        if len(tasks) == limit:
+            has_more = True
+            break
+        tasks.append(_task_summary(task))
+    return {
+        "ok": True,
+        "count": len(tasks),
+        "tasks": tasks,
+        "limit": limit,
+        "offset": offset,
+        "has_more": has_more,
+        "filters": {"status": status, "role": role, "task_id": task_id},
+    }
+
+
+def get_task(
+    assignment: dict[str, Any],
+    *,
+    record_id: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    record_id = str(record_id or "").strip()
+    task_id = str(task_id or "").strip()
+    if bool(record_id) == bool(task_id):
+        return _read_error(
+            code="task_reference_required",
+            message="record_id 和 task_id 必须且只能提供一个。",
+            details={"provided": [
+                key
+                for key, value in (("record_id", record_id), ("task_id", task_id))
+                if value
+            ]},
+        )
+    if record_id:
+        record_id = normalize_record_id(record_id)
+        task = get_lark_task(
+            assignment["workspace_root"],
+            record_id=record_id,
+        )["task"]
+    else:
+        matches = [
+            task
+            for task in _board_tasks(assignment["workspace_root"])
+            if _same_task_id(task.get("task_id"), task_id)
+        ]
+        if not matches:
+            return _read_error(
+                code="task_not_found",
+                message=f"当前工作区中没有任务 ID 为 {task_id} 的卡片。",
+                details={"task_id": task_id},
+            )
+        if len(matches) > 1:
+            return _read_error(
+                code="task_id_not_unique",
+                message=f"任务 ID {task_id} 对应多张卡片，无法安全定位。",
+                details={
+                    "task_id": task_id,
+                    "record_ids": [task.get("record_id") for task in matches],
+                },
+            )
+        task = matches[0]
     return {
         "ok": True,
         "task": task,
         "available_actions": available_task_actions(assignment, task),
+    }
+
+
+def _board_tasks(workspace_root: str):
+    source_offset = 0
+    while True:
+        page = list_lark_tasks(workspace_root, limit=200, offset=source_offset)
+        tasks = page.get("tasks") if isinstance(page.get("tasks"), list) else []
+        yield from tasks
+        if not page.get("has_more") or not tasks:
+            return
+        source_offset += len(tasks)
+
+
+def _same_task_id(value: Any, expected: str) -> bool:
+    return str(value or "").strip().casefold() == expected.strip().casefold()
+
+
+def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "record_id": task.get("record_id"),
+        "task_id": task.get("task_id"),
+        "title": task.get("title"),
+        "priority": task.get("priority"),
+        "type": task.get("type"),
+        "status": task.get("status"),
+        "role": task.get("role"),
+        "agent": task.get("agent"),
+        "agent_id": task.get("agent_id"),
+        "delivery_mode": task.get("delivery_mode"),
+    }
+
+
+def _read_error(
+    *,
+    code: str,
+    message: str,
+    details: dict[str, Any],
+    category: str = "validation",
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": {
+            "category": category,
+            "code": code,
+            "message": message,
+            "retryable": False,
+            "details": details,
+        },
     }
 
 

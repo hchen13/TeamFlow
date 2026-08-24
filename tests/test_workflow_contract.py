@@ -38,6 +38,7 @@ class WorkflowContractTest(unittest.TestCase):
             TOOL_NAMES,
             {
                 "get_assignment",
+                "list_tasks",
                 "list_available_tasks",
                 "get_task",
                 *ACTION_TO_TOOL.values(),
