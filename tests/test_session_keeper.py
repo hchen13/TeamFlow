@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
+import sqlite3
 import struct
 import tempfile
 import threading
@@ -405,6 +406,14 @@ class RegisteredSessionsTest(unittest.TestCase):
 
         self.assertEqual(db_module.registered_codex_sessions(str(missing)), set())
         self.assertFalse(db_module.resolve_workspace_paths(str(missing)).db_path.exists())
+
+    def test_a_read_failure_is_not_misreported_as_an_empty_registry(self):
+        with patch(
+            "core.db.sqlite3.connect",
+            side_effect=sqlite3.OperationalError("database is temporarily unavailable"),
+        ):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "temporarily unavailable"):
+                db_module.registered_codex_sessions(self.workspace)
 
 
 if __name__ == "__main__":

@@ -103,10 +103,7 @@ def registered_codex_sessions(workspace: str | None) -> set[str]:
     paths = resolve_workspace_paths(workspace)
     if not paths.db_path.exists():
         return set()
-    try:
-        conn = sqlite3.connect(f"file:{quote(str(paths.db_path))}?mode=ro", uri=True, timeout=5)
-    except sqlite3.Error:
-        return set()
+    conn = sqlite3.connect(f"file:{quote(str(paths.db_path))}?mode=ro", uri=True, timeout=5)
     try:
         rows = conn.execute(
             """
@@ -119,8 +116,6 @@ def registered_codex_sessions(workspace: str | None) -> set[str]:
             """,
             (str(paths.root),),
         ).fetchall()
-    except sqlite3.Error:
-        return set()
     finally:
         conn.close()
     return {str(row[0]).strip() for row in rows}
