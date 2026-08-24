@@ -472,3 +472,56 @@ class DaemonLifecycleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionKeeperWiringTest(unittest.TestCase):
+    """The keeper starts with the daemon, wakes on workspace changes, and stops on close."""
+
+    def runtime(self):
+        with patch("core.daemon.TeamFlowDaemon.__init__", lambda self: None):
+            runtime = TeamFlowDaemon()
+        runtime.session_keeper = Mock()
+        runtime.monitor = Mock(status=Mock(return_value={"running": True}))
+        return runtime
+
+    def test_the_keeper_only_starts_once_the_daemon_is_listening(self):
+        runtime = self.runtime()
+        runtime.workers = {}
+        runtime.routes = {}
+        runtime.routes_ready = threading.Event()
+        runtime.delivery_wakeup = threading.Event()
+
+        runtime.session_keeper.start.assert_not_called()
+        runtime.finish_startup()
+
+        runtime.session_keeper.start.assert_called_once_with()
+
+    def test_workspace_changes_wake_the_keeper(self):
+        runtime = self.runtime()
+        runtime.workspace_synchronizer = Mock(sync=Mock(return_value={"ok": True}))
+
+        runtime.sync_workspace("/tmp/workspace")
+
+        runtime.session_keeper.wake.assert_called_once_with()
+
+    def test_closing_the_daemon_closes_the_keeper(self):
+        runtime = self.runtime()
+        runtime.stopping = threading.Event()
+        runtime.delivery_wakeup = threading.Event()
+        runtime.sync_lock = threading.RLock()
+        runtime.workers = {}
+        runtime.event_queue = Mock()
+        runtime.monitor.notify_all = Mock()
+        with contextlib.suppress(Exception):
+            runtime.close()
+
+        runtime.session_keeper.close.assert_called_once_with()
+
+    def test_status_reports_the_keeper_without_touching_the_monitor(self):
+        runtime = self.runtime()
+        runtime.session_keeper.snapshot.return_value = {"connected": True, "following": 2}
+
+        status = runtime.status()
+
+        self.assertEqual(status["running"], True)
+        self.assertEqual(status["session_keeper"]["following"], 2)

@@ -33,6 +33,7 @@ from .codex import (
     queued_codex_message_exists,
     stop_codex_turn,
 )
+from .codex_ipc import CodexIpcConnection
 from .codex_permissions import (
     TEAMFLOW_MCP_TOOLS,
     inspect_teamflow_mcp_authorization,
@@ -52,7 +53,7 @@ from .daemon_ipc import (
     read_response as _ipc_read_response,
     request as _ipc_request,
 )
-from .db import now
+from .db import inspect_workspace, now
 from .delivery_runtime import DeliveryRuntime
 from .event_runtime import EventRuntime
 from .global_db import (
@@ -82,6 +83,7 @@ from .lark_events import (
     save_listener_result,
 )
 from .lark_listener_verifier import LarkListenerVerifier
+from .session_keeper import SessionKeeper
 from .lark_worker_runtime import (
     LarkWorkerRuntime,
     lark_app_worker as _lark_app_worker,
@@ -262,6 +264,12 @@ class TeamFlowDaemon:
                 self._delivery_turn_is_current(assignment, **kwargs)
             ),
         )
+        self.session_keeper = SessionKeeper(
+            desired_sessions=self._keeper_sessions,
+            connect=lambda: CodexIpcConnection.connect(lightweight=True),
+            stopping=self.stopping,
+            emit_log=lambda message, fields: _emit_log(message, fields=fields),
+        )
         self.tool_dispatcher = TeamFlowToolDispatcher(
             resolve=lambda name: globals()[name],
             runtime_facts=self._task_runtime_facts,
@@ -371,6 +379,19 @@ class TeamFlowDaemon:
                 if workspace_enabled(root)
             ]
 
+    def _keeper_sessions(self) -> set[str]:
+        with self.sync_lock:
+            roots = [root for root in self.routes if workspace_enabled(root)]
+        sessions: set[str] = set()
+        for root in roots:
+            for agent in inspect_workspace(root).get("agents") or []:
+                if agent.get("harness_type") != "codex":
+                    continue
+                session_id = str(agent.get("session_id") or "").strip()
+                if session_id:
+                    sessions.add(session_id)
+        return sessions
+
     def _reserved_delivery_sessions(self) -> set[str]:
         reserved: set[str] = set()
         for root in registered_workspaces(enabled_only=True):
@@ -405,11 +426,13 @@ class TeamFlowDaemon:
         identity_id: str | None = None,
         reconcile: bool = True,
     ) -> dict[str, Any]:
-        return self.workspace_synchronizer.sync(
+        synced = self.workspace_synchronizer.sync(
             workspace,
             identity_id=identity_id,
             reconcile=reconcile,
         )
+        self.session_keeper.wake()
+        return synced
 
     def enable_workspace(self, workspace: str | None, *, identity_id: str | None = None) -> dict[str, Any]:
         root = register_workspace(workspace, enabled=True)
@@ -423,12 +446,14 @@ class TeamFlowDaemon:
                 context = self.routes.pop(root, None)
                 if context:
                     self._stop_unused_app(context)
+        self.session_keeper.wake()
         return {"ok": True, "enabled": False, "workspace_root": root, "daemon_pid": os.getpid()}
 
     def finish_startup(self) -> None:
         _emit_log("DAEMON LISTENING", fields={"apps": len(self.workers), "workspaces": len(self.routes)})
         self.routes_ready.set()
         self.delivery_wakeup.set()
+        self.session_keeper.start()
 
     def release_ephemeral_workspace(self, workspace: str | None) -> None:
         root = str(resolve_workspace_paths(workspace).root)
@@ -438,6 +463,7 @@ class TeamFlowDaemon:
             context = self.routes.pop(root, None)
             if context:
                 self._stop_unused_app(context)
+        self.session_keeper.wake()
 
     def verify_workspace(self, workspace: str | None, *, identity_id: str | None = None) -> dict[str, Any]:
         return self.listener_verifier.verify(
@@ -470,7 +496,7 @@ class TeamFlowDaemon:
         self.monitor.publish(app_key, payload)
 
     def status(self) -> dict[str, Any]:
-        return self.monitor.status()
+        return {**self.monitor.status(), "session_keeper": self.session_keeper.snapshot()}
 
     def assignment_context(
         self,
@@ -608,6 +634,7 @@ class TeamFlowDaemon:
     def close(self) -> None:
         self.stopping.set()
         self.delivery_wakeup.set()
+        self.session_keeper.close()
         self.monitor.notify_all()
         with self.sync_lock:
             for worker in self.workers.values():

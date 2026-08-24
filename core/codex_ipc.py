@@ -55,9 +55,18 @@ class CodexTurnAcceptanceUnknown(ValueError):
 
 
 class CodexIpcConnection:
-    def __init__(self, connection: socket.socket, client_id: str) -> None:
+    def __init__(
+        self,
+        connection: socket.socket,
+        client_id: str,
+        *,
+        lightweight: bool = False,
+    ) -> None:
         self.connection = connection
         self.client_id = client_id
+        # A lightweight connection only holds follows; it never reads stream content, so it
+        # keeps no per-thread history and cannot grow with the number of turns.
+        self.lightweight = lightweight
         self.responses: dict[str, dict[str, Any]] = {}
         self.followers: dict[str, set[str]] = {}
         self.disconnected_clients: set[str] = set()
@@ -66,7 +75,7 @@ class CodexIpcConnection:
         self.owner_client_id: str | None = None
 
     @classmethod
-    def connect(cls) -> CodexIpcConnection:
+    def connect(cls, *, lightweight: bool = False) -> CodexIpcConnection:
         path = codex_ipc_path()
         try:
             metadata = os.stat(path)
@@ -92,7 +101,7 @@ class CodexIpcConnection:
                 "Codex client and TeamFlow will retry automatically"
             ) from error
         try:
-            client = cls(connection, "initializing-client")
+            client = cls(connection, "initializing-client", lightweight=lightweight)
             request_id = str(uuid.uuid4())
             client._send({
                 "type": "request",
@@ -120,19 +129,29 @@ class CodexIpcConnection:
             connection.close()
             raise
 
-    def follow(self, thread_id: str) -> None:
-        if thread_id in self.following_threads:
+    def follow(
+        self,
+        thread_id: str,
+        *,
+        force: bool = False,
+        target_client_ids: list[str] | None = None,
+    ) -> None:
+        if thread_id in self.following_threads and not force:
             return
-        self.streams.setdefault(thread_id, CodexThreadStream())
+        if not self.lightweight:
+            self.streams.setdefault(thread_id, CodexThreadStream())
+        params: dict[str, Any] = {
+            "conversationId": thread_id,
+            "hostId": "local",
+            "following": True,
+        }
+        if target_client_ids:
+            params["targetClientIds"] = list(target_client_ids)
         self._send({
             "type": "broadcast",
             "method": "thread-stream-following-changed",
             "sourceClientId": self.client_id,
-            "params": {
-                "conversationId": thread_id,
-                "hostId": "local",
-                "following": True,
-            },
+            "params": params,
             "version": _CODEX_IPC_FOLLOWING_VERSION,
         })
         self.following_threads.add(thread_id)
@@ -425,7 +444,7 @@ class CodexIpcConnection:
                 raise CodexIpcUnavailable("Codex client IPC request timed out")
             self._receive_once(min(0.5, remaining))
 
-    def _receive_once(self, timeout: float) -> None:
+    def _receive_once(self, timeout: float) -> dict[str, Any] | None:
         ready, _, _ = select.select([self.connection], [], [], timeout)
         if not ready:
             return
@@ -433,36 +452,38 @@ class CodexIpcConnection:
         message_type = message.get("type")
         if message_type == "response":
             self.responses[str(message.get("requestId") or "")] = message
-            return
+            return message
         if message_type == "client-discovery-request":
             self._send({
                 "type": "client-discovery-response",
                 "requestId": message.get("requestId"),
                 "response": {"canHandle": False},
             })
-            return
+            return message
         if message_type != "broadcast":
-            return
+            return message
         method = message.get("method")
         params = message.get("params") or {}
         source_client_id = str(message.get("sourceClientId") or "")
         if method == "thread-stream-following-changed":
             thread_id = str(params.get("conversationId") or "")
             if source_client_id == self.client_id:
-                return
+                return message
             if params.get("following"):
                 self.followers.setdefault(thread_id, set()).add(source_client_id)
             else:
                 self.followers.setdefault(thread_id, set()).discard(source_client_id)
-            return
+            return message
         if method == "client-status-changed" and params.get("status") == "disconnected":
             disconnected = str(params.get("clientId") or source_client_id)
             self.disconnected_clients.add(disconnected)
             for followers in self.followers.values():
                 followers.discard(disconnected)
-            return
+            return message
         if method != "thread-stream-state-changed":
-            return
+            return message
+        if self.lightweight:
+            return message
         if message.get("version") != _CODEX_IPC_STREAM_VERSION:
             raise ValueError(
                 f"unsupported Codex IPC stream version: {message.get('version')}"
@@ -473,6 +494,7 @@ class CodexIpcConnection:
             if change.get("type") == "snapshot" and source_client_id:
                 self.owner_client_id = source_client_id
             self.streams.setdefault(thread_id, CodexThreadStream()).apply(change)
+        return message
 
     def _send(self, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode()
