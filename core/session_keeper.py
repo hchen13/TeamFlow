@@ -5,9 +5,10 @@ import time
 from typing import Any, Callable
 
 
-# ChatGPT Desktop drops a disconnected client's followers after followerReconnectGraceMs
-# (5000ms). Landing a reconnect inside that window keeps the owner's inactivity clock from
-# ever starting, so the first attempts are deliberately dense before settling to a low rate.
+# A plain client disconnect drops this client's follows at once. The 5000ms
+# followerReconnectGraceMs only covers an IPC connection reset, during which the owner holds
+# the follows as pending. Reconnecting inside it is what avoids restarting the owner's
+# inactivity clock, so the first attempts are dense before settling to a low rate.
 _RECONNECT_DELAYS = (0.0, 0.25, 0.5, 1.0, 2.0)
 _RETRY_INTERVAL = 5.0
 _DRAIN_TIMEOUT = 0.5
@@ -109,6 +110,8 @@ class SessionKeeper:
             desired = set(self.desired)
         if self.connection is None and not self._open():
             return self._reconnect_delay()
+        if self._stopping():
+            return 0.0
         self._apply(desired)
         self._drain()
         return 0.0
@@ -126,6 +129,14 @@ class SessionKeeper:
         except Exception as error:
             self.attempt += 1
             self._fail(error)
+            return False
+        if self._stopping():
+            # close() ran while connect() was blocked: this connection was never announced,
+            # so it is dropped without a single follow.
+            try:
+                connection.close()
+            except Exception:
+                pass
             return False
         with self.lock:
             self.connection = connection
@@ -149,11 +160,20 @@ class SessionKeeper:
         with self.lock:
             self.following = set(desired)
 
-    def _redeclare(self, sessions: set[str]) -> None:
+    def _redeclare(
+        self,
+        sessions: set[str],
+        *,
+        target_client_ids: list[str] | None = None,
+    ) -> None:
         with self.lock:
             wanted = sorted(sessions & self.desired)
         for session_id in wanted:
-            self.connection.follow(session_id, force=True)
+            self.connection.follow(
+                session_id,
+                force=True,
+                target_client_ids=target_client_ids,
+            )
 
     def _drain(self) -> None:
         deadline = time.monotonic() + _DRAIN_TIMEOUT
@@ -177,10 +197,14 @@ class SessionKeeper:
         if method == "ipc-connection-reset":
             self._redeclare(set(self.desired))
             return
-        if method == "thread-stream-following-status-requested":
-            session_id = str(params.get("conversationId") or params.get("threadId") or "")
-            if session_id:
-                self._redeclare({session_id})
+        if method != "thread-stream-following-status-requested":
+            return
+        if message.get("version") != 1 or params.get("hostId") != "local":
+            return
+        source_client_id = str(message.get("sourceClientId") or "").strip()
+        session_id = str(params.get("conversationId") or params.get("threadId") or "").strip()
+        if source_client_id and session_id:
+            self._redeclare({session_id}, target_client_ids=[source_client_id])
 
     def _disconnect(self, *, unfollow: bool) -> None:
         with self.lock:

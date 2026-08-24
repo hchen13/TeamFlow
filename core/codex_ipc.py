@@ -140,20 +140,20 @@ class CodexIpcConnection:
             return
         if not self.lightweight:
             self.streams.setdefault(thread_id, CodexThreadStream())
-        params: dict[str, Any] = {
-            "conversationId": thread_id,
-            "hostId": "local",
-            "following": True,
-        }
-        if target_client_ids:
-            params["targetClientIds"] = list(target_client_ids)
-        self._send({
+        payload: dict[str, Any] = {
             "type": "broadcast",
             "method": "thread-stream-following-changed",
             "sourceClientId": self.client_id,
-            "params": params,
+            "params": {
+                "conversationId": thread_id,
+                "hostId": "local",
+                "following": True,
+            },
             "version": _CODEX_IPC_FOLLOWING_VERSION,
-        })
+        }
+        if target_client_ids:
+            payload["targetClientIds"] = list(target_client_ids)
+        self._send(payload)
         self.following_threads.add(thread_id)
 
     def unfollow(self, thread_id: str) -> None:
@@ -462,6 +462,10 @@ class CodexIpcConnection:
             return message
         if message_type != "broadcast":
             return message
+        if self.lightweight:
+            # The keeper reads nothing but the envelope, so no follower, disconnect or stream
+            # bookkeeping happens here and the connection cannot grow with what it observes.
+            return message
         method = message.get("method")
         params = message.get("params") or {}
         source_client_id = str(message.get("sourceClientId") or "")
@@ -481,8 +485,6 @@ class CodexIpcConnection:
                 followers.discard(disconnected)
             return message
         if method != "thread-stream-state-changed":
-            return message
-        if self.lightweight:
             return message
         if message.get("version") != _CODEX_IPC_STREAM_VERSION:
             raise ValueError(

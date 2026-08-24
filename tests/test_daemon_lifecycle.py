@@ -470,10 +470,6 @@ class DaemonLifecycleTest(unittest.TestCase):
         raise AssertionError("timed out waiting for the daemon to start")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SessionKeeperWiringTest(unittest.TestCase):
     """The keeper starts with the daemon, wakes on workspace changes, and stops on close."""
 
@@ -510,12 +506,17 @@ class SessionKeeperWiringTest(unittest.TestCase):
         runtime.delivery_wakeup = threading.Event()
         runtime.sync_lock = threading.RLock()
         runtime.workers = {}
+        runtime.routes = {}
         runtime.event_queue = Mock()
+        runtime.event_thread = Mock(is_alive=Mock(return_value=False))
+        runtime.delivery_thread = Mock(is_alive=Mock(return_value=False))
+        runtime.delivery_workers = {}
         runtime.monitor.notify_all = Mock()
-        with contextlib.suppress(Exception):
-            runtime.close()
+
+        runtime.close()
 
         runtime.session_keeper.close.assert_called_once_with()
+        self.assertTrue(runtime.stopping.is_set())
 
     def test_status_reports_the_keeper_without_touching_the_monitor(self):
         runtime = self.runtime()
@@ -525,3 +526,7 @@ class SessionKeeperWiringTest(unittest.TestCase):
 
         self.assertEqual(status["running"], True)
         self.assertEqual(status["session_keeper"]["following"], 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

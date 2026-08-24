@@ -53,7 +53,7 @@ from .daemon_ipc import (
     read_response as _ipc_read_response,
     request as _ipc_request,
 )
-from .db import inspect_workspace, now
+from .db import now, registered_codex_sessions
 from .delivery_runtime import DeliveryRuntime
 from .event_runtime import EventRuntime
 from .global_db import (
@@ -384,12 +384,7 @@ class TeamFlowDaemon:
             roots = [root for root in self.routes if workspace_enabled(root)]
         sessions: set[str] = set()
         for root in roots:
-            for agent in inspect_workspace(root).get("agents") or []:
-                if agent.get("harness_type") != "codex":
-                    continue
-                session_id = str(agent.get("session_id") or "").strip()
-                if session_id:
-                    sessions.add(session_id)
+            sessions.update(registered_codex_sessions(root))
         return sessions
 
     def _reserved_delivery_sessions(self) -> set[str]:

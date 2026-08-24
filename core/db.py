@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 from .codex import (
     codex_thread_is_permanently_unavailable,
@@ -91,6 +91,39 @@ def init_workspace(workspace: str | None, display_name: str | None = None, write
         "settings": settings,
         "gitignore_updated": gitignore_updated,
     }
+
+
+def registered_codex_sessions(workspace: str | None) -> set[str]:
+    """Session ids for one workspace, read strictly read-only.
+
+    The keeper polls this on a timer, so it opens the file with mode=ro and its own
+    connection: it must never migrate, never sync workflow definitions, and never bring a
+    database into existence as a side effect of asking who is registered.
+    """
+    paths = resolve_workspace_paths(workspace)
+    if not paths.db_path.exists():
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{quote(str(paths.db_path))}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return set()
+    try:
+        rows = conn.execute(
+            """
+            SELECT agents.session_id
+            FROM agents
+            JOIN workspaces ON workspaces.id = agents.workspace_id
+            WHERE workspaces.root_path = ?
+              AND agents.harness_type = 'codex'
+              AND TRIM(COALESCE(agents.session_id, '')) != ''
+            """,
+            (str(paths.root),),
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+    finally:
+        conn.close()
+    return {str(row[0]).strip() for row in rows}
 
 
 def inspect_workspace(workspace: str | None) -> dict[str, Any]:
