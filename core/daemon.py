@@ -19,15 +19,18 @@ from .agent_runtime import (
     mark_agent_context_recovery_pending,
 )
 from .codex import (
+    cancel_codex_queued_message,
     codex_delivery_error_is_terminal,
     codex_session_has_owner,
     codex_thread_is_permanently_unavailable,
     codex_turn,
     codex_turn_by_client_message_id,
     codex_turn_completed,
+    codex_turn_id_by_client_message_id,
     codex_turn_unresolved_teamflow_mcp_failures,
     read_codex_thread,
-    run_codex_turn,
+    run_codex_delivery_turn,
+    queued_codex_message_exists,
     stop_codex_turn,
 )
 from .codex_permissions import (
@@ -274,7 +277,7 @@ class TeamFlowDaemon:
             contexts=self._delivery_contexts,
             reserved_sessions=self._reserved_delivery_sessions,
             get_task=lambda *args, **kwargs: get_lark_task(*args, **kwargs),
-            run_turn=lambda *args, **kwargs: run_codex_turn(
+            run_turn=lambda *args, **kwargs: run_codex_delivery_turn(
                 *args,
                 required_mcp_tools=TEAMFLOW_MCP_TOOLS,
                 **kwargs,
@@ -292,6 +295,9 @@ class TeamFlowDaemon:
                 codex_delivery_error_is_terminal(error)
             ),
             turn_completed=codex_turn_completed,
+            turn_id_for_client_message=codex_turn_id_by_client_message_id,
+            cancel_queued_message=cancel_codex_queued_message,
+            queued_message_exists=queued_codex_message_exists,
             session_has_owner=lambda session_id: codex_session_has_owner(
                 session_id,
                 stop_event=self.stopping,
@@ -388,6 +394,8 @@ class TeamFlowDaemon:
             context,
             turn_id=turn_id,
             agent_id=str(assignment["agent_id"]),
+            session_id=str(assignment.get("session_id") or "") or None,
+            turn_id_for_client_message=codex_turn_id_by_client_message_id,
         )
 
     def sync_workspace(

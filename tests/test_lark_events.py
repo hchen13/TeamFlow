@@ -1079,6 +1079,7 @@ class LarkEventsTest(unittest.TestCase):
             _prompt,
             *,
             client_message_id,
+            on_queued,
             on_started,
             stop_event,
         ):
@@ -3102,6 +3103,7 @@ class LarkEventsTest(unittest.TestCase):
             prompt,
             *,
             client_message_id,
+            on_queued,
             on_started,
             stop_event,
             required_mcp_tools,
@@ -3130,7 +3132,7 @@ class LarkEventsTest(unittest.TestCase):
                         "description": "Latest task snapshot",
                     }
                 }),
-                patch("core.daemon.run_codex_turn", side_effect=complete_turn),
+                patch("core.daemon.run_codex_delivery_turn", side_effect=complete_turn),
                 redirect_stdout(output),
             ):
                 runtime._execute_task_delivery(context, delivery)
@@ -3192,7 +3194,7 @@ class LarkEventsTest(unittest.TestCase):
                         "status": "backlog",
                     }
                 }),
-                patch("core.daemon.run_codex_turn") as run_turn,
+                patch("core.daemon.run_codex_delivery_turn") as run_turn,
                 redirect_stdout(output),
             ):
                 runtime._execute_task_delivery(context, delivery)
@@ -3249,6 +3251,7 @@ class LarkEventsTest(unittest.TestCase):
             prompt,
             *,
             client_message_id,
+            on_queued,
             on_started,
             stop_event,
             required_mcp_tools,
@@ -3265,7 +3268,7 @@ class LarkEventsTest(unittest.TestCase):
                 patch("core.daemon.get_lark_task", return_value={
                     "task": json.loads(delivery["after_json"])
                 }),
-                patch("core.daemon.run_codex_turn", side_effect=interrupt_turn),
+                patch("core.daemon.run_codex_delivery_turn", side_effect=interrupt_turn),
                 redirect_stdout(output),
             ):
                 runtime._execute_task_delivery(context, delivery)
@@ -3442,7 +3445,7 @@ class LarkEventsTest(unittest.TestCase):
                     "task": json.loads(delivery["after_json"])
                 }),
                 patch(
-                    "core.daemon.run_codex_turn",
+                    "core.daemon.run_codex_delivery_turn",
                     side_effect=ValueError("Codex agent is busy"),
                 ),
                 redirect_stdout(output),
@@ -3521,7 +3524,7 @@ class LarkEventsTest(unittest.TestCase):
                     "task": json.loads(delivery["after_json"])
                 }),
                 patch(
-                    "core.daemon.run_codex_turn",
+                    "core.daemon.run_codex_delivery_turn",
                     side_effect=CodexIpcNoOwner("Session is not loaded"),
                 ),
                 redirect_stdout(output),
@@ -3682,7 +3685,7 @@ class LarkEventsTest(unittest.TestCase):
                 patch("core.daemon.get_lark_task", return_value={
                     "task": json.loads(delivery["after_json"])
                 }),
-                patch("core.daemon.run_codex_turn") as run_turn,
+                patch("core.daemon.run_codex_delivery_turn") as run_turn,
                 redirect_stdout(output),
             ):
                 runtime._execute_task_delivery(context, delivery)
@@ -4154,7 +4157,7 @@ class LarkEventsTest(unittest.TestCase):
                     "task": json.loads(delivery["after_json"])
                 }),
                 patch(
-                    "core.daemon.run_codex_turn",
+                    "core.daemon.run_codex_delivery_turn",
                     side_effect=ValueError("no rollout found for thread id session_deleted"),
                 ),
                 redirect_stdout(io.StringIO()),

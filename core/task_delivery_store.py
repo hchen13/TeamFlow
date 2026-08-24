@@ -61,28 +61,15 @@ def recover_retryable_failed_task_deliveries(
     with connect(context.db_path) as conn:
         rows = conn.execute(
             """
-            SELECT delivery.id, delivery.event_key
+            SELECT delivery.id, delivery.event_key, delivery.turn_id,
+                   delivery.last_error
             FROM task_event_deliveries AS delivery
             WHERE delivery.status = 'failed'
               AND delivery.turn_status IN (
                 'interrupted', 'cancelled', 'canceled', 'unconfirmed'
               )
-              AND (
-                SELECT COUNT(*)
-                FROM task_delivery_turns AS delivery_turn
-                WHERE delivery_turn.delivery_id = delivery.id
-              ) < ?
-              AND NOT EXISTS (
-                SELECT 1
-                FROM task_events AS event
-                JOIN task_executions AS execution
-                  ON execution.record_id = event.record_id
-                WHERE event.event_key = delivery.event_key
-                  AND execution.state = 'active'
-              )
             ORDER BY delivery.completed_at, delivery.id
             """,
-            (max_turn_attempts,),
         ).fetchall()
         for row in rows:
             event = conn.execute(
@@ -91,6 +78,45 @@ def recover_retryable_failed_task_deliveries(
             ).fetchone()
             current = current_dispatch(conn, event, states) if event else None
             if not current or current["event"]["event_key"] != row["event_key"]:
+                reason = (
+                    f"{row['last_error'] or 'delivery failed'}; "
+                    "task no longer needs this delivery"
+                )
+                if row["turn_id"]:
+                    stop_active_delivery_execution(
+                        conn,
+                        delivery_id=int(row["id"]),
+                        turn_id=str(row["turn_id"]),
+                        reason=reason,
+                    )
+                conn.execute(
+                    """
+                    UPDATE task_event_deliveries
+                    SET status = 'canceled', last_error = ?,
+                        next_attempt_at = NULL,
+                        completed_at = COALESCE(completed_at, ?)
+                    WHERE id = ? AND status = 'failed'
+                    """,
+                    (reason, now(), row["id"]),
+                )
+                continue
+            turn_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM task_delivery_turns
+                WHERE delivery_id = ?
+                """,
+                (row["id"],),
+            ).fetchone()[0]
+            if int(turn_count) >= max_turn_attempts:
+                continue
+            if active_delivery_execution_in(
+                conn,
+                delivery_id=int(row["id"]),
+                workflow_key=context.workflow_key,
+                load_workflow=load_workflow,
+                turn_id=str(row["turn_id"] or "") or None,
+            ) is not None:
                 continue
             cursor = conn.execute(
                 """
@@ -576,6 +602,93 @@ def mark_task_delivery_turn_started(
     return timestamp
 
 
+def _mark_task_delivery_queue_state(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+    state: str,
+    previous_turn_id: str | None = None,
+) -> None:
+    with connect(context.db_path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE task_event_deliveries
+            SET turn_status = ?,
+                next_attempt_at = ?
+            WHERE id = ? AND status = 'processing'
+              AND (
+                (? IS NULL AND turn_id IS NULL)
+                OR (? IS NOT NULL AND turn_id = ?)
+              )
+            """,
+            (
+                state,
+                (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat(),
+                delivery_id,
+                previous_turn_id,
+                previous_turn_id,
+                previous_turn_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("TeamFlow delivery changed before queue acceptance")
+
+
+def mark_task_delivery_queueing(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+    previous_turn_id: str | None = None,
+) -> None:
+    _mark_task_delivery_queue_state(
+        context,
+        delivery_id=delivery_id,
+        state="queueing",
+        previous_turn_id=previous_turn_id,
+    )
+
+
+def mark_task_delivery_queued(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+    previous_turn_id: str | None = None,
+) -> None:
+    _mark_task_delivery_queue_state(
+        context,
+        delivery_id=delivery_id,
+        state="queued",
+        previous_turn_id=previous_turn_id,
+    )
+
+
+def clear_task_delivery_queueing(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+    previous_turn_id: str | None = None,
+) -> None:
+    with connect(context.db_path) as conn:
+        conn.execute(
+            """
+            UPDATE task_event_deliveries
+            SET turn_status = NULL
+            WHERE id = ? AND status = 'processing'
+              AND turn_status = 'queueing'
+              AND (
+                (? IS NULL AND turn_id IS NULL)
+                OR (? IS NOT NULL AND turn_id = ?)
+              )
+            """,
+            (
+                delivery_id,
+                previous_turn_id,
+                previous_turn_id,
+                previous_turn_id,
+            ),
+        )
+
+
 def task_delivery_turn_count(
     context: LarkEventContext,
     *,
@@ -698,24 +811,70 @@ def task_delivery_turn_is_current(
     turn_id: str,
     agent_id: str,
     load_workflow: WorkflowLoader,
+    session_id: str | None = None,
+    turn_id_for_client_message: Callable[[str, str], str | None] | None = None,
 ) -> bool | None:
     with connect(context.db_path) as conn:
-        row = conn.execute(
-            """
-            SELECT delivery.id, delivery.status, delivery.turn_id, event.record_id
-            FROM task_event_deliveries AS delivery
-            JOIN task_events AS event
-              ON event.event_key = delivery.event_key
-            LEFT JOIN task_delivery_turns AS delivery_turn
-              ON delivery_turn.delivery_id = delivery.id
-             AND delivery_turn.turn_id = ?
-            WHERE (delivery.turn_id = ? OR delivery_turn.turn_id IS NOT NULL)
-              AND delivery.agent_id = ?
-            ORDER BY delivery.started_at DESC, delivery.id DESC
-            LIMIT 1
-            """,
-            (turn_id, turn_id, agent_id),
-        ).fetchone()
+        row = _task_delivery_for_turn_in(
+            conn,
+            turn_id=turn_id,
+            agent_id=agent_id,
+        )
+        pending = None
+        if row is None and session_id and turn_id_for_client_message:
+            pending = conn.execute(
+                """
+                SELECT id, turn_id, client_message_id
+                FROM task_event_deliveries
+                WHERE status = 'processing'
+                  AND turn_status IN ('queueing', 'queued')
+                  AND agent_id = ? AND session_id = ?
+                  AND client_message_id IS NOT NULL
+                ORDER BY started_at DESC, id DESC
+                LIMIT 1
+                """,
+                (agent_id, session_id),
+            ).fetchone()
+        if row is None and pending is None:
+            return None
+    if pending is not None:
+        client_message_id = str(pending["client_message_id"] or "")
+        if turn_id_for_client_message(session_id, client_message_id) != turn_id:
+            return None
+        previous_turn_id = str(pending["turn_id"] or "") or None
+        require_execution_rebind = bool(
+            previous_turn_id
+            and task_delivery_has_active_execution(
+                context,
+                delivery_id=int(pending["id"]),
+                load_workflow=load_workflow,
+                turn_id=previous_turn_id,
+            )
+        )
+        try:
+            mark_task_delivery_turn_started(
+                context,
+                delivery_id=int(pending["id"]),
+                turn_id=turn_id,
+                previous_turn_id=(
+                    previous_turn_id if require_execution_rebind else None
+                ),
+                require_execution_rebind=require_execution_rebind,
+            )
+        except ValueError:
+            pass
+        return task_delivery_turn_is_current(
+            context,
+            turn_id=turn_id,
+            agent_id=agent_id,
+            load_workflow=load_workflow,
+        )
+    with connect(context.db_path) as conn:
+        row = _task_delivery_for_turn_in(
+            conn,
+            turn_id=turn_id,
+            agent_id=agent_id,
+        )
         if row is None:
             return None
         if str(row["turn_id"] or "") != turn_id:
@@ -736,6 +895,30 @@ def task_delivery_turn_is_current(
         delivery_id=int(row["id"]),
         load_workflow=load_workflow,
     )
+
+
+def _task_delivery_for_turn_in(
+    conn: Any,
+    *,
+    turn_id: str,
+    agent_id: str,
+) -> Any:
+    return conn.execute(
+        """
+        SELECT delivery.id, delivery.status, delivery.turn_id, event.record_id
+        FROM task_event_deliveries AS delivery
+        JOIN task_events AS event
+          ON event.event_key = delivery.event_key
+        LEFT JOIN task_delivery_turns AS delivery_turn
+          ON delivery_turn.delivery_id = delivery.id
+         AND delivery_turn.turn_id = ?
+        WHERE (delivery.turn_id = ? OR delivery_turn.turn_id IS NOT NULL)
+          AND delivery.agent_id = ?
+        ORDER BY delivery.started_at DESC, delivery.id DESC
+        LIMIT 1
+        """,
+        (turn_id, turn_id, agent_id),
+    ).fetchone()
 
 
 def task_delivery_has_active_execution(
@@ -805,6 +988,17 @@ def cancel_reconciled_task_delivery(
     turn_status: str = "missing",
 ) -> None:
     with connect(context.db_path) as conn:
+        row = conn.execute(
+            "SELECT turn_id FROM task_event_deliveries WHERE id = ?",
+            (delivery_id,),
+        ).fetchone()
+        if row is not None and row["turn_id"]:
+            stop_active_delivery_execution(
+                conn,
+                delivery_id=delivery_id,
+                turn_id=str(row["turn_id"]),
+                reason=reason,
+            )
         conn.execute(
             """
             UPDATE task_event_deliveries
@@ -813,7 +1007,7 @@ def cancel_reconciled_task_delivery(
                 last_error = ?,
                 next_attempt_at = NULL,
                 completed_at = ?
-            WHERE id = ? AND status = 'processing'
+            WHERE id = ? AND status IN ('processing', 'failed')
             """,
             (turn_status, reason, now(), delivery_id),
         )

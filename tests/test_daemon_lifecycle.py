@@ -18,6 +18,7 @@ from core.daemon import (
     ensure_daemon,
     run_daemon,
 )
+from core.daemon_logging import log_dispatch
 from core.delivery_runtime import DeliveryRuntime
 from core.global_db import teamflow_home
 from core.lark_events import LarkEventContext
@@ -83,6 +84,19 @@ class DaemonLifecycleTest(unittest.TestCase):
         if self.held:
             self.held.close()
             self.held = None
+
+    def test_queued_dispatch_is_a_supported_log_state(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            log_dispatch(
+                CONTEXT,
+                "queued",
+                event_id="event-1",
+                task={"task_id": "AQ-0001"},
+                session="session-1",
+            )
+
+        self.assertIn("DISPATCH QUEUED", output.getvalue())
 
     def test_a_replacement_never_starts_while_the_old_daemon_holds_the_lock(self):
         self.hold_lock()

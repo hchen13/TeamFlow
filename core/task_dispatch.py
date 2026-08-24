@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from .lark_events import LarkEventContext
 from .task_delivery_planner import (
@@ -11,6 +11,7 @@ from .task_delivery_store import (
     cancel_reconciled_task_delivery,
     cancel_task_delivery,
     claim_task_deliveries as _claim_task_deliveries,
+    clear_task_delivery_queueing,
     defer_task_delivery_reconciliation,
     due_processing_task_deliveries,
     fail_claimed_task_delivery,
@@ -18,6 +19,8 @@ from .task_delivery_store import (
     has_task_deliveries_waiting_for_permission,
     mark_task_delivery_waiting_for_permission,
     mark_task_delivery_waiting_for_session,
+    mark_task_delivery_queueing,
+    mark_task_delivery_queued,
     mark_task_delivery_turn_started,
     processing_task_delivery_sessions,
     processing_task_delivery_sessions_for_workspace,
@@ -98,12 +101,16 @@ def task_delivery_turn_is_current(
     *,
     turn_id: str,
     agent_id: str,
+    session_id: str | None = None,
+    turn_id_for_client_message: Callable[[str, str], str | None] | None = None,
 ) -> bool | None:
     return _task_delivery_turn_is_current(
         context,
         turn_id=turn_id,
         agent_id=agent_id,
         load_workflow=load_workflow_definition,
+        session_id=session_id,
+        turn_id_for_client_message=turn_id_for_client_message,
     )
 
 
@@ -171,6 +178,7 @@ __all__ = [
     "cancel_reconciled_task_delivery",
     "cancel_task_delivery",
     "claim_task_deliveries",
+    "clear_task_delivery_queueing",
     "defer_task_delivery_reconciliation",
     "due_processing_task_deliveries",
     "fail_claimed_task_delivery",

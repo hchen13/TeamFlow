@@ -182,6 +182,38 @@ def codex_turn_by_client_message_id(
     return None
 
 
+def codex_turn_id_by_client_message_id(
+    thread_id: str,
+    client_message_id: str,
+) -> str | None:
+    rollout_path = _codex_rollout_path(thread_id)
+    if rollout_path is None or not client_message_id:
+        return None
+    found_message = False
+    try:
+        for raw_line in _reverse_lines(rollout_path):
+            if b'"event_msg"' not in raw_line:
+                continue
+            try:
+                record = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            payload = record.get("payload")
+            if record.get("type") != "event_msg" or not isinstance(payload, dict):
+                continue
+            if not found_message:
+                found_message = bool(
+                    payload.get("type") == "user_message"
+                    and str(payload.get("client_id") or "") == client_message_id
+                )
+                continue
+            if payload.get("type") == "task_started" and payload.get("turn_id"):
+                return str(payload["turn_id"])
+    except OSError:
+        return None
+    return None
+
+
 def codex_turn_completed(thread_id: str, turn_id: str) -> bool:
     rollout_path = _codex_rollout_path(thread_id)
     if rollout_path is None or not turn_id:

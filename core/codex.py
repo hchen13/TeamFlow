@@ -29,6 +29,13 @@ from .codex_ipc import (
     stop_codex_ipc_turn,
 )
 from .codex_permissions import require_teamflow_mcp_authorization
+from .codex_queue import (
+    CodexQueueUnsupported,
+    codex_queued_message_exists,
+    delete_codex_queued_message,
+    enqueue_codex_turn,
+    run_codex_queued_turn,
+)
 from .codex_rollout import (
     codex_background_turn_permissions,
     codex_delivery_error_is_terminal,
@@ -40,6 +47,7 @@ from .codex_rollout import (
     codex_turn,
     codex_turn_by_client_message_id,
     codex_turn_completed,
+    codex_turn_id_by_client_message_id,
     codex_turn_unresolved_teamflow_mcp_failures,
 )
 
@@ -154,6 +162,68 @@ def run_codex_turn(
         client_message_id=message_id,
         on_started=on_started,
         stop_event=stop_event,
+    )
+
+
+def run_codex_delivery_turn(
+    thread_id: str,
+    message: str,
+    *,
+    client_message_id: str | None = None,
+    on_queued: Callable[[str], None] | None = None,
+    on_started: Callable[[str], None] | None = None,
+    stop_event: threading.Event | None = None,
+    required_mcp_tools: Iterable[str] = (),
+) -> dict[str, Any]:
+    thread = thread_id.strip()
+    prompt = message.strip()
+    if not thread:
+        raise ValueError("thread_id is required")
+    if not prompt:
+        raise ValueError("message is required")
+
+    message_id = client_message_id or str(uuid.uuid4())
+    required_tools = tuple(required_mcp_tools)
+    if required_tools:
+        require_teamflow_mcp_authorization(required_tools)
+    try:
+        return run_codex_queued_turn(
+            thread,
+            prompt,
+            client_message_id=message_id,
+            enqueue=lambda *args: enqueue_codex_turn(_request, *args),
+            on_queued=on_queued,
+            stop_event=stop_event,
+        )
+    except CodexQueueUnsupported:
+        return _run_codex_ipc_turn(
+            thread,
+            prompt,
+            client_message_id=message_id,
+            on_started=on_started,
+            stop_event=stop_event,
+        )
+
+
+def cancel_codex_queued_message(
+    thread_id: str,
+    client_message_id: str,
+) -> bool:
+    return delete_codex_queued_message(
+        _request,
+        thread_id.strip(),
+        client_message_id.strip(),
+    )
+
+
+def queued_codex_message_exists(
+    thread_id: str,
+    client_message_id: str,
+) -> bool:
+    return codex_queued_message_exists(
+        _request,
+        thread_id.strip(),
+        client_message_id.strip(),
     )
 
 

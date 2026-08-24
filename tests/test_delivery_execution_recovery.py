@@ -13,6 +13,7 @@ from core.agent_runtime import (
     confirm_agent_context,
     mark_agent_context_recovery_pending,
 )
+from core.codex_ipc import CodexIpcNoOwner, CodexTurnAcceptanceUnknown
 from core.codex_rollout import codex_turn_completed
 from core.config import resolve_workspace_paths
 from core.db import (
@@ -29,9 +30,13 @@ from core.task_dispatch import (
     claim_task_deliveries,
     fail_claimed_task_delivery,
     finish_task_delivery,
+    mark_task_delivery_queueing,
+    mark_task_delivery_queued,
+    mark_task_delivery_waiting_for_session,
     mark_task_delivery_turn_started,
     prepare_task_deliveries,
     recover_retryable_failed_task_deliveries,
+    task_delivery_record_id,
     task_delivery_turn_count,
     task_delivery_turn_is_current,
 )
@@ -193,6 +198,20 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 ),
             )
 
+    def advance_to_review(self) -> None:
+        save_task_snapshot(
+            self.context(),
+            record_id="recRecovery",
+            task={
+                **self.ready_task(),
+                "status": "review",
+                "agent": "Recovery TL",
+                "agent_id": "agent_recovery",
+            },
+            source_event_id="evtRecoveryReview",
+            source_revision="3",
+        )
+
     def runtime(self, **overrides) -> DeliveryRuntime:
         values = {
             "sync_lock": threading.RLock(),
@@ -310,6 +329,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             _prompt,
             *,
             client_message_id,
+            on_queued,
             on_started,
             stop_event,
         ):
@@ -336,6 +356,473 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
         self.assertEqual(row["turn_status"], "inProgress")
         self.assertIn("interrupted", row["last_error"])
 
+    def test_queued_delivery_survives_restart_and_binds_once_materialized(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_queued(
+            context,
+            delivery_id=int(delivery["id"]),
+        )
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
+            )
+
+        runtime = self.runtime(
+            read_thread=lambda *_args, **_kwargs: self.fail(
+                "queued reconciliation must not start app-server before materialization"
+            ),
+        )
+        runtime.reconcile(context)
+        with connect(self.db_path) as conn:
+            queued = conn.execute(
+                "SELECT status, turn_status, turn_id FROM task_event_deliveries"
+            ).fetchone()
+            conn.execute(
+                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
+            )
+        self.assertEqual(
+            (queued["status"], queued["turn_status"], queued["turn_id"]),
+            ("processing", "queued", None),
+        )
+
+        runtime = self.runtime(
+            turn_id_for_client_message=lambda *_args: "turn_queued",
+            read_thread=lambda *_args, **_kwargs: {
+                "status": "active",
+                "turns": [{
+                    "id": "turn_queued",
+                    "status": "inProgress",
+                    "items": [{
+                        "type": "userMessage",
+                        "clientId": delivery["client_message_id"],
+                    }],
+                }],
+            },
+        )
+        runtime.reconcile(context)
+        with connect(self.db_path) as conn:
+            started = conn.execute(
+                "SELECT status, turn_status, turn_id FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (started["status"], started["turn_status"], started["turn_id"]),
+            ("processing", "inProgress", "turn_queued"),
+        )
+        self.assertEqual(
+            task_delivery_turn_count(context, delivery_id=int(delivery["id"])),
+            1,
+        )
+
+    def test_queued_rollout_binding_does_not_depend_on_app_server_visibility(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_queued(context, delivery_id=int(delivery["id"]))
+        with connect(self.db_path) as conn:
+            conn.execute("UPDATE task_event_deliveries SET next_attempt_at = NULL")
+
+        self.runtime(
+            turn_id_for_client_message=lambda *_args: "turn_rollout",
+            read_thread=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                ValueError("Desktop-owned turn is not visible to this app-server")
+            ),
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status, turn_id FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (saved["status"], saved["turn_status"], saved["turn_id"]),
+            ("processing", "inProgress", "turn_rollout"),
+        )
+
+    def test_tool_admission_binds_fast_queued_turn_before_handoff(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_queued(context, delivery_id=int(delivery["id"]))
+        mapper = lambda _session, client_id: (
+            "turn_fast" if client_id == delivery["client_message_id"] else None
+        )
+
+        self.assertTrue(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_fast",
+            agent_id="agent_recovery",
+            session_id="session_recovery",
+            turn_id_for_client_message=mapper,
+        ))
+        self.assertEqual(
+            task_delivery_record_id(
+                self.workspace,
+                turn_id="turn_fast",
+                agent_id="agent_recovery",
+            ),
+            "recRecovery",
+        )
+
+        assignment = {
+            "workspace_root": self.workspace,
+            "workflow_key": "software-development",
+            "agent_id": "agent_recovery",
+            "session_id": "session_recovery",
+        }
+        runtime = ToolRuntime(
+            sync_lock=threading.RLock(),
+            assignment_context=lambda **_kwargs: {"assignment": assignment},
+            workspace_active=lambda _workspace: True,
+            invoke_tool=lambda *_args, **_kwargs: {
+                "ok": True,
+                "task": {"record_id": "recRecovery", "status": "review"},
+            },
+            sync_task_activity=lambda *_args, **_kwargs: None,
+            delivery_record_id=lambda assignment, **kwargs: task_delivery_record_id(
+                assignment["workspace_root"],
+                agent_id=assignment["agent_id"],
+                **kwargs,
+            ),
+            delivery_turn_is_current=lambda _assignment, **kwargs: (
+                task_delivery_turn_is_current(
+                    context,
+                    agent_id="agent_recovery",
+                    **kwargs,
+                )
+            ),
+        )
+        grant = runtime.authorize(
+            invocation_id="fast-submit",
+            session_id="session_recovery",
+            cwd=self.workspace,
+            turn_id="turn_fast",
+            tool_name="mcp__teamflow__submit_task",
+            tool_input={"record_id": "recRecovery", "outcome": "completed"},
+        )
+        result = runtime.invoke(
+            invocation_id="fast-submit",
+            grant=grant["grant"],
+            tool_name="submit_task",
+            arguments={"record_id": "recRecovery", "outcome": "completed"},
+        )
+        self.assertEqual(result["turn_control"]["action"], "end_turn")
+
+    def test_queueing_state_recovers_after_daemon_restart(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_queueing(context, delivery_id=int(delivery["id"]))
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries "
+                "SET started_at = '2000-01-01T00:00:00+00:00', next_attempt_at = NULL"
+            )
+
+        self.runtime(
+            queued_message_exists=lambda *_args: True,
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status, client_message_id "
+                "FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (saved["status"], saved["turn_status"]),
+            ("processing", "queued"),
+        )
+        self.assertEqual(saved["client_message_id"], delivery["client_message_id"])
+
+    def test_unconfirmed_queueing_state_retries_once_after_lease(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_queueing(context, delivery_id=int(delivery["id"]))
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries "
+                "SET started_at = '2000-01-01T00:00:00+00:00', next_attempt_at = NULL"
+            )
+
+        self.runtime(
+            queued_message_exists=lambda *_args: False,
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status, client_message_id, attempts "
+                "FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(saved["status"], "retry")
+        self.assertEqual(saved["turn_status"], "unconfirmed")
+        self.assertIsNone(saved["client_message_id"])
+        self.assertEqual(saved["attempts"], 1)
+
+    def test_claimed_continuation_queues_and_rebinds_its_execution(self) -> None:
+        context = self.context()
+        delivery = self.start_delivery()
+        self.claim_execution()
+        finish_task_delivery(
+            context,
+            delivery_id=int(delivery["id"]),
+            result={"ok": False, "status": "interrupted"},
+            error=ValueError("interrupted"),
+            retry=True,
+        )
+        with connect(self.db_path) as conn:
+            conn.execute("UPDATE task_event_deliveries SET next_attempt_at = NULL")
+        continuation = claim_task_deliveries(context)[0]
+
+        def run_turn(
+            _session_id,
+            _prompt,
+            *,
+            client_message_id,
+            on_queued,
+            on_started,
+            stop_event,
+        ):
+            self.assertEqual(client_message_id, continuation["client_message_id"])
+            self.assertIsNotNone(on_started)
+            self.assertFalse(stop_event.is_set())
+            on_queued("queue_continuation")
+            return {"ok": True, "status": "queued", "turn_id": None}
+
+        claimed_task = {
+            **self.ready_task(),
+            "status": "in_progress",
+            "agent": "Recovery TL",
+            "agent_id": "agent_recovery",
+        }
+        self.runtime(
+            run_turn=run_turn,
+            get_task=lambda *_args, **_kwargs: {"task": claimed_task},
+        ).execute(context, continuation)
+        with connect(self.db_path) as conn:
+            queued = conn.execute(
+                "SELECT status, turn_status, turn_id FROM task_event_deliveries"
+            ).fetchone()
+            conn.execute("UPDATE task_event_deliveries SET next_attempt_at = NULL")
+        self.assertEqual(
+            (queued["status"], queued["turn_status"], queued["turn_id"]),
+            ("processing", "queued", "turn_original"),
+        )
+
+        self.runtime(
+            turn_id_for_client_message=lambda *_args: "turn_continuation",
+            read_thread=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                ValueError("Desktop-owned turn is not visible to this app-server")
+            ),
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT turn_status, turn_id FROM task_event_deliveries"
+            ).fetchone()
+            execution = conn.execute(
+                "SELECT state, turn_id FROM task_executions WHERE record_id = ?",
+                ("recRecovery",),
+            ).fetchone()
+        self.assertEqual(
+            (saved["turn_status"], saved["turn_id"]),
+            ("inProgress", "turn_continuation"),
+        )
+        self.assertEqual(
+            (execution["state"], execution["turn_id"]),
+            ("active", "turn_continuation"),
+        )
+
+    def test_daemon_start_recovers_legacy_owner_waiting_delivery_once(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_waiting_for_session(
+            context,
+            delivery_id=int(delivery["id"]),
+            error=CodexIpcNoOwner("not loaded"),
+        )
+        runtime = self.runtime()
+
+        runtime.recover_waiting_sessions_for_queue(context)
+        runtime.recover_waiting_sessions_for_queue(context)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, attempts, turn_id FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (saved["status"], saved["attempts"], saved["turn_id"]),
+            ("retry", 1, None),
+        )
+
+    def test_execute_persists_queue_acceptance_without_retrying(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+
+        def run_turn(
+            _session_id,
+            _prompt,
+            *,
+            client_message_id,
+            on_queued,
+            on_started,
+            stop_event,
+        ):
+            self.assertEqual(client_message_id, delivery["client_message_id"])
+            self.assertIsNotNone(on_started)
+            self.assertFalse(stop_event.is_set())
+            on_queued("queue_accepted")
+            return {
+                "ok": True,
+                "turn_id": None,
+                "status": "queued",
+                "transport": "codex-queue",
+            }
+
+        self.runtime(run_turn=run_turn).execute(context, delivery)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status, turn_id, attempts "
+                "FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (
+                saved["status"],
+                saved["turn_status"],
+                saved["turn_id"],
+                saved["attempts"],
+            ),
+            ("processing", "queued", None, 1),
+        )
+
+    def test_queue_callback_failure_keeps_the_original_delivery_reconcilable(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+
+        def run_turn(_session_id, _prompt, **_kwargs):
+            raise CodexTurnAcceptanceUnknown(
+                "Codex accepted the queue but the callback failed"
+            )
+
+        self.runtime(run_turn=run_turn).execute(context, delivery)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status, turn_id, attempts "
+                "FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (
+                saved["status"],
+                saved["turn_status"],
+                saved["turn_id"],
+                saved["attempts"],
+            ),
+            ("processing", "queueing", None, 1),
+        )
+
+    def test_stale_queued_delivery_is_removed_before_local_cancellation(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_queued(
+            context,
+            delivery_id=int(delivery["id"]),
+        )
+        self.advance_to_review()
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
+            )
+        removed = []
+
+        self.runtime(
+            read_thread=lambda *_args, **_kwargs: self.fail(
+                "a non-materialized queued turn should not start app-server"
+            ),
+            cancel_queued_message=lambda session_id, client_id: (
+                removed.append((session_id, client_id)) or True
+            ),
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(saved["status"], "canceled")
+        self.assertEqual(saved["turn_status"], "missing")
+        self.assertEqual(
+            removed,
+            [("session_recovery", delivery["client_message_id"])],
+        )
+
     def test_interrupted_dispatch_before_claim_stays_reconcilable(self) -> None:
         context = self.context()
         save_task_snapshot(
@@ -353,6 +840,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             _prompt,
             *,
             client_message_id,
+            on_queued,
             on_started,
             stop_event,
         ):
@@ -404,6 +892,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             _prompt,
             *,
             client_message_id,
+            on_queued,
             on_started,
             stop_event,
         ):
@@ -613,6 +1102,80 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             task_delivery_turn_count(context, delivery_id=int(delivery["id"])),
             1,
         )
+
+    def test_stale_interrupted_delivery_is_canceled_after_task_advances(self) -> None:
+        context = self.context()
+        started = self.start_delivery()
+        self.claim_execution()
+        self.advance_to_review()
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
+            )
+        thread = {
+            "status": {"type": "idle"},
+            "turns": [{
+                "id": "turn_original",
+                "status": "interrupted",
+                "items": [{
+                    "type": "userMessage",
+                    "clientId": started["client_message_id"],
+                }],
+            }],
+        }
+
+        self.runtime(
+            read_thread=lambda *_args, **_kwargs: thread,
+            turn_completed=lambda *_args, **_kwargs: True,
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            delivery = conn.execute(
+                "SELECT status, turn_status, last_error FROM task_event_deliveries"
+            ).fetchone()
+            execution = conn.execute(
+                "SELECT state FROM task_executions WHERE record_id = ?",
+                ("recRecovery",),
+            ).fetchone()
+        self.assertEqual(
+            (delivery["status"], delivery["turn_status"]),
+            ("canceled", "interrupted"),
+        )
+        self.assertIn("no longer needs", delivery["last_error"])
+        self.assertEqual(execution["state"], "stopped")
+
+    def test_restart_cancels_stale_failed_delivery_and_execution(self) -> None:
+        context = self.context()
+        delivery = self.start_delivery()
+        self.claim_execution()
+        self.advance_to_review()
+        finish_task_delivery(
+            context,
+            delivery_id=int(delivery["id"]),
+            result={"ok": False, "status": "interrupted"},
+            error=ValueError("interrupted"),
+        )
+
+        recovered = recover_retryable_failed_task_deliveries(
+            context,
+            max_turn_attempts=3,
+        )
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status, last_error FROM task_event_deliveries"
+            ).fetchone()
+            execution = conn.execute(
+                "SELECT state FROM task_executions WHERE record_id = ?",
+                ("recRecovery",),
+            ).fetchone()
+        self.assertEqual(recovered, 0)
+        self.assertEqual(
+            (saved["status"], saved["turn_status"]),
+            ("canceled", "interrupted"),
+        )
+        self.assertIn("no longer needs", saved["last_error"])
+        self.assertEqual(execution["state"], "stopped")
 
     def test_active_interrupted_unclaimed_turn_outlives_lease(self) -> None:
         context = self.context()
