@@ -811,6 +811,39 @@ def due_processing_task_deliveries(
         ]
 
 
+def processing_task_delivery(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+) -> dict[str, Any] | None:
+    with connect(context.db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT delivery.*, event.record_id,
+                   event.source_event_id,
+                   COALESCE(
+                     state.snapshot_json,
+                     event.after_json
+                   ) AS after_json,
+                   event.before_json,
+                   agent.display_name,
+                   agent.role_key
+            FROM task_event_deliveries AS delivery
+            JOIN task_events AS event
+              ON event.event_key = delivery.event_key
+            LEFT JOIN agents AS agent
+              ON agent.id = delivery.agent_id
+            LEFT JOIN lark_task_state AS state
+              ON state.board_id = event.board_id
+             AND state.table_id = event.table_id
+             AND state.record_id = event.record_id
+            WHERE delivery.id = ? AND delivery.status = 'processing'
+            """,
+            (delivery_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def processing_task_delivery_sessions(
     context: LarkEventContext,
 ) -> set[str]:
@@ -1060,21 +1093,14 @@ def cancel_reconciled_task_delivery(
     *,
     delivery_id: int,
     reason: str,
+    expected_status: str,
+    expected_turn_id: str | None,
+    expected_turn_status: str | None,
     turn_status: str = "missing",
-) -> None:
+    allow_active_execution_stop: bool = False,
+) -> bool:
     with connect(context.db_path) as conn:
-        row = conn.execute(
-            "SELECT turn_id FROM task_event_deliveries WHERE id = ?",
-            (delivery_id,),
-        ).fetchone()
-        if row is not None and row["turn_id"]:
-            stop_active_delivery_execution(
-                conn,
-                delivery_id=delivery_id,
-                turn_id=str(row["turn_id"]),
-                reason=reason,
-            )
-        conn.execute(
+        cursor = conn.execute(
             """
             UPDATE task_event_deliveries
             SET status = 'canceled',
@@ -1082,10 +1108,45 @@ def cancel_reconciled_task_delivery(
                 last_error = ?,
                 next_attempt_at = NULL,
                 completed_at = ?
-            WHERE id = ? AND status IN ('processing', 'failed')
+            WHERE id = ?
+              AND status = ?
+              AND turn_id IS ?
+              AND turn_status IS ?
+              AND (
+                ?
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM task_events AS event
+                  JOIN task_executions AS execution
+                    ON execution.record_id = event.record_id
+                  WHERE event.event_key = task_event_deliveries.event_key
+                    AND execution.agent_id = task_event_deliveries.agent_id
+                    AND execution.session_id = task_event_deliveries.session_id
+                    AND execution.state = 'active'
+                )
+              )
             """,
-            (turn_status, reason, now(), delivery_id),
+            (
+                turn_status,
+                reason,
+                now(),
+                delivery_id,
+                expected_status,
+                expected_turn_id,
+                expected_turn_status,
+                int(allow_active_execution_stop),
+            ),
         )
+        if cursor.rowcount != 1:
+            return False
+        if allow_active_execution_stop and expected_turn_id:
+            stop_active_delivery_execution(
+                conn,
+                delivery_id=delivery_id,
+                turn_id=expected_turn_id,
+                reason=reason,
+            )
+    return True
 
 
 def refresh_task_delivery_prompt(

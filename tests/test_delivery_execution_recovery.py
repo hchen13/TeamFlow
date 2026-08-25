@@ -28,6 +28,7 @@ from core.global_db import register_workspace
 from core.lark_events import LarkEventContext, save_task_snapshot
 from core.task_dispatch import (
     acknowledge_task_delivery_turn,
+    cancel_reconciled_task_delivery,
     claim_task_deliveries,
     fail_claimed_task_delivery,
     finish_task_delivery,
@@ -35,6 +36,7 @@ from core.task_dispatch import (
     mark_task_delivery_queued,
     mark_task_delivery_waiting_for_session,
     mark_task_delivery_turn_started,
+    processing_task_delivery,
     prepare_task_deliveries,
     recover_retryable_failed_task_deliveries,
     task_delivery_record_id,
@@ -1549,6 +1551,156 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
         self.assertEqual((saved["status"], saved["attempts"]), ("processing", 1))
         self.assertIsNone(saved["delivered_at"])
 
+    def test_compaction_gap_cannot_cancel_a_materialized_claimed_turn(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_queueing(
+            context,
+            delivery_id=int(delivery["id"]),
+        )
+        stale = processing_task_delivery(
+            context,
+            delivery_id=int(delivery["id"]),
+        )
+        self.assertEqual(stale["turn_status"], "queueing")
+        self.assertIsNone(stale["turn_id"])
+
+        mark_task_delivery_turn_started(
+            context,
+            delivery_id=int(delivery["id"]),
+            turn_id="turn_compacted",
+        )
+        self.claim_execution(turn_id="turn_compacted")
+
+        self.runtime(
+            turn_started=lambda *_args, **_kwargs: True,
+            turn_completed=lambda *_args, **_kwargs: False,
+        )._reconcile_unconfirmed_turn(
+            context,
+            stale,
+            task=self.ready_task(),
+            target="tl",
+            agent="Recovery TL",
+            thread_status="idle",
+            reason="Codex turn is temporarily not visible after compaction",
+        )
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status, turn_id FROM task_event_deliveries"
+            ).fetchone()
+            execution = conn.execute(
+                "SELECT state, turn_id FROM task_executions WHERE record_id = ?",
+                ("recRecovery",),
+            ).fetchone()
+        self.assertEqual(
+            (saved["status"], saved["turn_status"], saved["turn_id"]),
+            ("processing", "inProgress", "turn_compacted"),
+        )
+        self.assertEqual(
+            (execution["state"], execution["turn_id"]),
+            ("active", "turn_compacted"),
+        )
+        self.assertTrue(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_compacted",
+            agent_id="agent_recovery",
+        ))
+
+        assignment = {
+            "workspace_root": self.workspace,
+            "workflow_key": "software-development",
+            "agent_id": "agent_recovery",
+        }
+        tool_runtime = ToolRuntime(
+            sync_lock=threading.RLock(),
+            assignment_context=lambda **_kwargs: {"assignment": assignment},
+            workspace_active=lambda _workspace: True,
+            invoke_tool=lambda *_args, **_kwargs: {
+                "ok": True,
+                "task": {**self.ready_task(), "status": "in_progress"},
+            },
+            sync_task_activity=lambda *_args, **_kwargs: None,
+            delivery_record_id=lambda *_args, **_kwargs: "recRecovery",
+            delivery_turn_is_current=lambda _assignment, **kwargs: (
+                task_delivery_turn_is_current(
+                    context,
+                    agent_id="agent_recovery",
+                    **kwargs,
+                )
+            ),
+        )
+        grant = tool_runtime.authorize(
+            invocation_id="read-after-compaction",
+            session_id="session_recovery",
+            cwd=self.workspace,
+            turn_id="turn_compacted",
+            tool_name="mcp__teamflow__get_task",
+            tool_input={"record_id": "recRecovery"},
+        )
+        result = tool_runtime.invoke(
+            invocation_id="read-after-compaction",
+            grant=grant["grant"],
+            tool_name="get_task",
+            arguments={"record_id": "recRecovery"},
+        )
+        self.assertTrue(result["ok"])
+
+    def test_stale_cancel_compare_and_swap_preserves_new_active_execution(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_queueing(
+            context,
+            delivery_id=int(delivery["id"]),
+        )
+        stale = processing_task_delivery(
+            context,
+            delivery_id=int(delivery["id"]),
+        )
+        mark_task_delivery_turn_started(
+            context,
+            delivery_id=int(delivery["id"]),
+            turn_id="turn_fresh",
+        )
+        self.claim_execution(turn_id="turn_fresh")
+
+        canceled = cancel_reconciled_task_delivery(
+            context,
+            delivery_id=int(delivery["id"]),
+            reason="stale queued snapshot",
+            expected_status=str(stale["status"]),
+            expected_turn_id=None,
+            expected_turn_status="queueing",
+        )
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_id FROM task_event_deliveries"
+            ).fetchone()
+            execution = conn.execute(
+                "SELECT state, turn_id FROM task_executions WHERE record_id = ?",
+                ("recRecovery",),
+            ).fetchone()
+        self.assertFalse(canceled)
+        self.assertEqual((saved["status"], saved["turn_id"]), ("processing", "turn_fresh"))
+        self.assertEqual((execution["state"], execution["turn_id"]), ("active", "turn_fresh"))
+
     def test_claimed_turn_outlives_stale_snapshot_and_daemon_restart(self) -> None:
         context = self.context()
         delivery = self.start_delivery()
@@ -1719,7 +1871,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             agent_id="agent_recovery",
         ))
 
-    def test_exhausted_continuation_stops_execution_before_delivery_fails(self) -> None:
+    def test_claimed_continuation_remains_recoverable_past_notification_limit(self) -> None:
         context = self.context()
         delivery = self.start_delivery()
         self.claim_execution()
@@ -1766,23 +1918,17 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 "SELECT state, stop_status FROM task_executions WHERE record_id = ?",
                 ("recRecovery",),
             ).fetchone()
-            contradiction = conn.execute(
-                """
-                SELECT 1
-                FROM task_event_deliveries AS delivery
-                JOIN task_events AS event ON event.event_key = delivery.event_key
-                JOIN task_executions AS execution
-                  ON execution.record_id = event.record_id
-                 AND execution.agent_id = delivery.agent_id
-                 AND execution.session_id = delivery.session_id
-                 AND execution.turn_id = delivery.turn_id
-                WHERE delivery.status IN ('failed', 'canceled')
-                  AND execution.state = 'active'
-                """
-            ).fetchone()
-        self.assertEqual((delivery_row["status"], delivery_row["turn_status"]), ("failed", "interrupted"))
-        self.assertEqual((execution["state"], execution["stop_status"]), ("stopped", "continuation_exhausted"))
-        self.assertIsNone(contradiction)
+        self.assertEqual((delivery_row["status"], delivery_row["turn_status"]), ("retry", "interrupted"))
+        self.assertEqual((execution["state"], execution["stop_status"]), ("active", None))
+
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
+            )
+        continuation = claim_task_deliveries(context)
+        self.assertEqual(len(continuation), 1)
+        self.assertEqual(continuation[0]["continuation_turn_id"], "turn_original")
+        self.assertEqual(claim_task_deliveries(context), [])
 
     def test_stale_turn_cannot_terminalize_a_rebound_execution(self) -> None:
         context = self.context()

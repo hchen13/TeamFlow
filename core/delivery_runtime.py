@@ -27,6 +27,7 @@ from .task_dispatch import (
     mark_task_delivery_queueing,
     mark_task_delivery_queued,
     mark_task_delivery_turn_started,
+    processing_task_delivery,
     prepare_task_deliveries,
     recover_retryable_failed_task_deliveries,
     refresh_task_delivery_prompt,
@@ -348,13 +349,16 @@ class DeliveryRuntime:
                 )
             )
             if continuation_turn_id and not continuation_is_current:
-                canceled = True
                 cancellation_reason = "已认领任务的执行归属已经变化，本次继续执行已取消"
-                cancel_reconciled_task_delivery(
+                canceled = self._cancel_reconciled(
                     context,
-                    delivery_id=int(delivery["id"]),
+                    delivery,
                     reason=cancellation_reason,
                 )
+                if not canceled:
+                    raise CodexTurnAcceptanceUnknown(
+                        "TeamFlow delivery changed while its continuation was being reconciled"
+                    )
                 return
             if not continuation_turn_id and not task_delivery_is_current(
                 context,
@@ -551,7 +555,6 @@ class DeliveryRuntime:
                 retry = self._finish_claimed_turn(
                     context,
                     delivery,
-                    turn_id=str(started_turn_id),
                     turn_status=(
                         _status_type((result or {}).get("status")) or "interrupted"
                     ),
@@ -609,29 +612,53 @@ class DeliveryRuntime:
         context: LarkEventContext,
         delivery: dict[str, Any],
         *,
-        turn_id: str,
         turn_status: str,
         reason: str,
     ) -> bool:
-        retry = self._accepted_turn_retry_available(context, delivery)
-        if retry:
-            finish_task_delivery(
+        # A claimed task must remain recoverable until it reaches a real handoff.
+        # The accepted-turn cap applies to ignored notifications, not continuations
+        # of durable in-progress work.
+        finish_task_delivery(
+            context,
+            delivery_id=int(delivery["id"]),
+            result={"ok": False, "status": turn_status},
+            error=ValueError(reason),
+            retry=True,
+        )
+        return True
+
+    @staticmethod
+    def _cancel_reconciled(
+        context: LarkEventContext,
+        delivery: dict[str, Any],
+        *,
+        reason: str,
+        turn_status: str = "missing",
+        allow_active_execution_stop: bool = False,
+    ) -> bool:
+        canceled = cancel_reconciled_task_delivery(
+            context,
+            delivery_id=int(delivery["id"]),
+            reason=reason,
+            expected_status=str(delivery["status"]),
+            expected_turn_id=str(delivery.get("turn_id") or "") or None,
+            expected_turn_status=(
+                str(delivery.get("turn_status"))
+                if delivery.get("turn_status") is not None
+                else None
+            ),
+            turn_status=turn_status,
+            allow_active_execution_stop=allow_active_execution_stop,
+        )
+        if not canceled:
+            defer_task_delivery_reconciliation(
                 context,
                 delivery_id=int(delivery["id"]),
-                result={"ok": False, "status": turn_status},
-                error=ValueError(reason),
-                retry=True,
+                error=ValueError(
+                    "TeamFlow delivery changed while cancellation was being reconciled"
+                ),
             )
-        else:
-            failed = fail_claimed_task_delivery(
-                context,
-                delivery_id=int(delivery["id"]),
-                turn_id=turn_id,
-                turn_status=turn_status,
-                reason=reason,
-            )
-            retry = not failed
-        return retry
+        return canceled
 
     @staticmethod
     def _accepted_turn_retry_available(
@@ -960,12 +987,28 @@ class DeliveryRuntime:
                             attempt=int(delivery["attempts"]),
                         )
                         continue
-                cancel_reconciled_task_delivery(
+                canceled_delivery = self._cancel_reconciled(
                     context,
-                    delivery_id=int(delivery["id"]),
+                    delivery,
                     reason=reason,
                     turn_status=stopped_status,
+                    allow_active_execution_stop=True,
                 )
+                if not canceled_delivery:
+                    self.log_dispatch(
+                        context,
+                        "reconciling",
+                        event_id=delivery["source_event_id"],
+                        task=task,
+                        record_id=delivery["record_id"],
+                        target=target,
+                        agent=agent,
+                        session=session_id,
+                        turn=turn_id,
+                        reason="delivery changed while stopping a stale turn",
+                        attempt=int(delivery["attempts"]),
+                    )
+                    continue
                 self.log_dispatch(
                     context,
                     "not-required",
@@ -989,7 +1032,6 @@ class DeliveryRuntime:
                     retry = self._finish_claimed_turn(
                         context,
                         delivery,
-                        turn_id=turn_id,
                         turn_status=status,
                         reason=reason,
                     )
@@ -1112,7 +1154,6 @@ class DeliveryRuntime:
                     retry = self._finish_claimed_turn(
                         context,
                         delivery,
-                        turn_id=turn_id,
                         turn_status=status,
                         reason=str(error),
                     )
@@ -1122,12 +1163,28 @@ class DeliveryRuntime:
                         delivery_id=int(delivery["id"]),
                     ):
                         stale_reason = f"{error}; task no longer needs this delivery"
-                        cancel_reconciled_task_delivery(
+                        canceled_delivery = self._cancel_reconciled(
                             context,
-                            delivery_id=int(delivery["id"]),
+                            delivery,
                             reason=stale_reason,
                             turn_status=status,
+                            allow_active_execution_stop=True,
                         )
+                        if not canceled_delivery:
+                            self.log_dispatch(
+                                context,
+                                "reconciling",
+                                event_id=delivery["source_event_id"],
+                                task=task,
+                                record_id=delivery["record_id"],
+                                target=target,
+                                agent=agent,
+                                session=session_id,
+                                turn=turn_id,
+                                reason="delivery changed before terminal reconciliation",
+                                attempt=int(delivery["attempts"]),
+                            )
+                            continue
                         self.log_dispatch(
                             context,
                             "not-required",
@@ -1199,6 +1256,18 @@ class DeliveryRuntime:
         thread_status: str,
         reason: str,
     ) -> None:
+        current = processing_task_delivery(
+            context,
+            delivery_id=int(delivery["id"]),
+        )
+        if current is None:
+            return
+        delivery = current
+        task = json.loads(
+            delivery["after_json"] or delivery["before_json"] or "{}"
+        )
+        target = str(delivery.get("role_key") or task.get("role") or target)
+        agent = str(delivery.get("display_name") or delivery["agent_id"] or agent)
         turn_id = str(delivery.get("turn_id") or "")
         queue_pending = delivery.get("turn_status") in {"queueing", "queued"}
         delivery_is_current = task_delivery_is_current(
@@ -1281,7 +1350,6 @@ class DeliveryRuntime:
                 retry = self._finish_claimed_turn(
                     context,
                     delivery,
-                    turn_id=turn_id,
                     turn_status="completed",
                     reason=f"{reason}; execution turn ended before a task handoff",
                 )
@@ -1322,11 +1390,13 @@ class DeliveryRuntime:
                     )
                 except Exception:
                     materialized_turn_id = ""
-                cancel_reconciled_task_delivery(
+                canceled_delivery = self._cancel_reconciled(
                     context,
-                    delivery_id=int(delivery["id"]),
+                    delivery,
                     reason=stale_reason,
                 )
+                if not canceled_delivery:
+                    return
                 try:
                     removed = self.cancel_queued_message(
                         str(delivery["session_id"]),
@@ -1355,11 +1425,20 @@ class DeliveryRuntime:
                         if not _turn_stop_error_means_inactive(error):
                             stale_reason = f"{stale_reason}; {error}"
             else:
-                cancel_reconciled_task_delivery(
+                canceled_delivery = self._cancel_reconciled(
                     context,
-                    delivery_id=int(delivery["id"]),
+                    delivery,
                     reason=stale_reason,
+                    allow_active_execution_stop=bool(
+                        turn_id
+                        and self.turn_completed(
+                            str(delivery["session_id"]),
+                            turn_id,
+                        )
+                    ),
                 )
+                if not canceled_delivery:
+                    return
             self.log_dispatch(
                 context,
                 "not-required",

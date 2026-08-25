@@ -20,6 +20,7 @@ HANDOFF_TOOL_NAMES = {
     "review_task",
     "cancel_task",
 }
+READ_ONLY_TOOL_NAMES = TOOL_NAMES - MUTATING_TOOL_NAMES - RUNTIME_TOOL_NAMES
 
 
 def tool_input_hash(value: Any) -> str:
@@ -107,6 +108,7 @@ class ToolRuntime:
             cached_invocation = invocation_id in self.results
             if (
                 turn_id
+                and short_name not in READ_ONLY_TOOL_NAMES
                 and turn_key in self.closed_turns
                 and not cached_invocation
             ):
@@ -117,6 +119,7 @@ class ToolRuntime:
                 )
         if (
             turn_id
+            and short_name not in READ_ONLY_TOOL_NAMES
             and not cached_invocation
             and self.delivery_turn_is_current(
                 assignment,
@@ -124,9 +127,9 @@ class ToolRuntime:
             ) is False
         ):
             raise ValueError(
-                "TeamFlow handoff is complete for this turn. End the current "
-                "reply now; the daemon will start a new turn when more work "
-                "is available."
+                "TeamFlow delivery for this turn is no longer active. Read-only "
+                "tools remain available, but lifecycle and mutating tools require "
+                "the current daemon delivery or continuation."
             )
         with self.sync_lock:
             self.grants[token] = {
@@ -159,7 +162,7 @@ class ToolRuntime:
         cached = self._cached_result(invocation_id, authorized, tool_name)
         if cached is not None:
             return cached
-        self._validate_turn_open(authorized)
+        self._validate_turn_open(authorized, tool_name=tool_name)
 
         assignment = authorized["assignment"]
         workspace_root = str(assignment["workspace_root"])
@@ -177,7 +180,7 @@ class ToolRuntime:
                 cached = self._cached_result(invocation_id, authorized, tool_name)
                 if cached is not None:
                     return cached
-                self._validate_turn_open(authorized)
+                self._validate_turn_open(authorized, tool_name=tool_name)
                 self._validate_workspace(
                     workspace_root,
                     message=(
@@ -219,7 +222,7 @@ class ToolRuntime:
                 cached = self._cached_result(invocation_id, authorized, tool_name)
                 if cached is not None:
                     return cached
-                self._validate_turn_open(authorized)
+                self._validate_turn_open(authorized, tool_name=tool_name)
                 self._validate_workspace(workspace_root)
                 current = self._current_assignment(
                     authorized,
@@ -294,7 +297,14 @@ class ToolRuntime:
             record_id=str(task.get("record_id") or ""),
         )
 
-    def _validate_turn_open(self, authorized: dict[str, Any]) -> None:
+    def _validate_turn_open(
+        self,
+        authorized: dict[str, Any],
+        *,
+        tool_name: str,
+    ) -> None:
+        if tool_name in READ_ONLY_TOOL_NAMES:
+            return
         turn_id = str(authorized.get("turn_id") or "")
         if not turn_id:
             return
@@ -313,9 +323,9 @@ class ToolRuntime:
             turn_id=turn_id,
         ) is False:
             raise ValueError(
-                "TeamFlow handoff is complete for this turn. End the current "
-                "reply now; the daemon will start a new turn when more work "
-                "is available."
+                "TeamFlow delivery for this turn is no longer active. Read-only "
+                "tools remain available, but lifecycle and mutating tools require "
+                "the current daemon delivery or continuation."
             )
 
     def cache_result(

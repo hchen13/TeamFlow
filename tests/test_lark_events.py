@@ -1950,7 +1950,7 @@ class LarkEventsTest(unittest.TestCase):
         self.assertEqual(execution["agent_id"], "agent_claim")
         self.assertEqual(execution["turn_id"], "turn_claim")
 
-    def test_successful_handoff_closes_further_teamflow_calls_in_the_turn(self):
+    def test_successful_handoff_allows_reads_but_closes_writes_in_the_turn(self):
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
             workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
             role = conn.execute(
@@ -1989,12 +1989,18 @@ class LarkEventsTest(unittest.TestCase):
                 "reason": "handoff complete",
             },
         }
+
+        def invoke_tool(_assignment, tool_name, _arguments, **_kwargs):
+            if tool_name == "route_task":
+                return result
+            return {"ok": True, "assignment": {"agent_id": "agent_handoff"}}
+
         try:
             with (
                 patch.object(
                     runtime,
                     "_invoke_teamflow_tool",
-                    return_value=result,
+                    side_effect=invoke_tool,
                 ) as invoke,
                 patch.object(
                     runtime.tool_runtime,
@@ -2028,16 +2034,12 @@ class LarkEventsTest(unittest.TestCase):
                     tool_name="route_task",
                     arguments=arguments,
                 )
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "handoff is complete",
-                ):
-                    runtime.invoke_tool(
-                        invocation_id="invocation_delayed_after_handoff",
-                        grant=delayed_grant["grant"],
-                        tool_name="get_assignment",
-                        arguments={},
-                    )
+                readable = runtime.invoke_tool(
+                    invocation_id="invocation_delayed_after_handoff",
+                    grant=delayed_grant["grant"],
+                    tool_name="get_assignment",
+                    arguments={},
+                )
                 retry_grant = runtime.authorize_tool(
                     invocation_id="invocation_handoff",
                     session_id="session_handoff",
@@ -2061,17 +2063,21 @@ class LarkEventsTest(unittest.TestCase):
                         session_id="session_handoff",
                         cwd=self.workspace,
                         turn_id="turn_handoff",
-                        tool_name="mcp__teamflow__get_assignment",
-                        tool_input={},
+                        tool_name="mcp__teamflow__route_task",
+                        tool_input=arguments,
                     )
 
             self.assertEqual(first, result)
             self.assertEqual(retried, result)
-            invoke.assert_called_once()
+            self.assertEqual(readable["assignment"]["agent_id"], "agent_handoff")
+            self.assertEqual(
+                sum(call.args[1] == "route_task" for call in invoke.call_args_list),
+                1,
+            )
         finally:
             runtime.close()
 
-    def test_completed_handoff_remains_closed_after_daemon_restart(self):
+    def test_completed_handoff_allows_reads_but_blocks_writes_after_daemon_restart(self):
         context = self.context()
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
             workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
@@ -2134,15 +2140,38 @@ class LarkEventsTest(unittest.TestCase):
         runtime = TeamFlowDaemon()
         runtime.routes[self.workspace] = context
         try:
-            with self.assertRaisesRegex(ValueError, "handoff is complete"):
-                runtime.authorize_tool(
-                    invocation_id="invocation_after_restart",
+            with patch.object(
+                runtime,
+                "_invoke_teamflow_tool",
+                return_value={"ok": True, "task": {"record_id": "recDurableHandoff"}},
+            ):
+                readable = runtime.authorize_tool(
+                    invocation_id="read_after_restart",
                     session_id="session_durable_handoff",
                     cwd=self.workspace,
                     turn_id="turn_durable_handoff",
-                    tool_name="mcp__teamflow__get_assignment",
-                    tool_input={},
+                    tool_name="mcp__teamflow__get_task",
+                    tool_input={"record_id": "recDurableHandoff"},
                 )
+                read_result = runtime.invoke_tool(
+                    invocation_id="read_after_restart",
+                    grant=readable["grant"],
+                    tool_name="get_task",
+                    arguments={"record_id": "recDurableHandoff"},
+                )
+                self.assertEqual(
+                    read_result["task"]["record_id"],
+                    "recDurableHandoff",
+                )
+                with self.assertRaisesRegex(ValueError, "no longer active"):
+                    runtime.authorize_tool(
+                        invocation_id="write_after_restart",
+                        session_id="session_durable_handoff",
+                        cwd=self.workspace,
+                        turn_id="turn_durable_handoff",
+                        tool_name="mcp__teamflow__route_task",
+                        tool_input={"record_id": "recDurableHandoff", "role": "tl"},
+                    )
         finally:
             runtime.close()
 
