@@ -38,6 +38,7 @@ from .task_dispatch import (
     task_delivery_has_active_execution,
     task_delivery_sessions_waiting_for_owner,
     task_delivery_turn_count,
+    task_delivery_turn_acknowledged,
     task_dispatch_target,
 )
 
@@ -72,6 +73,7 @@ class DeliveryRuntime:
         delivery_error_is_terminal: Callable[[Exception], bool],
         log_dispatch: Callable[..., None],
         turn_completed: Callable[[str, str], bool] = lambda _session_id, _turn_id: False,
+        turn_started: Callable[[str, str], bool] = lambda _session_id, _turn_id: False,
         session_has_owner: Callable[[str], bool] = lambda _session_id: False,
         background_mcp_ready: Callable[[], bool | dict[str, Any]] = lambda: True,
         turn_id_for_client_message: Callable[
@@ -102,6 +104,7 @@ class DeliveryRuntime:
         self.delivery_error_is_terminal = delivery_error_is_terminal
         self.log_dispatch = log_dispatch
         self.turn_completed = turn_completed
+        self.turn_started = turn_started
         self.session_has_owner = session_has_owner
         self.background_mcp_ready = background_mcp_ready
         self.turn_id_for_client_message = turn_id_for_client_message
@@ -305,6 +308,7 @@ class DeliveryRuntime:
         waiting_permission = False
         waiting_session = False
         claimed_turn_ended = False
+        completed_without_handling = False
         turn_reconciling = False
         try:
             self.log_dispatch(
@@ -454,6 +458,29 @@ class DeliveryRuntime:
                 )
             elif turn_reconciling:
                 error = ValueError(str(result.get("error") or status))
+            elif (
+                result.get("ok")
+                and status in {"completed", "success"}
+                and not active_execution
+                and task_delivery_is_current(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                )
+                and not (
+                    started_turn_id
+                    and task_delivery_turn_acknowledged(
+                        context,
+                        delivery_id=int(delivery["id"]),
+                        turn_id=started_turn_id,
+                    )
+                )
+            ):
+                error = ValueError(
+                    "Codex turn ended without accepting or advancing "
+                    "the TeamFlow task"
+                )
+                completed_without_handling = True
+                retry = self._accepted_turn_retry_available(context, delivery)
             elif not result.get("ok"):
                 retry = (
                     status in {"cancelled", "canceled", "interrupted"}
@@ -493,7 +520,10 @@ class DeliveryRuntime:
                 )
             reconciling = bool(
                 turn_reconciling
-                or error and (turn_started or acceptance_unknown) and not claimed_turn_ended
+                or error
+                and (turn_started or acceptance_unknown)
+                and not claimed_turn_ended
+                and not completed_without_handling
             )
             if canceled:
                 pass
@@ -841,6 +871,50 @@ class DeliveryRuntime:
                     turn_id=turn_id,
                 )
             )
+            terminal_status = status in {
+                "completed",
+                "success",
+                "failed",
+                "cancelled",
+                "canceled",
+                "interrupted",
+            }
+            interrupted_tools = (
+                self.unresolved_mcp_failures(turn) if terminal_status else []
+            )
+            rollout_completed = bool(
+                terminal_status
+                and turn_id
+                and self.turn_completed(session_id, turn_id)
+            )
+            acknowledged = bool(
+                turn_id
+                and task_delivery_turn_acknowledged(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    turn_id=turn_id,
+                )
+            )
+            if (
+                acknowledged
+                and not active_execution
+                and not interrupted_tools
+                and (
+                    status in {"completed", "success"}
+                    or rollout_completed
+                )
+            ):
+                self._finish_acknowledged_turn(
+                    context,
+                    delivery,
+                    task=task,
+                    target=target,
+                    agent=agent,
+                    turn=turn_id,
+                    status=status if status in {"completed", "success"} else "completed",
+                    reason="TeamFlow task update acknowledged this delivery",
+                )
+                continue
             if (
                 status not in {
                     "completed",
@@ -906,7 +980,6 @@ class DeliveryRuntime:
                 )
                 continue
             if status in {"completed", "success"}:
-                interrupted_tools = self.unresolved_mcp_failures(turn)
                 if active_execution:
                     reason = (
                         "TeamFlow execution turn ended before a task handoff"
@@ -1021,7 +1094,7 @@ class DeliveryRuntime:
                 ))
                 if (
                     status in {"cancelled", "canceled", "interrupted"}
-                    and not self.turn_completed(session_id, turn_id)
+                    and not rollout_completed
                 ):
                     # Desktop can briefly expose an interrupted snapshot while the owner is
                     # still appending the same turn. The rollout completion event is durable.
@@ -1300,6 +1373,43 @@ class DeliveryRuntime:
                 reason=stale_reason,
             )
             return
+        rollout_completed = bool(
+            turn_id
+            and self.turn_completed(str(delivery["session_id"]), turn_id)
+        )
+        acknowledged = bool(
+            turn_id
+            and task_delivery_turn_acknowledged(
+                context,
+                delivery_id=int(delivery["id"]),
+                turn_id=turn_id,
+            )
+        )
+        if acknowledged and rollout_completed:
+            self._finish_acknowledged_turn(
+                context,
+                delivery,
+                task=task,
+                target=target,
+                agent=agent,
+                turn=turn_id,
+                reason="TeamFlow task update acknowledged this delivery",
+            )
+            return
+        if (
+            turn_id
+            and not rollout_completed
+            and (
+                acknowledged
+                or self.turn_started(str(delivery["session_id"]), turn_id)
+            )
+        ):
+            defer_task_delivery_reconciliation(
+                context,
+                delivery_id=int(delivery["id"]),
+                error=ValueError(reason),
+            )
+            return
         if (
             thread_status == "active"
             or not _reconciliation_lease_expired(delivery)
@@ -1334,6 +1444,36 @@ class DeliveryRuntime:
             turn=str(delivery["turn_id"]),
             reason=str(error),
             attempt=int(delivery["attempts"]),
+        )
+
+    def _finish_acknowledged_turn(
+        self,
+        context: LarkEventContext,
+        delivery: dict[str, Any],
+        *,
+        task: dict[str, Any],
+        target: str,
+        agent: str,
+        turn: str,
+        reason: str,
+        status: str = "completed",
+    ) -> None:
+        finish_task_delivery(
+            context,
+            delivery_id=int(delivery["id"]),
+            result={"ok": True, "status": status},
+        )
+        self.log_dispatch(
+            context,
+            "recovered",
+            event_id=delivery["source_event_id"],
+            task=task,
+            record_id=delivery["record_id"],
+            target=target,
+            agent=agent,
+            session=str(delivery["session_id"]),
+            turn=turn,
+            reason=reason,
         )
 
 

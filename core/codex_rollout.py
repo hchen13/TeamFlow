@@ -214,13 +214,16 @@ def codex_turn_id_by_client_message_id(
     return None
 
 
-def codex_turn_completed(thread_id: str, turn_id: str) -> bool:
+def _codex_turn_lifecycle_event(thread_id: str, turn_id: str) -> str | None:
     rollout_path = _codex_rollout_path(thread_id)
     if rollout_path is None or not turn_id:
-        return False
+        return None
     try:
         for raw_line in _reverse_lines(rollout_path):
-            if b'"task_complete"' not in raw_line and b'"task_started"' not in raw_line:
+            if (
+                b'"task_complete"' not in raw_line
+                and b'"task_started"' not in raw_line
+            ):
                 continue
             try:
                 record = json.loads(raw_line)
@@ -231,13 +234,20 @@ def codex_turn_completed(thread_id: str, turn_id: str) -> bool:
                 continue
             if str(payload.get("turn_id") or "") != turn_id:
                 continue
-            if payload.get("type") == "task_complete":
-                return True
-            if payload.get("type") == "task_started":
-                return False
+            event_type = str(payload.get("type") or "")
+            if event_type in {"task_started", "task_complete"}:
+                return event_type
     except OSError:
-        return False
-    return False
+        return None
+    return None
+
+
+def codex_turn_completed(thread_id: str, turn_id: str) -> bool:
+    return _codex_turn_lifecycle_event(thread_id, turn_id) == "task_complete"
+
+
+def codex_turn_started(thread_id: str, turn_id: str) -> bool:
+    return _codex_turn_lifecycle_event(thread_id, turn_id) is not None
 
 
 def codex_turn_unresolved_teamflow_mcp_failures(

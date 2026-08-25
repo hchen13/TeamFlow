@@ -8,6 +8,7 @@ from .task_delivery_planner import (
     prepare_task_deliveries as _prepare_task_deliveries,
 )
 from .task_delivery_store import (
+    acknowledge_task_delivery_turn,
     cancel_reconciled_task_delivery,
     cancel_task_delivery,
     claim_task_deliveries as _claim_task_deliveries,
@@ -35,6 +36,7 @@ from .task_delivery_store import (
     task_delivery_is_current as _task_delivery_is_current,
     task_delivery_turn_is_current as _task_delivery_turn_is_current,
     task_delivery_turn_count,
+    task_delivery_turn_acknowledged,
 )
 from .task_routing import (
     render_task_continuation_prompt as _render_task_continuation_prompt,
@@ -175,6 +177,7 @@ def task_dispatch_target(
 
 
 __all__ = [
+    "acknowledge_task_delivery_turn",
     "cancel_reconciled_task_delivery",
     "cancel_task_delivery",
     "claim_task_deliveries",
@@ -202,5 +205,6 @@ __all__ = [
     "task_delivery_record_id",
     "task_delivery_sessions_waiting_for_owner",
     "task_delivery_turn_is_current",
+    "task_delivery_turn_acknowledged",
     "task_dispatch_target",
 ]

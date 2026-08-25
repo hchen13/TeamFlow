@@ -14,7 +14,7 @@ from core.agent_runtime import (
     mark_agent_context_recovery_pending,
 )
 from core.codex_ipc import CodexIpcNoOwner, CodexTurnAcceptanceUnknown
-from core.codex_rollout import codex_turn_completed
+from core.codex_rollout import codex_turn_completed, codex_turn_started
 from core.config import resolve_workspace_paths
 from core.db import (
     configure_lark_board,
@@ -27,6 +27,7 @@ from core.delivery_runtime import DeliveryRuntime
 from core.global_db import register_workspace
 from core.lark_events import LarkEventContext, save_task_snapshot
 from core.task_dispatch import (
+    acknowledge_task_delivery_turn,
     claim_task_deliveries,
     fail_claimed_task_delivery,
     finish_task_delivery,
@@ -38,6 +39,7 @@ from core.task_dispatch import (
     recover_retryable_failed_task_deliveries,
     task_delivery_record_id,
     task_delivery_turn_count,
+    task_delivery_turn_acknowledged,
     task_delivery_turn_is_current,
 )
 from core.tool_runtime import ToolRuntime
@@ -528,6 +530,122 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             arguments={"record_id": "recRecovery", "outcome": "completed"},
         )
         self.assertEqual(result["turn_control"]["action"], "end_turn")
+
+    def test_successful_same_state_update_acknowledges_delivery_across_restart(self) -> None:
+        context = self.context()
+        delivery = self.start_delivery()
+        assignment = {
+            "workspace_root": self.workspace,
+            "workflow_key": "software-development",
+            "agent_id": "agent_recovery",
+            "session_id": "session_recovery",
+        }
+        tool_runtime = ToolRuntime(
+            sync_lock=threading.RLock(),
+            assignment_context=lambda **_kwargs: {"assignment": assignment},
+            workspace_active=lambda _workspace: True,
+            invoke_tool=lambda *_args, **_kwargs: {
+                "ok": True,
+                "task": self.ready_task(),
+            },
+            sync_task_activity=lambda *_args, **_kwargs: None,
+            delivery_record_id=lambda *_args, **_kwargs: "recRecovery",
+            delivery_turn_is_current=lambda _assignment, **kwargs: (
+                task_delivery_turn_is_current(
+                    context,
+                    agent_id="agent_recovery",
+                    **kwargs,
+                )
+            ),
+            acknowledge_delivery=acknowledge_task_delivery_turn,
+        )
+        grant = tool_runtime.authorize(
+            invocation_id="checkpoint-current-review",
+            session_id="session_recovery",
+            cwd=self.workspace,
+            turn_id="turn_original",
+            tool_name="mcp__teamflow__update_task",
+            tool_input={"record_id": "recRecovery", "progress": "waiting"},
+        )
+        result = tool_runtime.invoke(
+            invocation_id="checkpoint-current-review",
+            grant=grant["grant"],
+            tool_name="update_task",
+            arguments={"record_id": "recRecovery", "progress": "waiting"},
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(task_delivery_turn_acknowledged(
+            context,
+            delivery_id=int(delivery["id"]),
+            turn_id="turn_original",
+        ))
+        with connect(self.db_path) as conn:
+            conn.execute("UPDATE task_event_deliveries SET next_attempt_at = NULL")
+
+        thread = {
+            "status": {"type": "idle"},
+            "turns": [{
+                "id": "turn_original",
+                "status": "interrupted",
+                "items": [{
+                    "type": "userMessage",
+                    "clientId": delivery["client_message_id"],
+                }],
+            }],
+        }
+        self.runtime(
+            read_thread=lambda *_args, **_kwargs: thread,
+            turn_completed=lambda *_args, **_kwargs: True,
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, attempts, delivered_at FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual((saved["status"], saved["attempts"]), ("completed", 1))
+        self.assertIsNotNone(saved["delivered_at"])
+        self.assertEqual(
+            task_delivery_turn_count(context, delivery_id=int(delivery["id"])),
+            1,
+        )
+
+    def test_direct_completed_turn_without_handling_retries_like_queued_turn(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+
+        def run_turn(
+            _session_id,
+            _prompt,
+            *,
+            client_message_id,
+            on_queued,
+            on_started,
+            stop_event,
+        ):
+            on_started("turn_ignored")
+            return {
+                "ok": True,
+                "turn_id": "turn_ignored",
+                "status": "completed",
+                "transport": "codex-ipc",
+            }
+
+        self.runtime(run_turn=run_turn).execute(context, delivery)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status, delivered_at FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual((saved["status"], saved["turn_status"]), ("retry", "completed"))
+        self.assertIsNone(saved["delivered_at"])
 
     def test_queueing_state_recovers_after_daemon_restart(self) -> None:
         context = self.context()
@@ -1398,6 +1516,39 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             ("processing", "inProgress"),
         )
 
+    def test_rollout_started_turn_outlives_lease_without_active_thread_snapshot(self) -> None:
+        context = self.context()
+        self.start_delivery()
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET next_attempt_at = NULL,
+                    started_at = '2000-01-01T00:00:00+00:00'
+                """
+            )
+        thread = {
+            "status": {"type": "idle"},
+            "turns": [{
+                "id": "turn_original",
+                "status": "interrupted",
+                "items": [],
+            }],
+        }
+
+        self.runtime(
+            read_thread=lambda *_args, **_kwargs: thread,
+            turn_started=lambda *_args, **_kwargs: True,
+            turn_completed=lambda *_args, **_kwargs: False,
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, attempts, delivered_at FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual((saved["status"], saved["attempts"]), ("processing", 1))
+        self.assertIsNone(saved["delivered_at"])
+
     def test_claimed_turn_outlives_stale_snapshot_and_daemon_restart(self) -> None:
         context = self.context()
         delivery = self.start_delivery()
@@ -1785,7 +1936,23 @@ class CodexRolloutCompletionTest(unittest.TestCase):
             )
             with patch("core.codex_rollout._codex_rollout_path", return_value=path):
                 self.assertTrue(codex_turn_completed("session-a", "turn-a"))
+                self.assertTrue(codex_turn_started("session-a", "turn-a"))
                 self.assertFalse(codex_turn_completed("session-a", "turn-b"))
+                self.assertFalse(codex_turn_started("session-a", "turn-b"))
+
+    def test_started_turn_is_visible_before_completion(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rollout-started-", dir=ROOT / "tmp") as temp:
+            path = Path(temp) / "rollout.jsonl"
+            path.write_text(
+                json.dumps({
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "turn-running"},
+                }),
+                encoding="utf-8",
+            )
+            with patch("core.codex_rollout._codex_rollout_path", return_value=path):
+                self.assertTrue(codex_turn_started("session-a", "turn-running"))
+                self.assertFalse(codex_turn_completed("session-a", "turn-running"))
 
 
 if __name__ == "__main__":

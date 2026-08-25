@@ -706,6 +706,67 @@ def task_delivery_turn_count(
     return int(row["count"] if row else 0)
 
 
+def acknowledge_task_delivery_turn(
+    workspace_root: str,
+    *,
+    turn_id: str,
+    agent_id: str,
+    record_id: str,
+) -> bool:
+    if not turn_id or not agent_id or not record_id:
+        return False
+    db_path = resolve_workspace_paths(workspace_root).db_path
+    timestamp = now()
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE task_delivery_turns
+            SET acknowledged_at = COALESCE(acknowledged_at, ?)
+            WHERE turn_id = ?
+              AND delivery_id = (
+                SELECT delivery.id
+                FROM task_event_deliveries AS delivery
+                JOIN task_events AS event
+                  ON event.event_key = delivery.event_key
+                WHERE delivery.status = 'processing'
+                  AND delivery.turn_id = ?
+                  AND delivery.agent_id = ?
+                  AND event.record_id = ?
+                ORDER BY delivery.id DESC
+                LIMIT 1
+              )
+            """,
+            (
+                timestamp,
+                turn_id,
+                turn_id,
+                agent_id,
+                record_id,
+            ),
+        )
+    return cursor.rowcount == 1
+
+
+def task_delivery_turn_acknowledged(
+    context: LarkEventContext,
+    *,
+    delivery_id: int,
+    turn_id: str,
+) -> bool:
+    if not turn_id:
+        return False
+    with connect(context.db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT acknowledged_at
+            FROM task_delivery_turns
+            WHERE delivery_id = ? AND turn_id = ?
+            """,
+            (delivery_id, turn_id),
+        ).fetchone()
+    return bool(row and row["acknowledged_at"])
+
+
 def due_processing_task_deliveries(
     context: LarkEventContext,
 ) -> list[dict[str, Any]]:

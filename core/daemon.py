@@ -26,6 +26,7 @@ from .codex import (
     codex_turn,
     codex_turn_by_client_message_id,
     codex_turn_completed,
+    codex_turn_started,
     codex_turn_id_by_client_message_id,
     codex_turn_unresolved_teamflow_mcp_failures,
     read_codex_thread,
@@ -89,6 +90,7 @@ from .lark_worker_runtime import (
     lark_app_worker as _lark_app_worker,
 )
 from .task_dispatch import (
+    acknowledge_task_delivery_turn,
     processing_task_delivery_sessions_for_workspace,
     recover_task_deliveries,
     task_delivery_record_id,
@@ -263,6 +265,7 @@ class TeamFlowDaemon:
             delivery_turn_is_current=lambda assignment, **kwargs: (
                 self._delivery_turn_is_current(assignment, **kwargs)
             ),
+            acknowledge_delivery=acknowledge_task_delivery_turn,
         )
         self.session_keeper = SessionKeeper(
             desired_sessions=self._keeper_sessions,
@@ -303,6 +306,7 @@ class TeamFlowDaemon:
                 codex_delivery_error_is_terminal(error)
             ),
             turn_completed=codex_turn_completed,
+            turn_started=codex_turn_started,
             turn_id_for_client_message=codex_turn_id_by_client_message_id,
             cancel_queued_message=cancel_codex_queued_message,
             queued_message_exists=queued_codex_message_exists,

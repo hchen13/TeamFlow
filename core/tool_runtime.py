@@ -42,6 +42,7 @@ class ToolRuntime:
         sync_task_activity: Callable[..., None],
         delivery_record_id: Callable[..., str | None],
         delivery_turn_is_current: Callable[..., bool | None],
+        acknowledge_delivery: Callable[..., bool] = lambda *args, **kwargs: False,
     ) -> None:
         self.sync_lock = sync_lock
         self.assignment_context = assignment_context
@@ -50,6 +51,7 @@ class ToolRuntime:
         self.sync_task_activity = sync_task_activity
         self.delivery_record_id = delivery_record_id
         self.delivery_turn_is_current = delivery_turn_is_current
+        self.acknowledge_delivery = acknowledge_delivery
         self.grants: dict[str, dict[str, Any]] = {}
         self.results: dict[str, dict[str, Any]] = {}
         self.closed_turns: dict[tuple[str, str], float] = {}
@@ -238,6 +240,11 @@ class ToolRuntime:
                     session_id=str(authorized["session_id"]),
                     turn_id=str(authorized.get("turn_id") or "") or None,
                 )
+                self._acknowledge_delivery(
+                    authorized,
+                    current["assignment"],
+                    result=result,
+                )
                 self.cache_result(
                     invocation_id,
                     authorized=authorized,
@@ -268,6 +275,24 @@ class ToolRuntime:
         )
         self._seal_turn_if_requested(authorized, result)
         return result
+
+    def _acknowledge_delivery(
+        self,
+        authorized: dict[str, Any],
+        assignment: dict[str, Any],
+        *,
+        result: dict[str, Any],
+    ) -> None:
+        task = result.get("task")
+        turn_id = str(authorized.get("turn_id") or "")
+        if not result.get("ok") or not turn_id or not isinstance(task, dict):
+            return
+        self.acknowledge_delivery(
+            str(assignment["workspace_root"]),
+            turn_id=turn_id,
+            agent_id=str(assignment["agent_id"]),
+            record_id=str(task.get("record_id") or ""),
+        )
 
     def _validate_turn_open(self, authorized: dict[str, Any]) -> None:
         turn_id = str(authorized.get("turn_id") or "")
