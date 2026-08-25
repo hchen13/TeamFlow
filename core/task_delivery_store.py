@@ -839,9 +839,23 @@ def task_delivery_turn_is_current(
             return None
     if pending is not None:
         client_message_id = str(pending["client_message_id"] or "")
+        previous_turn_id = str(pending["turn_id"] or "") or None
+        pending_is_current = task_delivery_is_current(
+            context,
+            delivery_id=int(pending["id"]),
+            load_workflow=load_workflow,
+        )
+        if not pending_is_current and previous_turn_id:
+            pending_is_current = task_delivery_has_active_execution(
+                context,
+                delivery_id=int(pending["id"]),
+                load_workflow=load_workflow,
+                turn_id=previous_turn_id,
+            )
+        if not pending_is_current:
+            return False
         if turn_id_for_client_message(session_id, client_message_id) != turn_id:
             return None
-        previous_turn_id = str(pending["turn_id"] or "") or None
         require_execution_rebind = bool(
             previous_turn_id
             and task_delivery_has_active_execution(

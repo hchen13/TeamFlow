@@ -129,8 +129,8 @@ class DeliveryRuntime:
                     self.recover_waiting_sessions_for_queue(context)
                     self.resume_permission_waiting(context)
                     self.resume_session_waiting(context)
-                    self.reconcile(context)
                     self.schedule(context)
+                    self.reconcile(context)
                 except Exception as error:
                     self.log_dispatch(
                         context,
@@ -307,6 +307,17 @@ class DeliveryRuntime:
         claimed_turn_ended = False
         turn_reconciling = False
         try:
+            self.log_dispatch(
+                context,
+                "preparing",
+                event_id=delivery["source_event_id"],
+                task=task,
+                record_id=delivery["record_id"],
+                target=str(delivery["role_key"]),
+                agent=str(delivery["display_name"] or delivery["agent_id"]),
+                session=session_id,
+                attempt=int(delivery["attempts"]),
+            )
             if delivery["harness_type"] != "codex":
                 raise ValueError(
                     f"unsupported task delivery harness: {delivery['harness_type']}"
@@ -628,6 +639,28 @@ class DeliveryRuntime:
             turn_id = str(delivery.get("turn_id") or "")
             client_message_id = str(delivery.get("client_message_id") or "")
             queue_pending = delivery.get("turn_status") in {"queueing", "queued"}
+            if queue_pending:
+                queue_is_current = task_delivery_is_current(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                )
+                if not queue_is_current and turn_id:
+                    queue_is_current = task_delivery_has_active_execution(
+                        context,
+                        delivery_id=int(delivery["id"]),
+                        turn_id=turn_id,
+                    )
+                if not queue_is_current:
+                    self._reconcile_unconfirmed_turn(
+                        context,
+                        delivery,
+                        task=task,
+                        target=target,
+                        agent=agent,
+                        thread_status="",
+                        reason="Codex queued delivery was superseded",
+                    )
+                    continue
             queued_turn_id = None
             if queue_pending and client_message_id:
                 queued_turn_id = self.turn_id_for_client_message(
@@ -1099,6 +1132,12 @@ class DeliveryRuntime:
             context,
             delivery_id=int(delivery["id"]),
         )
+        if not delivery_is_current and queue_pending and turn_id:
+            delivery_is_current = task_delivery_has_active_execution(
+                context,
+                delivery_id=int(delivery["id"]),
+                turn_id=turn_id,
+            )
         if queue_pending and delivery_is_current:
             if (
                 delivery.get("turn_status") == "queueing"
@@ -1197,34 +1236,57 @@ class DeliveryRuntime:
                 )
             return
         if not delivery_is_current:
+            stale_reason = f"{reason}; task no longer needs this delivery"
             if queue_pending:
+                materialized_turn_id = ""
+                try:
+                    materialized_turn_id = str(
+                        self.turn_id_for_client_message(
+                            str(delivery["session_id"]),
+                            str(delivery.get("client_message_id") or ""),
+                        )
+                        or ""
+                    )
+                except Exception:
+                    materialized_turn_id = ""
+                cancel_reconciled_task_delivery(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    reason=stale_reason,
+                )
                 try:
                     removed = self.cancel_queued_message(
                         str(delivery["session_id"]),
                         str(delivery.get("client_message_id") or ""),
                     )
-                except Exception as error:
-                    defer_task_delivery_reconciliation(
-                        context,
-                        delivery_id=int(delivery["id"]),
-                        error=error,
-                    )
-                    return
-                if not removed and not _reconciliation_lease_expired(delivery):
-                    defer_task_delivery_reconciliation(
-                        context,
-                        delivery_id=int(delivery["id"]),
-                        error=ValueError(
-                            f"{reason}; queued message removal is not yet confirmed"
-                        ),
-                    )
-                    return
-            stale_reason = f"{reason}; task no longer needs this delivery"
-            cancel_reconciled_task_delivery(
-                context,
-                delivery_id=int(delivery["id"]),
-                reason=stale_reason,
-            )
+                except Exception:
+                    removed = False
+                if not removed and not materialized_turn_id:
+                    try:
+                        materialized_turn_id = str(
+                            self.turn_id_for_client_message(
+                                str(delivery["session_id"]),
+                                str(delivery.get("client_message_id") or ""),
+                            )
+                            or ""
+                        )
+                    except Exception:
+                        materialized_turn_id = ""
+                if not removed and materialized_turn_id:
+                    try:
+                        self.stop_turn(
+                            str(delivery["session_id"]),
+                            expected_turn_id=materialized_turn_id,
+                        )
+                    except Exception as error:
+                        if not _turn_stop_error_means_inactive(error):
+                            stale_reason = f"{stale_reason}; {error}"
+            else:
+                cancel_reconciled_task_delivery(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    reason=stale_reason,
+                )
             self.log_dispatch(
                 context,
                 "not-required",
@@ -1234,7 +1296,7 @@ class DeliveryRuntime:
                 target=target,
                 agent=agent,
                 session=str(delivery["session_id"]),
-                turn=str(delivery["turn_id"]),
+                turn=materialized_turn_id if queue_pending else turn_id,
                 reason=stale_reason,
             )
             return

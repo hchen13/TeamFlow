@@ -43,6 +43,24 @@ def prepare_task_deliveries(
             """
         ).fetchall()
         for event in events:
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET next_attempt_at = NULL
+                WHERE status = 'processing'
+                  AND turn_status IN ('queueing', 'queued')
+                  AND id IN (
+                    SELECT delivery.id
+                    FROM task_event_deliveries AS delivery
+                    JOIN task_events AS queued_event
+                      ON queued_event.event_key = delivery.event_key
+                    WHERE queued_event.board_id = ?
+                      AND queued_event.table_id = ?
+                      AND queued_event.record_id = ?
+                  )
+                """,
+                (event["board_id"], event["table_id"], event["record_id"]),
+            )
             task = json.loads(
                 event["after_json"] or event["before_json"] or "{}"
             )

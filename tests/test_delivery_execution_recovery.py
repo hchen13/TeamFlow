@@ -797,13 +797,19 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             delivery_id=int(delivery["id"]),
         )
         self.advance_to_review()
+        prepare_task_deliveries(context)
         with connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE task_event_deliveries SET next_attempt_at = NULL"
-            )
+            next_attempt_at = conn.execute(
+                "SELECT next_attempt_at FROM task_event_deliveries WHERE id = ?",
+                (delivery["id"],),
+            ).fetchone()[0]
+        self.assertIsNone(next_attempt_at)
         removed = []
 
         self.runtime(
+            turn_id_for_client_message=lambda *_args: self.fail(
+                "a stale queued delivery must be rejected before turn binding"
+            ),
             read_thread=lambda *_args, **_kwargs: self.fail(
                 "a non-materialized queued turn should not start app-server"
             ),
@@ -822,6 +828,183 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             removed,
             [("session_recovery", delivery["client_message_id"])],
         )
+
+    def test_materialized_stale_queue_is_stopped_without_turn_binding(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_queued(context, delivery_id=int(delivery["id"]))
+        self.advance_to_review()
+        prepare_task_deliveries(context)
+        stopped = []
+
+        self.runtime(
+            turn_id_for_client_message=lambda *_args: "turn_stale",
+            cancel_queued_message=lambda *_args: False,
+            stop_turn=lambda session_id, *, expected_turn_id: stopped.append(
+                (session_id, expected_turn_id)
+            ),
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_id, next_attempt_at FROM task_event_deliveries "
+                "WHERE id = ?",
+                (delivery["id"],),
+            ).fetchone()
+        self.assertEqual(saved["status"], "canceled")
+        self.assertIsNone(saved["turn_id"])
+        self.assertIsNone(saved["next_attempt_at"])
+        self.assertEqual(stopped, [("session_recovery", "turn_stale")])
+
+    def test_tool_admission_does_not_bind_a_stale_queued_turn(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+        mark_task_delivery_queued(context, delivery_id=int(delivery["id"]))
+        self.advance_to_review()
+        mapper_called = False
+
+        def mapper(*_args):
+            nonlocal mapper_called
+            mapper_called = True
+            return "turn_stale"
+
+        self.assertFalse(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_stale",
+            agent_id="agent_recovery",
+            session_id="session_recovery",
+            turn_id_for_client_message=mapper,
+        ))
+        self.assertFalse(mapper_called)
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT turn_id FROM task_event_deliveries WHERE id = ?",
+                (delivery["id"],),
+            ).fetchone()
+        self.assertIsNone(saved["turn_id"])
+        self.assertEqual(
+            task_delivery_turn_count(context, delivery_id=int(delivery["id"])),
+            0,
+        )
+
+    def test_blocked_queue_is_revoked_when_the_task_becomes_ready(self) -> None:
+        context = self.context()
+        with connect(self.db_path) as conn:
+            workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
+            role = conn.execute(
+                "SELECT * FROM roles WHERE workflow_id = ? AND role_key = 'pm'",
+                (workspace["current_workflow_id"],),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO agents (
+                  id, workspace_id, workflow_id, role_id, role_key,
+                  harness_type, session_id, display_name, created_at, updated_at
+                ) VALUES (
+                  'agent_pm', ?, ?, ?, 'pm', 'codex',
+                  'session_pm', 'PM', ?, ?
+                )
+                """,
+                (
+                    workspace["id"],
+                    workspace["current_workflow_id"],
+                    role["id"],
+                    now(),
+                    now(),
+                ),
+            )
+        blocked = {
+            **self.ready_task(),
+            "status": "blocked",
+            "blocked_reason": "Waiting for a decision",
+            "waiting_on": "stakeholder",
+            "next_action": "PM resolves the blocker",
+        }
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=blocked,
+            source_event_id="evtRecoveryBlocked",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        blocked_delivery = claim_task_deliveries(context)[0]
+        self.assertEqual(blocked_delivery["session_id"], "session_pm")
+        mark_task_delivery_queued(
+            context,
+            delivery_id=int(blocked_delivery["id"]),
+        )
+
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="2",
+        )
+        prepare_task_deliveries(context)
+        with connect(self.db_path) as conn:
+            stale = conn.execute(
+                "SELECT next_attempt_at FROM task_event_deliveries WHERE id = ?",
+                (blocked_delivery["id"],),
+            ).fetchone()
+        self.assertIsNone(stale["next_attempt_at"])
+
+        removed = []
+        self.runtime(
+            turn_id_for_client_message=lambda *_args: None,
+            cancel_queued_message=lambda session_id, client_id: (
+                removed.append((session_id, client_id)) or True
+            ),
+        ).reconcile(context)
+
+        ready_delivery = claim_task_deliveries(context)[0]
+        self.assertEqual(ready_delivery["session_id"], "session_recovery")
+        with connect(self.db_path) as conn:
+            stale = conn.execute(
+                "SELECT status FROM task_event_deliveries WHERE id = ?",
+                (blocked_delivery["id"],),
+            ).fetchone()
+        self.assertEqual(stale["status"], "canceled")
+        self.assertEqual(
+            removed,
+            [("session_pm", blocked_delivery["client_message_id"])],
+        )
+
+    def test_consumer_schedules_before_reconciling_old_deliveries(self) -> None:
+        runtime = self.runtime()
+        runtime.routes_ready.set()
+        calls = []
+        runtime.recover_waiting_sessions_for_queue = lambda _context: None
+        runtime.resume_permission_waiting = lambda _context: None
+        runtime.resume_session_waiting = lambda _context: None
+        runtime.schedule = lambda _context: calls.append("schedule")
+
+        def reconcile(_context):
+            calls.append("reconcile")
+            runtime.stopping.set()
+            runtime.wakeup.set()
+
+        runtime.reconcile = reconcile
+        runtime.consume()
+
+        self.assertEqual(calls, ["schedule", "reconcile"])
 
     def test_interrupted_dispatch_before_claim_stays_reconcilable(self) -> None:
         context = self.context()

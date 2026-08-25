@@ -137,6 +137,7 @@ def log_dispatch(
     styles = {
         "not-required": "2",
         "waiting": "1;33",
+        "preparing": "1;34",
         "queued": "1;34",
         "started": "1;34",
         "retry": "1;33",
