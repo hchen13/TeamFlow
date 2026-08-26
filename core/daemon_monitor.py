@@ -109,29 +109,32 @@ class DaemonMonitor:
                     return None
                 self.condition.wait(remaining)
 
-    def status(self) -> dict[str, Any]:
-        with self.sync_lock:
-            apps = [
-                {
-                    "app_id": worker["context"].app_id,
-                    "app_name": worker["context"].app_name,
-                    "brand": worker["context"].brand,
-                    "connected": (
-                        worker["process"].is_alive()
-                        and worker["ready"].is_set()
-                    ),
-                }
-                for worker in self.workers.values()
-            ]
-            routes = [
-                {
-                    "workspace_root": root,
-                    "app_id": context.app_id,
-                    "file_token": context.file_token,
-                    "table_id": context.table_id,
-                }
-                for root, context in self.routes.items()
-            ]
+    def status(self, *, include_topology: bool = True) -> dict[str, Any]:
+        apps: list[dict[str, Any]] = []
+        routes: list[dict[str, Any]] = []
+        if include_topology:
+            with self.sync_lock:
+                apps = [
+                    {
+                        "app_id": worker["context"].app_id,
+                        "app_name": worker["context"].app_name,
+                        "brand": worker["context"].brand,
+                        "connected": (
+                            worker["process"].is_alive()
+                            and worker["ready"].is_set()
+                        ),
+                    }
+                    for worker in self.workers.values()
+                ]
+                routes = [
+                    {
+                        "workspace_root": root,
+                        "app_id": context.app_id,
+                        "file_token": context.file_token,
+                        "table_id": context.table_id,
+                    }
+                    for root, context in self.routes.items()
+                ]
         # A dead event consumer leaves the worker processes connected, so reporting only their
         # sockets would keep claiming the board is watched when nothing drains the inbox.
         # One consistent read: a component is never reported without the error that explains it.

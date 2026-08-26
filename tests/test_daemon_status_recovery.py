@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.daemon import (
+    TeamFlowDaemon,
     _daemon_request,
     daemon_socket_path,
     daemon_status,
@@ -108,6 +109,97 @@ class DaemonStatusRecoveryTest(unittest.TestCase):
         self.assertEqual(status["consumer_error"], "SystemExit: 23")
         self.assertEqual(status["inbox"], {})
         self.assertIs(status["healthy"], False)
+
+    def test_startup_status_does_not_wait_for_the_workspace_sync_lock(self):
+        from core.daemon_monitor import DaemonMonitor
+
+        sync_lock = threading.RLock()
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_sync_lock() -> None:
+            with sync_lock:
+                held.set()
+                release.wait()
+
+        holder = threading.Thread(target=hold_sync_lock, daemon=True)
+        holder.start()
+        self.assertTrue(held.wait(1))
+        monitor = DaemonMonitor(
+            routes={},
+            workers={},
+            active_sessions=set(),
+            stopping=threading.Event(),
+            sync_lock=sync_lock,
+            app_key=lambda context: "",
+            read_failure=lambda: {},
+            resolve=lambda name: (lambda: {}),
+        )
+
+        result: list[dict] = []
+        finished = threading.Event()
+
+        def read_status() -> None:
+            result.append(monitor.status(include_topology=False))
+            finished.set()
+
+        reader = threading.Thread(target=read_status, daemon=True)
+        reader.start()
+        try:
+            self.assertTrue(finished.wait(0.5), "startup status waited for workspace sync")
+        finally:
+            release.set()
+            holder.join(1)
+            reader.join(1)
+
+        status = result[0]
+        self.assertEqual(status["apps"], [])
+        self.assertEqual(status["workspaces"], [])
+        self.assertIs(status["healthy"], True)
+
+    def test_real_daemon_reports_starting_while_workspace_sync_holds_the_lock(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_sync(runtime, workspace):
+            with runtime.sync_lock:
+                entered.set()
+                release.wait()
+            return {"workspace_root": workspace}
+
+        with patch("core.daemon.registered_workspaces", return_value=["/slow"]), patch.object(
+            TeamFlowDaemon,
+            "sync_workspace",
+            autospec=True,
+            side_effect=slow_sync,
+        ), contextlib.redirect_stdout(io.StringIO()):
+            server = threading.Thread(target=run_daemon, daemon=True)
+            server.start()
+            try:
+                self.until(lambda: daemon_socket_path().exists() and entered.is_set())
+
+                status = daemon_status()
+
+                self.assertIs(status["running"], True)
+                self.assertIs(status["healthy"], True)
+                self.assertIs(status["ready"], False)
+                self.assertEqual(
+                    status["startup"],
+                    {
+                        "state": "starting",
+                        "total_workspaces": 1,
+                        "completed_workspaces": 0,
+                        "failed_workspaces": 0,
+                        "current_workspace": "/slow",
+                    },
+                )
+            finally:
+                release.set()
+                self.until(lambda: daemon_status().get("ready") is True)
+                _daemon_request({"action": "shutdown"}, timeout=5)
+                server.join(timeout=20)
+
+        self.assertFalse(server.is_alive())
 
     def test_an_offline_status_never_reads_the_database(self):
         calls: list[int] = []

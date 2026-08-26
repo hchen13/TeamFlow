@@ -72,6 +72,16 @@ def keeper(sessions, connection=None, connect=None):
 
 
 class SessionKeeperTest(unittest.TestCase):
+    def test_snapshot_names_follow_declarations_without_claiming_sessions_are_loaded(self):
+        keep, _, _ = keeper({"session_a", "session_b"})
+
+        keep._tick()
+        snapshot = keep.snapshot()
+
+        self.assertEqual(snapshot["declared_sessions"], 2)
+        self.assertEqual(snapshot["registered_sessions"], 2)
+        self.assertNotIn("loaded_sessions", snapshot)
+
     def test_the_first_connection_follows_only_the_registered_sessions(self):
         keep, _, connection = keeper({"session_a", "session_b"})
 

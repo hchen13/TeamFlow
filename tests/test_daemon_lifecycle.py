@@ -26,6 +26,13 @@ from core.lark_events import LarkEventContext
 
 ROOT = Path(__file__).resolve().parents[1]
 HEALTHY = {"running": True, "healthy": True, "consumer_error": None}
+STARTING = {
+    "running": True,
+    "healthy": True,
+    "ready": False,
+    "startup": {"state": "starting"},
+    "consumer_error": None,
+}
 UNHEALTHY = {"running": True, "healthy": False, "consumer_error": "SchemaCompatibilityError: x"}
 STOPPED = {"running": False, "healthy": False, "consumer_error": None}
 CONTEXT = LarkEventContext(
@@ -156,6 +163,14 @@ class DaemonLifecycleTest(unittest.TestCase):
             "core.daemon.subprocess.Popen"
         ) as popen:
             self.assertEqual(ensure_daemon(), HEALTHY)
+
+        popen.assert_not_called()
+
+    def test_a_healthy_starting_daemon_is_returned_without_waiting_for_workspace_sync(self):
+        with patch("core.daemon.daemon_status", return_value=STARTING), patch(
+            "core.daemon.subprocess.Popen"
+        ) as popen:
+            self.assertEqual(ensure_daemon(), STARTING)
 
         popen.assert_not_called()
 
@@ -478,6 +493,15 @@ class SessionKeeperWiringTest(unittest.TestCase):
             runtime = TeamFlowDaemon()
         runtime.session_keeper = Mock()
         runtime.monitor = Mock(status=Mock(return_value={"running": True}))
+        runtime.routes_ready = threading.Event()
+        runtime.startup_lock = threading.Lock()
+        runtime.startup_progress = {
+            "state": "starting",
+            "total_workspaces": 0,
+            "completed_workspaces": 0,
+            "failed_workspaces": 0,
+            "current_workspace": None,
+        }
         return runtime
 
     def test_the_keeper_only_starts_once_the_daemon_is_listening(self):
@@ -518,14 +542,42 @@ class SessionKeeperWiringTest(unittest.TestCase):
         runtime.session_keeper.close.assert_called_once_with()
         self.assertTrue(runtime.stopping.is_set())
 
-    def test_status_reports_the_keeper_without_touching_the_monitor(self):
+    def test_startup_status_reports_the_keeper_without_reading_topology(self):
         runtime = self.runtime()
+        runtime.monitor.status.return_value = {
+            "running": True,
+            "healthy": True,
+            "stopping": False,
+        }
         runtime.session_keeper.snapshot.return_value = {"connected": True, "following": 2}
 
         status = runtime.status()
 
         self.assertEqual(status["running"], True)
+        self.assertEqual(status["ready"], False)
+        self.assertEqual(status["startup"]["state"], "starting")
         self.assertEqual(status["session_keeper"]["following"], 2)
+        runtime.monitor.status.assert_called_once_with(include_topology=False)
+
+    def test_startup_progress_tracks_each_registered_workspace(self):
+        runtime = self.runtime()
+
+        runtime.begin_startup(["/one", "/two"])
+        runtime.begin_workspace_startup("/one")
+        runtime.finish_workspace_startup(failed=False)
+        runtime.begin_workspace_startup("/two")
+        runtime.finish_workspace_startup(failed=True)
+
+        self.assertEqual(
+            runtime.startup_snapshot(),
+            {
+                "state": "starting",
+                "total_workspaces": 2,
+                "completed_workspaces": 2,
+                "failed_workspaces": 1,
+                "current_workspace": None,
+            },
+        )
 
 
 if __name__ == "__main__":

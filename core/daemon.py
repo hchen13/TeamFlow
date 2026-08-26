@@ -135,6 +135,14 @@ class TeamFlowDaemon:
         self.sync_lock = threading.RLock()
         self.stopping = threading.Event()
         self.routes_ready = threading.Event()
+        self.startup_lock = threading.Lock()
+        self.startup_progress: dict[str, Any] = {
+            "state": "starting",
+            "total_workspaces": 0,
+            "completed_workspaces": 0,
+            "failed_workspaces": 0,
+            "current_workspace": None,
+        }
         self.delivery_wakeup = threading.Event()
         self.active_sessions: set[str] = set()
         self.delivery_workers: dict[str, threading.Thread] = {}
@@ -450,9 +458,39 @@ class TeamFlowDaemon:
 
     def finish_startup(self) -> None:
         _emit_log("DAEMON LISTENING", fields={"apps": len(self.workers), "workspaces": len(self.routes)})
-        self.routes_ready.set()
+        with self.startup_lock:
+            self.startup_progress["state"] = "ready"
+            self.startup_progress["current_workspace"] = None
+            self.routes_ready.set()
         self.delivery_wakeup.set()
         self.session_keeper.start()
+
+    def begin_startup(self, workspaces: list[str]) -> None:
+        with self.startup_lock:
+            self.startup_progress.update(
+                {
+                    "state": "starting",
+                    "total_workspaces": len(workspaces),
+                    "completed_workspaces": 0,
+                    "failed_workspaces": 0,
+                    "current_workspace": None,
+                }
+            )
+
+    def begin_workspace_startup(self, workspace: str) -> None:
+        with self.startup_lock:
+            self.startup_progress["current_workspace"] = workspace
+
+    def finish_workspace_startup(self, *, failed: bool) -> None:
+        with self.startup_lock:
+            self.startup_progress["completed_workspaces"] += 1
+            if failed:
+                self.startup_progress["failed_workspaces"] += 1
+            self.startup_progress["current_workspace"] = None
+
+    def startup_snapshot(self) -> dict[str, Any]:
+        with self.startup_lock:
+            return dict(self.startup_progress)
 
     def release_ephemeral_workspace(self, workspace: str | None) -> None:
         root = str(resolve_workspace_paths(workspace).root)
@@ -495,7 +533,14 @@ class TeamFlowDaemon:
         self.monitor.publish(app_key, payload)
 
     def status(self) -> dict[str, Any]:
-        return {**self.monitor.status(), "session_keeper": self.session_keeper.snapshot()}
+        routes_ready = self.routes_ready.is_set()
+        status = self.monitor.status(include_topology=routes_ready)
+        return {
+            **status,
+            "ready": routes_ready and not status["stopping"],
+            "startup": self.startup_snapshot(),
+            "session_keeper": self.session_keeper.snapshot(),
+        }
 
     def assignment_context(
         self,
@@ -888,6 +933,7 @@ def daemon_status() -> dict[str, Any]:
         return {
             "running": False,
             "healthy": False,
+            "ready": False,
             "stopping": False,
             "failed_component": None,
             "consumer_error": None,
@@ -896,6 +942,13 @@ def daemon_status() -> dict[str, Any]:
             "workspaces": [],
             # Reporting an offline daemon must not depend on the database it could not reach.
             "inbox": {},
+            "startup": {
+                "state": "offline",
+                "total_workspaces": 0,
+                "completed_workspaces": 0,
+                "failed_workspaces": 0,
+                "current_workspace": None,
+            },
         }
 
 
@@ -987,7 +1040,11 @@ def _read_response(line: bytes) -> dict[str, Any]:
 
 def _sync_registered_workspaces(runtime: TeamFlowDaemon) -> None:
     try:
-        for workspace in registered_workspaces(enabled_only=True):
+        workspaces = registered_workspaces(enabled_only=True)
+        runtime.begin_startup(workspaces)
+        for workspace in workspaces:
+            runtime.begin_workspace_startup(workspace)
+            failed = False
             try:
                 result = runtime.sync_workspace(workspace)
                 _emit_log(
@@ -996,10 +1053,13 @@ def _sync_registered_workspaces(runtime: TeamFlowDaemon) -> None:
                     fields={"board": result.get("board_name"), "table": result.get("table_name")},
                 )
             except Exception as error:
+                failed = True
                 _emit_log(
                     _style("WORKSPACE SKIPPED", "1;31"),
                     fields={"workspace": workspace, "reason": str(error)},
                 )
+            finally:
+                runtime.finish_workspace_startup(failed=failed)
     finally:
         runtime.finish_startup()
 

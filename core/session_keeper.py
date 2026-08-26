@@ -75,6 +75,10 @@ class SessionKeeper:
         with self.lock:
             return {
                 "connected": self.connection is not None,
+                # These are follow declarations, not proof that Desktop currently has the
+                # sessions loaded. Keep the protocol names below for compatibility.
+                "declared_sessions": len(self.following),
+                "registered_sessions": len(self.desired),
                 "following": len(self.following),
                 "desired": len(self.desired),
                 "connects": self.connects,
