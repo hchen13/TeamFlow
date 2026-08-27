@@ -685,20 +685,10 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
         with connect(self.db_path) as conn:
             conn.execute("UPDATE task_event_deliveries SET next_attempt_at = NULL")
 
-        thread = {
-            "status": {"type": "idle"},
-            "turns": [{
-                "id": "turn_original",
-                "status": "interrupted",
-                "items": [{
-                    "type": "userMessage",
-                    "clientId": delivery["client_message_id"],
-                }],
-            }],
-        }
         self.runtime(
-            read_thread=lambda *_args, **_kwargs: thread,
-            turn_completed=lambda *_args, **_kwargs: True,
+            read_thread=lambda *_args, **_kwargs: self.fail(
+                "an acknowledged delivery must not load the full Codex thread"
+            ),
         ).reconcile(context)
 
         with connect(self.db_path) as conn:
@@ -1622,17 +1612,10 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                     started_at = '2000-01-01T00:00:00+00:00'
                 """
             )
-        thread = {
-            "status": {"type": "idle"},
-            "turns": [{
-                "id": "turn_original",
-                "status": "interrupted",
-                "items": [],
-            }],
-        }
-
         self.runtime(
-            read_thread=lambda *_args, **_kwargs: thread,
+            read_thread=lambda *_args, **_kwargs: self.fail(
+                "a running rollout must not load the full Codex thread"
+            ),
             turn_started=lambda *_args, **_kwargs: True,
             turn_completed=lambda *_args, **_kwargs: False,
         ).reconcile(context)

@@ -780,6 +780,43 @@ class DeliveryRuntime:
                     turn=turn_id,
                     reason="recovered from queued client message ID",
                 )
+            active_execution = bool(
+                turn_id
+                and task_delivery_has_active_execution(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    turn_id=turn_id,
+                )
+            )
+            acknowledged = bool(
+                turn_id
+                and task_delivery_turn_acknowledged(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                    turn_id=turn_id,
+                )
+            )
+            if acknowledged and not active_execution:
+                self._finish_acknowledged_turn(
+                    context,
+                    delivery,
+                    task=task,
+                    target=target,
+                    agent=agent,
+                    turn=turn_id,
+                    reason="TeamFlow task update acknowledged this delivery",
+                )
+                continue
+            if (
+                turn_id
+                and not self.turn_completed(session_id, turn_id)
+                and self.turn_started(session_id, turn_id)
+            ):
+                defer_task_delivery_reconciliation(
+                    context,
+                    delivery_id=int(delivery["id"]),
+                )
+                continue
             try:
                 thread = self.read_thread(session_id, include_turns=True)
                 turn = (
