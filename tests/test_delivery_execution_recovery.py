@@ -44,7 +44,9 @@ from core.task_dispatch import (
     task_delivery_turn_acknowledged,
     task_delivery_turn_is_current,
 )
+from core.task_execution import TaskExecutionRuntime
 from core.tool_runtime import ToolRuntime
+from core.workflow import load_workflow_definition
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -202,6 +204,70 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 ),
             )
 
+    def sync_read_only_execution_turn(self, *, turn_id: str) -> None:
+        runtime = TaskExecutionRuntime(
+            get_task=lambda *_args, **_kwargs: {},
+            stop_turn=lambda *_args, **_kwargs: {},
+            read_thread=lambda *_args, **_kwargs: {},
+            thread_permanently_unavailable=lambda _error: False,
+            active_sessions=lambda: set(),
+            load_workflow=load_workflow_definition,
+        )
+        runtime.sync_activity(
+            {
+                "workspace_root": self.workspace,
+                "workflow_key": "software-development",
+                "agent_id": "agent_recovery",
+            },
+            tool_name="get_task",
+            result={
+                "ok": True,
+                "task": {
+                    **self.ready_task(),
+                    "status": "in_progress",
+                    "agent": "Recovery TL",
+                    "agent_id": "agent_recovery",
+                },
+            },
+            session_id="session_recovery",
+            turn_id=turn_id,
+        )
+
+    def continuation_tool_runtime(
+        self,
+        context: LarkEventContext,
+        *,
+        invoke_tool,
+    ) -> ToolRuntime:
+        assignment = {
+            "workspace_root": self.workspace,
+            "workflow_key": "software-development",
+            "agent_id": "agent_recovery",
+            "session_id": "session_recovery",
+        }
+        return ToolRuntime(
+            sync_lock=threading.RLock(),
+            assignment_context=lambda **_kwargs: {"assignment": assignment},
+            workspace_active=lambda _workspace: True,
+            invoke_tool=invoke_tool,
+            sync_task_activity=lambda *_args, **_kwargs: None,
+            delivery_record_id=lambda current, **kwargs: task_delivery_record_id(
+                current["workspace_root"],
+                agent_id=current["agent_id"],
+                **kwargs,
+            ),
+            delivery_turn_is_current=lambda current, **kwargs: (
+                task_delivery_turn_is_current(
+                    context,
+                    agent_id=current["agent_id"],
+                    session_id=current["session_id"],
+                    turn_id_for_client_message=lambda *_args: None,
+                    **kwargs,
+                )
+            ),
+            acknowledge_delivery=acknowledge_task_delivery_turn,
+        )
+
     def advance_to_review(self) -> None:
         save_task_snapshot(
             self.context(),
@@ -315,6 +381,168 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             arguments={"record_id": "recRecovery", "outcome": "completed"},
         )
         self.assertTrue(result["ok"])
+
+    def test_read_only_manual_turn_rebinds_claimed_delivery_before_submit(self) -> None:
+        context = self.context()
+        delivery = self.start_delivery()
+        self.claim_execution()
+        self.assertTrue(acknowledge_task_delivery_turn(
+            self.workspace,
+            turn_id="turn_original",
+            agent_id="agent_recovery",
+            record_id="recRecovery",
+        ))
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE task_event_deliveries
+                SET turn_status = 'queued', client_message_id = 'stale-queue'
+                WHERE id = ?
+                """,
+                (delivery["id"],),
+            )
+        self.sync_read_only_execution_turn(turn_id="turn_manual")
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE lark_task_state
+                SET snapshot_json = json_set(
+                  snapshot_json, '$.agent', NULL, '$.agent_id', NULL
+                ), updated_at = ?
+                WHERE record_id = 'recRecovery'
+                """,
+                (now(),),
+            )
+
+        runtime = self.continuation_tool_runtime(
+            context,
+            invoke_tool=lambda *_args, **_kwargs: {
+                "ok": True,
+                "task": {"record_id": "recRecovery", "status": "review"},
+            },
+        )
+        grant = runtime.authorize(
+            invocation_id="manual-submit",
+            session_id="session_recovery",
+            cwd=self.workspace,
+            turn_id="turn_manual",
+            tool_name="mcp__teamflow__submit_task",
+            tool_input={"record_id": "recRecovery", "outcome": "completed"},
+        )
+
+        with connect(self.db_path) as conn:
+            rebound = conn.execute(
+                """
+                SELECT turn_id, turn_status, client_message_id
+                FROM task_event_deliveries WHERE id = ?
+                """,
+                (delivery["id"],),
+            ).fetchone()
+            history = conn.execute(
+                """
+                SELECT turn_id FROM task_delivery_turns
+                WHERE delivery_id = ? ORDER BY created_at, turn_id
+                """,
+                (delivery["id"],),
+            ).fetchall()
+        self.assertEqual(
+            (rebound["turn_id"], rebound["turn_status"], rebound["client_message_id"]),
+            ("turn_manual", "inProgress", None),
+        )
+        self.assertEqual(
+            {row["turn_id"] for row in history},
+            {"turn_original", "turn_manual"},
+        )
+
+        result = runtime.invoke(
+            invocation_id="manual-submit",
+            grant=grant["grant"],
+            tool_name="submit_task",
+            arguments={"record_id": "recRecovery", "outcome": "completed"},
+        )
+        self.assertEqual(result["turn_control"]["action"], "end_turn")
+        self.assertTrue(task_delivery_turn_acknowledged(
+            context,
+            delivery_id=int(delivery["id"]),
+            turn_id="turn_manual",
+        ))
+
+    def test_manual_rebind_rejects_stale_turn_wrong_identity_and_other_record(self) -> None:
+        context = self.context()
+        delivery = self.start_delivery()
+        self.claim_execution()
+        self.sync_read_only_execution_turn(turn_id="turn_manual")
+
+        self.assertTrue(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_manual",
+            agent_id="agent_recovery",
+            session_id="session_recovery",
+        ))
+        self.assertFalse(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_original",
+            agent_id="agent_recovery",
+            session_id="session_recovery",
+        ))
+        self.assertIsNone(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_manual",
+            agent_id="agent_other",
+            session_id="session_recovery",
+        ))
+        self.assertIsNone(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_manual",
+            agent_id="agent_recovery",
+            session_id="session_other",
+        ))
+
+        runtime = self.continuation_tool_runtime(
+            context,
+            invoke_tool=lambda *_args, **_kwargs: self.fail(
+                "an unrelated task must be rejected before invocation"
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "different TeamFlow task"):
+            runtime.authorize(
+                invocation_id="manual-other-task",
+                session_id="session_recovery",
+                cwd=self.workspace,
+                turn_id="turn_manual",
+                tool_name="mcp__teamflow__submit_task",
+                tool_input={"record_id": "recOther", "outcome": "completed"},
+            )
+        with self.assertRaisesRegex(ValueError, "no longer active"):
+            runtime.authorize(
+                invocation_id="stale-original-submit",
+                session_id="session_recovery",
+                cwd=self.workspace,
+                turn_id="turn_original",
+                tool_name="mcp__teamflow__submit_task",
+                tool_input={"record_id": "recRecovery", "outcome": "completed"},
+            )
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT snapshot_json FROM lark_task_state WHERE record_id = ?",
+                ("recRecovery",),
+            ).fetchone()
+            snapshot = json.loads(row["snapshot_json"])
+            snapshot["agent"] = "Other TL"
+            snapshot["agent_id"] = "agent_other"
+            conn.execute(
+                """
+                UPDATE lark_task_state SET snapshot_json = ?, updated_at = ?
+                WHERE record_id = ?
+                """,
+                (json.dumps(snapshot, sort_keys=True), now(), "recRecovery"),
+            )
+        self.assertFalse(task_delivery_turn_is_current(
+            context,
+            turn_id="turn_manual",
+            agent_id="agent_recovery",
+            session_id="session_recovery",
+        ))
 
     def test_interrupted_dispatch_with_a_claim_stays_reconcilable(self) -> None:
         context = self.context()

@@ -12,6 +12,7 @@ from .task_delivery_execution import (
     active_delivery_execution,
     active_delivery_execution_in,
     rebind_active_delivery_execution,
+    rebind_delivery_to_exact_active_execution,
     stop_active_delivery_execution,
 )
 from .task_routing import (
@@ -913,7 +914,19 @@ def task_delivery_turn_is_current(
             conn,
             turn_id=turn_id,
             agent_id=agent_id,
+            session_id=session_id,
         )
+        if session_id and (row is None or str(row["turn_id"] or "") != turn_id):
+            rebound = rebind_delivery_to_exact_active_execution(
+                conn,
+                workflow_key=context.workflow_key,
+                load_workflow=load_workflow,
+                turn_id=turn_id,
+                agent_id=agent_id,
+                session_id=session_id,
+            )
+            if rebound:
+                return True
         pending = None
         if row is None and session_id and turn_id_for_client_message:
             pending = conn.execute(
@@ -976,12 +989,14 @@ def task_delivery_turn_is_current(
             turn_id=turn_id,
             agent_id=agent_id,
             load_workflow=load_workflow,
+            session_id=session_id,
         )
     with connect(context.db_path) as conn:
         row = _task_delivery_for_turn_in(
             conn,
             turn_id=turn_id,
             agent_id=agent_id,
+            session_id=session_id,
         )
         if row is None:
             return None
@@ -1010,6 +1025,7 @@ def _task_delivery_for_turn_in(
     *,
     turn_id: str,
     agent_id: str,
+    session_id: str | None = None,
 ) -> Any:
     return conn.execute(
         """
@@ -1022,10 +1038,11 @@ def _task_delivery_for_turn_in(
          AND delivery_turn.turn_id = ?
         WHERE (delivery.turn_id = ? OR delivery_turn.turn_id IS NOT NULL)
           AND delivery.agent_id = ?
+          AND (? IS NULL OR delivery.session_id = ?)
         ORDER BY delivery.started_at DESC, delivery.id DESC
         LIMIT 1
         """,
-        (turn_id, turn_id, agent_id),
+        (turn_id, turn_id, agent_id, session_id, session_id),
     ).fetchone()
 
 

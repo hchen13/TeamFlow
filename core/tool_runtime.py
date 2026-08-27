@@ -117,20 +117,33 @@ class ToolRuntime:
                     "reply now; the daemon will start a new turn when more work "
                     "is available."
                 )
-        if (
-            turn_id
-            and short_name not in READ_ONLY_TOOL_NAMES
-            and not cached_invocation
-            and self.delivery_turn_is_current(
+        if turn_id and short_name not in READ_ONLY_TOOL_NAMES and not cached_invocation:
+            delivery_is_current = self.delivery_turn_is_current(
                 assignment,
                 turn_id=str(turn_id),
-            ) is False
-        ):
-            raise ValueError(
-                "TeamFlow delivery for this turn is no longer active. Read-only "
-                "tools remain available, but lifecycle and mutating tools require "
-                "the current daemon delivery or continuation."
             )
+            if delivery_is_current is False:
+                raise ValueError(
+                    "TeamFlow delivery for this turn is no longer active. Read-only "
+                    "tools remain available, but lifecycle and mutating tools require "
+                    "the current daemon delivery or continuation."
+                )
+            requested_record_id = (
+                str(tool_input.get("record_id") or "")
+                if isinstance(tool_input, dict)
+                else ""
+            )
+            if delivery_is_current is True and requested_record_id:
+                current_record_id = self.delivery_record_id(
+                    assignment,
+                    turn_id=str(turn_id),
+                )
+                if current_record_id and current_record_id != requested_record_id:
+                    raise ValueError(
+                        "TeamFlow delivery belongs to a different TeamFlow task. "
+                        "Use the current task or wait for its handoff before changing "
+                        "another task."
+                    )
         with self.sync_lock:
             self.grants[token] = {
                 "invocation_id": invocation_id,
