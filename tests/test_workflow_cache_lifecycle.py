@@ -77,8 +77,13 @@ class Board:
 class WorkflowCacheLifecycleTest(unittest.TestCase):
     def test_claimed_task_survives_removal_of_its_plugin_cache_root(self) -> None:
         tl = assignment("tl", "agent_tl")
+        other_tl = assignment("tl", "agent_other_tl")
         pm = assignment("pm", "agent_pm")
-        assignments = {"session_tl": tl, "session_pm": pm}
+        assignments = {
+            "session_tl": tl,
+            "session_other_tl": other_tl,
+            "session_pm": pm,
+        }
         board = Board()
 
         with tempfile.TemporaryDirectory(prefix="teamflow-cache-") as temporary:
@@ -106,8 +111,6 @@ class WorkflowCacheLifecycleTest(unittest.TestCase):
                 workspace_active=lambda workspace: True,
                 invoke_tool=dispatcher.invoke,
                 sync_task_activity=lambda *args, **kwargs: None,
-                delivery_record_id=lambda assignment, **kwargs: "recCache",
-                delivery_turn_is_current=lambda assignment, **kwargs: True,
             )
 
             invocation = 0
@@ -163,9 +166,19 @@ class WorkflowCacheLifecycleTest(unittest.TestCase):
 
                 shutil.rmtree(plugin_root)
 
+                denied = invoke(
+                    "session_other_tl",
+                    "turn_other_tl",
+                    "submit_task",
+                    {
+                        "record_id": "recCache",
+                        "outcome": "completed",
+                        "result_evidence": "Wrong Agent must not submit.",
+                    },
+                )
                 submitted = invoke(
                     "session_tl",
-                    "turn_tl",
+                    "turn_tl_continuation",
                     "submit_task",
                     {
                         "record_id": "recCache",
@@ -181,8 +194,9 @@ class WorkflowCacheLifecycleTest(unittest.TestCase):
             assignment_before_refresh["workflow"]["key"], "software-development"
         )
         self.assertEqual(claimed["transition"], {"from": "ready", "to": "in_progress"})
+        self.assertEqual(denied["error"]["code"], "permission_denied")
         self.assertEqual(submitted["transition"], {"from": "in_progress", "to": "review"})
-        self.assertEqual(submitted["turn_control"]["action"], "end_turn")
+        self.assertNotIn("turn_control", submitted)
         self.assertEqual(
             assignment_after_refresh["workflow"]["key"], "software-development"
         )

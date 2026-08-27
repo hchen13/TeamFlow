@@ -235,7 +235,6 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
 
     def continuation_tool_runtime(
         self,
-        context: LarkEventContext,
         *,
         invoke_tool,
     ) -> ToolRuntime:
@@ -251,20 +250,6 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             workspace_active=lambda _workspace: True,
             invoke_tool=invoke_tool,
             sync_task_activity=lambda *_args, **_kwargs: None,
-            delivery_record_id=lambda current, **kwargs: task_delivery_record_id(
-                current["workspace_root"],
-                agent_id=current["agent_id"],
-                **kwargs,
-            ),
-            delivery_turn_is_current=lambda current, **kwargs: (
-                task_delivery_turn_is_current(
-                    context,
-                    agent_id=current["agent_id"],
-                    session_id=current["session_id"],
-                    turn_id_for_client_message=lambda *_args: None,
-                    **kwargs,
-                )
-            ),
             acknowledge_delivery=acknowledge_task_delivery_turn,
         )
 
@@ -358,13 +343,6 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             },
             sync_task_activity=lambda *_args, **_kwargs: None,
             delivery_record_id=lambda *_args, **_kwargs: "recRecovery",
-            delivery_turn_is_current=lambda _assignment, **kwargs: (
-                task_delivery_turn_is_current(
-                    context,
-                    agent_id="agent_recovery",
-                    **kwargs,
-                )
-            ),
         )
         grant = tool_runtime.authorize(
             invocation_id="submit-after-interrupt",
@@ -382,7 +360,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
 
-    def test_read_only_manual_turn_rebinds_claimed_delivery_before_submit(self) -> None:
+    def test_manual_turn_can_submit_without_rebinding_delivery(self) -> None:
         context = self.context()
         delivery = self.start_delivery()
         self.claim_execution()
@@ -402,20 +380,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 (delivery["id"],),
             )
         self.sync_read_only_execution_turn(turn_id="turn_manual")
-        with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                UPDATE lark_task_state
-                SET snapshot_json = json_set(
-                  snapshot_json, '$.agent', NULL, '$.agent_id', NULL
-                ), updated_at = ?
-                WHERE record_id = 'recRecovery'
-                """,
-                (now(),),
-            )
-
         runtime = self.continuation_tool_runtime(
-            context,
             invoke_tool=lambda *_args, **_kwargs: {
                 "ok": True,
                 "task": {"record_id": "recRecovery", "status": "review"},
@@ -431,7 +396,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
         )
 
         with connect(self.db_path) as conn:
-            rebound = conn.execute(
+            unchanged = conn.execute(
                 """
                 SELECT turn_id, turn_status, client_message_id
                 FROM task_event_deliveries WHERE id = ?
@@ -446,12 +411,16 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 (delivery["id"],),
             ).fetchall()
         self.assertEqual(
-            (rebound["turn_id"], rebound["turn_status"], rebound["client_message_id"]),
-            ("turn_manual", "inProgress", None),
+            (
+                unchanged["turn_id"],
+                unchanged["turn_status"],
+                unchanged["client_message_id"],
+            ),
+            ("turn_original", "queued", "stale-queue"),
         )
         self.assertEqual(
             {row["turn_id"] for row in history},
-            {"turn_original", "turn_manual"},
+            {"turn_original"},
         )
 
         result = runtime.invoke(
@@ -460,88 +429,11 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             tool_name="submit_task",
             arguments={"record_id": "recRecovery", "outcome": "completed"},
         )
-        self.assertEqual(result["turn_control"]["action"], "end_turn")
-        self.assertTrue(task_delivery_turn_acknowledged(
+        self.assertNotIn("turn_control", result)
+        self.assertFalse(task_delivery_turn_acknowledged(
             context,
             delivery_id=int(delivery["id"]),
             turn_id="turn_manual",
-        ))
-
-    def test_manual_rebind_rejects_stale_turn_wrong_identity_and_other_record(self) -> None:
-        context = self.context()
-        delivery = self.start_delivery()
-        self.claim_execution()
-        self.sync_read_only_execution_turn(turn_id="turn_manual")
-
-        self.assertTrue(task_delivery_turn_is_current(
-            context,
-            turn_id="turn_manual",
-            agent_id="agent_recovery",
-            session_id="session_recovery",
-        ))
-        self.assertFalse(task_delivery_turn_is_current(
-            context,
-            turn_id="turn_original",
-            agent_id="agent_recovery",
-            session_id="session_recovery",
-        ))
-        self.assertIsNone(task_delivery_turn_is_current(
-            context,
-            turn_id="turn_manual",
-            agent_id="agent_other",
-            session_id="session_recovery",
-        ))
-        self.assertIsNone(task_delivery_turn_is_current(
-            context,
-            turn_id="turn_manual",
-            agent_id="agent_recovery",
-            session_id="session_other",
-        ))
-
-        runtime = self.continuation_tool_runtime(
-            context,
-            invoke_tool=lambda *_args, **_kwargs: self.fail(
-                "an unrelated task must be rejected before invocation"
-            ),
-        )
-        with self.assertRaisesRegex(ValueError, "different TeamFlow task"):
-            runtime.authorize(
-                invocation_id="manual-other-task",
-                session_id="session_recovery",
-                cwd=self.workspace,
-                turn_id="turn_manual",
-                tool_name="mcp__teamflow__submit_task",
-                tool_input={"record_id": "recOther", "outcome": "completed"},
-            )
-        with self.assertRaisesRegex(ValueError, "no longer active"):
-            runtime.authorize(
-                invocation_id="stale-original-submit",
-                session_id="session_recovery",
-                cwd=self.workspace,
-                turn_id="turn_original",
-                tool_name="mcp__teamflow__submit_task",
-                tool_input={"record_id": "recRecovery", "outcome": "completed"},
-            )
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT snapshot_json FROM lark_task_state WHERE record_id = ?",
-                ("recRecovery",),
-            ).fetchone()
-            snapshot = json.loads(row["snapshot_json"])
-            snapshot["agent"] = "Other TL"
-            snapshot["agent_id"] = "agent_other"
-            conn.execute(
-                """
-                UPDATE lark_task_state SET snapshot_json = ?, updated_at = ?
-                WHERE record_id = ?
-                """,
-                (json.dumps(snapshot, sort_keys=True), now(), "recRecovery"),
-            )
-        self.assertFalse(task_delivery_turn_is_current(
-            context,
-            turn_id="turn_manual",
-            agent_id="agent_recovery",
-            session_id="session_recovery",
         ))
 
     def test_interrupted_dispatch_with_a_claim_stays_reconcilable(self) -> None:
@@ -732,18 +624,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 "task": {"record_id": "recRecovery", "status": "review"},
             },
             sync_task_activity=lambda *_args, **_kwargs: None,
-            delivery_record_id=lambda assignment, **kwargs: task_delivery_record_id(
-                assignment["workspace_root"],
-                agent_id=assignment["agent_id"],
-                **kwargs,
-            ),
-            delivery_turn_is_current=lambda _assignment, **kwargs: (
-                task_delivery_turn_is_current(
-                    context,
-                    agent_id="agent_recovery",
-                    **kwargs,
-                )
-            ),
+            delivery_record_id=lambda *_args, **_kwargs: "recRecovery",
         )
         grant = runtime.authorize(
             invocation_id="fast-submit",
@@ -779,14 +660,6 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 "task": self.ready_task(),
             },
             sync_task_activity=lambda *_args, **_kwargs: None,
-            delivery_record_id=lambda *_args, **_kwargs: "recRecovery",
-            delivery_turn_is_current=lambda _assignment, **kwargs: (
-                task_delivery_turn_is_current(
-                    context,
-                    agent_id="agent_recovery",
-                    **kwargs,
-                )
-            ),
             acknowledge_delivery=acknowledge_task_delivery_turn,
         )
         grant = tool_runtime.authorize(
@@ -1559,14 +1432,6 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             workspace_active=lambda _workspace: True,
             invoke_tool=lambda *_args, **_kwargs: {"ok": True},
             sync_task_activity=lambda *_args, **_kwargs: None,
-            delivery_record_id=lambda *_args, **_kwargs: "recRecovery",
-            delivery_turn_is_current=lambda _assignment, **kwargs: (
-                task_delivery_turn_is_current(
-                    context,
-                    agent_id="agent_recovery",
-                    **kwargs,
-                )
-            ),
         )
         grant = tool_runtime.authorize(
             invocation_id="read-after-late-materialization",
@@ -1857,14 +1722,6 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
                 "task": {**self.ready_task(), "status": "in_progress"},
             },
             sync_task_activity=lambda *_args, **_kwargs: None,
-            delivery_record_id=lambda *_args, **_kwargs: "recRecovery",
-            delivery_turn_is_current=lambda _assignment, **kwargs: (
-                task_delivery_turn_is_current(
-                    context,
-                    agent_id="agent_recovery",
-                    **kwargs,
-                )
-            ),
         )
         grant = tool_runtime.authorize(
             invocation_id="read-after-compaction",
@@ -2001,14 +1858,6 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             workspace_active=lambda _workspace: True,
             invoke_tool=lambda *_args, **_kwargs: {"ok": True},
             sync_task_activity=lambda *_args, **_kwargs: None,
-            delivery_record_id=lambda *_args, **_kwargs: "recRecovery",
-            delivery_turn_is_current=lambda _assignment, **kwargs: (
-                task_delivery_turn_is_current(
-                    context,
-                    agent_id="agent_recovery",
-                    **kwargs,
-                )
-            ),
         )
         grant = tool_runtime.authorize(
             invocation_id="submit-after-compaction-and-restart",

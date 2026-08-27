@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import connect, now
@@ -133,84 +132,6 @@ def rebind_active_delivery_execution(
     )
     if cursor.rowcount != 1:
         raise ValueError("TeamFlow active execution changed before continuation started")
-
-
-def rebind_delivery_to_exact_active_execution(
-    conn: Any,
-    *,
-    workflow_key: str,
-    load_workflow: WorkflowLoader,
-    turn_id: str,
-    agent_id: str,
-    session_id: str,
-) -> bool:
-    row = conn.execute(
-        """
-        SELECT delivery.id, delivery.turn_id, delivery.turn_status,
-               state.status AS task_status, state.snapshot_json
-        FROM task_executions AS execution
-        JOIN task_event_deliveries AS delivery
-          ON delivery.agent_id = execution.agent_id
-         AND delivery.session_id = execution.session_id
-        JOIN task_events AS event
-          ON event.event_key = delivery.event_key
-         AND event.record_id = execution.record_id
-        JOIN lark_task_state AS state
-          ON state.board_id = event.board_id
-         AND state.table_id = event.table_id
-         AND state.record_id = event.record_id
-        WHERE execution.turn_id = ? AND execution.agent_id = ?
-          AND execution.session_id = ? AND execution.state = 'active'
-          AND delivery.status = 'processing'
-        ORDER BY delivery.id DESC
-        LIMIT 1
-        """,
-        (turn_id, agent_id, session_id),
-    ).fetchone()
-    if row is None:
-        return False
-    execution_states = set(
-        load_workflow(workflow_key)
-        .get("runtime_actions", {})
-        .get("stop_execution", {})
-        .get("states", [])
-    )
-    task = _json_object(row["snapshot_json"])
-    snapshot_agent_id = str(task.get("agent_id") or "")
-    if (
-        row["task_status"] not in execution_states
-        or (snapshot_agent_id and snapshot_agent_id != agent_id)
-    ):
-        return False
-
-    timestamp = now()
-    cursor = conn.execute(
-        """
-        UPDATE task_event_deliveries
-        SET turn_id = ?, turn_status = 'inProgress', client_message_id = NULL,
-            last_error = NULL, next_attempt_at = ?, started_at = ?
-        WHERE id = ? AND status = 'processing'
-          AND turn_id IS ? AND turn_status IS ?
-        """,
-        (
-            turn_id,
-            (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat(),
-            timestamp,
-            row["id"],
-            row["turn_id"],
-            row["turn_status"],
-        ),
-    )
-    if cursor.rowcount != 1:
-        return False
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO task_delivery_turns (delivery_id, turn_id, created_at)
-        VALUES (?, ?, ?)
-        """,
-        (row["id"], turn_id, timestamp),
-    )
-    return True
 
 
 def stop_active_delivery_execution(

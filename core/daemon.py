@@ -94,7 +94,6 @@ from .task_dispatch import (
     processing_task_delivery_sessions_for_workspace,
     recover_task_deliveries,
     task_delivery_record_id,
-    task_delivery_turn_is_current,
 )
 from .task_execution import TaskExecutionRuntime
 from .teamflow_tool_dispatcher import TeamFlowToolDispatcher
@@ -270,9 +269,6 @@ class TeamFlowDaemon:
                     **kwargs,
                 )
             ),
-            delivery_turn_is_current=lambda assignment, **kwargs: (
-                self._delivery_turn_is_current(assignment, **kwargs)
-            ),
             acknowledge_delivery=acknowledge_task_delivery_turn,
         )
         self.session_keeper = SessionKeeper(
@@ -406,25 +402,6 @@ class TeamFlowDaemon:
                 processing_task_delivery_sessions_for_workspace(root)
             )
         return reserved
-
-    def _delivery_turn_is_current(
-        self,
-        assignment: dict[str, Any],
-        *,
-        turn_id: str,
-    ) -> bool | None:
-        workspace_root = str(assignment["workspace_root"])
-        with self.sync_lock:
-            context = self.routes.get(workspace_root)
-        if context is None:
-            return None
-        return task_delivery_turn_is_current(
-            context,
-            turn_id=turn_id,
-            agent_id=str(assignment["agent_id"]),
-            session_id=str(assignment.get("session_id") or "") or None,
-            turn_id_for_client_message=codex_turn_id_by_client_message_id,
-        )
 
     def sync_workspace(
         self,

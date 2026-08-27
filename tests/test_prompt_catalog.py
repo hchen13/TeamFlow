@@ -394,7 +394,6 @@ class TurnControlSurfaceTest(unittest.TestCase):
             invoke_tool=lambda *args, **kwargs: {},
             sync_task_activity=lambda *args, **kwargs: None,
             delivery_record_id=lambda *args, **kwargs: "recHandoff",
-            delivery_turn_is_current=lambda *args, **kwargs: True,
         )
 
     def handoff(self) -> dict[str, object]:

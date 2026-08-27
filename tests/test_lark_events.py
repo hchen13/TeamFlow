@@ -2077,7 +2077,7 @@ class LarkEventsTest(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_completed_handoff_allows_reads_but_blocks_writes_after_daemon_restart(self):
+    def test_delivery_history_does_not_revoke_a_registered_session_after_restart(self):
         context = self.context()
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
             workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
@@ -2163,15 +2163,21 @@ class LarkEventsTest(unittest.TestCase):
                     read_result["task"]["record_id"],
                     "recDurableHandoff",
                 )
-                with self.assertRaisesRegex(ValueError, "no longer active"):
-                    runtime.authorize_tool(
-                        invocation_id="write_after_restart",
-                        session_id="session_durable_handoff",
-                        cwd=self.workspace,
-                        turn_id="turn_durable_handoff",
-                        tool_name="mcp__teamflow__route_task",
-                        tool_input={"record_id": "recDurableHandoff", "role": "tl"},
-                    )
+                writable = runtime.authorize_tool(
+                    invocation_id="write_after_restart",
+                    session_id="session_durable_handoff",
+                    cwd=self.workspace,
+                    turn_id="turn_durable_handoff",
+                    tool_name="mcp__teamflow__route_task",
+                    tool_input={"record_id": "recDurableHandoff", "role": "tl"},
+                )
+                write_result = runtime.invoke_tool(
+                    invocation_id="write_after_restart",
+                    grant=writable["grant"],
+                    tool_name="route_task",
+                    arguments={"record_id": "recDurableHandoff", "role": "tl"},
+                )
+                self.assertTrue(write_result["ok"])
         finally:
             runtime.close()
 

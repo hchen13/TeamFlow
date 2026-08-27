@@ -41,8 +41,7 @@ class ToolRuntime:
         workspace_active: Callable[[str], bool],
         invoke_tool: Callable[..., dict[str, Any]],
         sync_task_activity: Callable[..., None],
-        delivery_record_id: Callable[..., str | None],
-        delivery_turn_is_current: Callable[..., bool | None],
+        delivery_record_id: Callable[..., str | None] = lambda *args, **kwargs: None,
         acknowledge_delivery: Callable[..., bool] = lambda *args, **kwargs: False,
     ) -> None:
         self.sync_lock = sync_lock
@@ -51,7 +50,6 @@ class ToolRuntime:
         self.invoke_teamflow_tool = invoke_tool
         self.sync_task_activity = sync_task_activity
         self.delivery_record_id = delivery_record_id
-        self.delivery_turn_is_current = delivery_turn_is_current
         self.acknowledge_delivery = acknowledge_delivery
         self.grants: dict[str, dict[str, Any]] = {}
         self.results: dict[str, dict[str, Any]] = {}
@@ -117,33 +115,6 @@ class ToolRuntime:
                     "reply now; the daemon will start a new turn when more work "
                     "is available."
                 )
-        if turn_id and short_name not in READ_ONLY_TOOL_NAMES and not cached_invocation:
-            delivery_is_current = self.delivery_turn_is_current(
-                assignment,
-                turn_id=str(turn_id),
-            )
-            if delivery_is_current is False:
-                raise ValueError(
-                    "TeamFlow delivery for this turn is no longer active. Read-only "
-                    "tools remain available, but lifecycle and mutating tools require "
-                    "the current daemon delivery or continuation."
-                )
-            requested_record_id = (
-                str(tool_input.get("record_id") or "")
-                if isinstance(tool_input, dict)
-                else ""
-            )
-            if delivery_is_current is True and requested_record_id:
-                current_record_id = self.delivery_record_id(
-                    assignment,
-                    turn_id=str(turn_id),
-                )
-                if current_record_id and current_record_id != requested_record_id:
-                    raise ValueError(
-                        "TeamFlow delivery belongs to a different TeamFlow task. "
-                        "Use the current task or wait for its handoff before changing "
-                        "another task."
-                    )
         with self.sync_lock:
             self.grants[token] = {
                 "invocation_id": invocation_id,
@@ -331,15 +302,6 @@ class ToolRuntime:
                 "reply now; the daemon will start a new turn when more work "
                 "is available."
             )
-        if self.delivery_turn_is_current(
-            authorized["assignment"],
-            turn_id=turn_id,
-        ) is False:
-            raise ValueError(
-                "TeamFlow delivery for this turn is no longer active. Read-only "
-                "tools remain available, but lifecycle and mutating tools require "
-                "the current daemon delivery or continuation."
-            )
 
     def cache_result(
         self,
@@ -397,11 +359,10 @@ class ToolRuntime:
         ):
             return
         assignment = authorized["assignment"]
-        current_record_id = self.delivery_record_id(
+        if self.delivery_record_id(
             assignment,
             turn_id=turn_id,
-        )
-        if current_record_id != str(task.get("record_id") or ""):
+        ) != str(task.get("record_id") or ""):
             return
         result["turn_control"] = {
             "action": "end_turn",

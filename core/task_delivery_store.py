@@ -12,7 +12,6 @@ from .task_delivery_execution import (
     active_delivery_execution,
     active_delivery_execution_in,
     rebind_active_delivery_execution,
-    rebind_delivery_to_exact_active_execution,
     stop_active_delivery_execution,
 )
 from .task_routing import (
@@ -916,17 +915,6 @@ def task_delivery_turn_is_current(
             agent_id=agent_id,
             session_id=session_id,
         )
-        if session_id and (row is None or str(row["turn_id"] or "") != turn_id):
-            rebound = rebind_delivery_to_exact_active_execution(
-                conn,
-                workflow_key=context.workflow_key,
-                load_workflow=load_workflow,
-                turn_id=turn_id,
-                agent_id=agent_id,
-                session_id=session_id,
-            )
-            if rebound:
-                return True
         pending = None
         if row is None and session_id and turn_id_for_client_message:
             pending = conn.execute(
