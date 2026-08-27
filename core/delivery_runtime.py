@@ -1349,29 +1349,14 @@ class DeliveryRuntime:
                     )
                     delivery["turn_status"] = "queued"
                 else:
-                    retry_error = ValueError(
-                        f"{reason}; queue acceptance remained unconfirmed"
+                    uncertain_error = CodexTurnAcceptanceUnknown(
+                        f"{reason}; no materialization evidence is available, so "
+                        "TeamFlow will not duplicate the uncertain turn"
                     )
-                    finish_task_delivery(
+                    defer_task_delivery_reconciliation(
                         context,
                         delivery_id=int(delivery["id"]),
-                        result={"ok": False, "status": "unconfirmed"},
-                        error=retry_error,
-                        retry=True,
-                        reset_client_message_id=True,
-                    )
-                    self.log_dispatch(
-                        context,
-                        "retry",
-                        event_id=delivery["source_event_id"],
-                        task=task,
-                        record_id=delivery["record_id"],
-                        target=target,
-                        agent=agent,
-                        session=str(delivery["session_id"]),
-                        turn=turn_id,
-                        reason=str(retry_error),
-                        attempt=int(delivery["attempts"]),
+                        error=uncertain_error,
                     )
                     return
             defer_task_delivery_reconciliation(
@@ -1541,6 +1526,16 @@ class DeliveryRuntime:
                 context,
                 delivery_id=int(delivery["id"]),
                 error=ValueError(reason),
+            )
+            return
+        if turn_id:
+            defer_task_delivery_reconciliation(
+                context,
+                delivery_id=int(delivery["id"]),
+                error=CodexTurnAcceptanceUnknown(
+                    f"{reason}; Codex returned turn {turn_id}, so TeamFlow will not "
+                    "duplicate it without terminal evidence"
+                ),
             )
             return
         error = ValueError(

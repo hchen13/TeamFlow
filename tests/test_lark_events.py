@@ -3941,7 +3941,7 @@ class LarkEventsTest(unittest.TestCase):
         self.assertIn("recovered from client message ID", output.getvalue())
         self.assertIn("DISPATCH RECOVERED", output.getvalue())
 
-    def test_daemon_defers_then_retries_an_unconfirmed_turn(self):
+    def test_daemon_never_duplicates_an_owner_accepted_unconfirmed_turn(self):
         context = self.context()
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
             workspace = conn.execute("SELECT * FROM workspaces LIMIT 1").fetchone()
@@ -4053,20 +4053,19 @@ class LarkEventsTest(unittest.TestCase):
             ).fetchone()
         self.assertEqual(
             (expired["status"], expired["turn_id"], expired["turn_status"]),
-            ("retry", "turn_missing", "unconfirmed"),
+            ("processing", "turn_missing", "inProgress"),
         )
-        self.assertIsNone(expired["client_message_id"])
-        self.assertIn("remained unconfirmed", expired["last_error"])
-        self.assertIn("DISPATCH RETRY", expired_output.getvalue())
+        self.assertEqual(
+            expired["client_message_id"],
+            delivery["client_message_id"],
+        )
+        self.assertIn("will not duplicate", expired["last_error"])
+        self.assertNotIn("DISPATCH RETRY", expired_output.getvalue())
         with connect(resolve_workspace_paths(self.workspace).db_path) as conn:
             conn.execute(
                 "UPDATE task_event_deliveries SET next_attempt_at = NULL"
             )
-        retried = claim_task_deliveries(context)[0]
-        self.assertNotEqual(
-            retried["client_message_id"],
-            delivery["client_message_id"],
-        )
+        self.assertEqual(claim_task_deliveries(context), [])
 
     def test_daemon_retries_a_completed_turn_with_interrupted_mcp_calls(self):
         context = self.context()

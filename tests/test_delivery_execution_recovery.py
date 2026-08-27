@@ -777,7 +777,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
         )
         self.assertEqual(saved["client_message_id"], delivery["client_message_id"])
 
-    def test_unconfirmed_queueing_state_retries_once_after_lease(self) -> None:
+    def test_unconfirmed_ipc_acceptance_never_duplicates_after_lease(self) -> None:
         context = self.context()
         save_task_snapshot(
             context,
@@ -801,13 +801,14 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
 
         with connect(self.db_path) as conn:
             saved = conn.execute(
-                "SELECT status, turn_status, client_message_id, attempts "
+                "SELECT status, turn_status, client_message_id, attempts, last_error "
                 "FROM task_event_deliveries"
             ).fetchone()
-        self.assertEqual(saved["status"], "retry")
-        self.assertEqual(saved["turn_status"], "unconfirmed")
-        self.assertIsNone(saved["client_message_id"])
+        self.assertEqual(saved["status"], "processing")
+        self.assertEqual(saved["turn_status"], "queueing")
+        self.assertEqual(saved["client_message_id"], delivery["client_message_id"])
         self.assertEqual(saved["attempts"], 1)
+        self.assertIn("will not duplicate", saved["last_error"])
 
     def test_claimed_continuation_queues_and_rebinds_its_execution(self) -> None:
         context = self.context()
@@ -1658,6 +1659,38 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             ).fetchone()
         self.assertEqual((saved["status"], saved["attempts"]), ("processing", 1))
         self.assertIsNone(saved["delivered_at"])
+
+    def test_owner_returned_turn_id_is_never_retried_without_terminal_evidence(self) -> None:
+        context = self.context()
+        delivery = self.start_delivery(turn_id="turn_accepted")
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_event_deliveries "
+                "SET next_attempt_at = NULL, "
+                "started_at = '2000-01-01T00:00:00+00:00'"
+            )
+
+        self.runtime(
+            read_thread=lambda *_args, **_kwargs: {
+                "status": {"type": "idle"},
+                "turns": [],
+            },
+            turn_started=lambda *_args, **_kwargs: False,
+            turn_completed=lambda *_args, **_kwargs: False,
+        ).reconcile(context)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status, turn_id, client_message_id, "
+                "attempts, last_error FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (saved["status"], saved["turn_status"], saved["turn_id"]),
+            ("processing", "inProgress", "turn_accepted"),
+        )
+        self.assertEqual(saved["client_message_id"], delivery["client_message_id"])
+        self.assertEqual(saved["attempts"], 1)
+        self.assertIn("will not duplicate", saved["last_error"])
 
     def test_compaction_gap_cannot_cancel_a_materialized_claimed_turn(self) -> None:
         context = self.context()
