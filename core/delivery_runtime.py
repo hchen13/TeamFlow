@@ -6,7 +6,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from .codex_ipc import CodexIpcNoOwner, CodexTurnAcceptanceUnknown
+from .codex_ipc import (
+    CodexIpcNoOwner,
+    CodexIpcOwnerUnconfirmed,
+    CodexTurnAcceptanceUnknown,
+)
 from .codex_permissions import (
     TEAMFLOW_MCP_TOOLS,
     CodexBackgroundMcpPermissionRequired,
@@ -506,7 +510,10 @@ class DeliveryRuntime:
                 error,
                 CodexBackgroundMcpPermissionRequired,
             )
-            waiting_session = isinstance(error, CodexIpcNoOwner)
+            waiting_session = (
+                isinstance(error, CodexIpcNoOwner)
+                and not isinstance(error, CodexIpcOwnerUnconfirmed)
+            )
             acceptance_unknown = isinstance(error, CodexTurnAcceptanceUnknown)
             retry = (
                 not waiting_permission

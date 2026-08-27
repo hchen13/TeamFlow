@@ -13,7 +13,11 @@ from core.agent_runtime import (
     confirm_agent_context,
     mark_agent_context_recovery_pending,
 )
-from core.codex_ipc import CodexIpcNoOwner, CodexTurnAcceptanceUnknown
+from core.codex_ipc import (
+    CodexIpcNoOwner,
+    CodexIpcOwnerUnconfirmed,
+    CodexTurnAcceptanceUnknown,
+)
 from core.codex_rollout import codex_turn_completed, codex_turn_started
 from core.config import resolve_workspace_paths
 from core.db import (
@@ -908,6 +912,34 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             (saved["status"], saved["attempts"], saved["turn_id"]),
             ("retry", 1, None),
         )
+
+    def test_owner_discovery_timeout_retries_instead_of_waiting_for_session(self) -> None:
+        context = self.context()
+        save_task_snapshot(
+            context,
+            record_id="recRecovery",
+            task=self.ready_task(),
+            source_event_id="evtRecoveryReady",
+            source_revision="1",
+        )
+        prepare_task_deliveries(context)
+        delivery = claim_task_deliveries(context)[0]
+
+        def run_turn(*_args, **_kwargs):
+            raise CodexIpcOwnerUnconfirmed("owner discovery timed out")
+
+        self.runtime(run_turn=run_turn).execute(context, delivery)
+
+        with connect(self.db_path) as conn:
+            saved = conn.execute(
+                "SELECT status, turn_status, turn_id, last_error "
+                "FROM task_event_deliveries"
+            ).fetchone()
+        self.assertEqual(
+            (saved["status"], saved["turn_status"], saved["turn_id"]),
+            ("retry", None, None),
+        )
+        self.assertIn("owner discovery timed out", saved["last_error"])
 
     def test_execute_persists_queue_acceptance_without_retrying(self) -> None:
         context = self.context()

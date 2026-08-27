@@ -149,31 +149,28 @@ class CodexQueueTest(unittest.TestCase):
             "missing",
         ))
 
-    def test_delivery_prefers_queue_and_only_falls_back_when_unsupported(self) -> None:
-        queued_result = {"ok": True, "transport": "codex-queue"}
-        with (
-            patch("core.codex.run_codex_queued_turn", return_value=queued_result),
-            patch("core.codex._run_codex_ipc_turn") as ipc,
-        ):
-            self.assertIs(
-                run_codex_delivery_turn("thread_1", "New work"),
-                queued_result,
-            )
-        ipc.assert_not_called()
-
+    def test_delivery_uses_the_desktop_owner_instead_of_app_server_queue(self) -> None:
         ipc_result = {"ok": True, "transport": "codex-ipc"}
         with (
-            patch(
-                "core.codex.run_codex_queued_turn",
-                side_effect=CodexQueueUnsupported("unsupported"),
-            ),
+            patch("core.codex._request") as app_server,
             patch("core.codex._run_codex_ipc_turn", return_value=ipc_result) as ipc,
         ):
             self.assertIs(
-                run_codex_delivery_turn("thread_1", "New work"),
+                run_codex_delivery_turn(
+                    "thread_1",
+                    "New work",
+                    client_message_id="message_1",
+                ),
                 ipc_result,
             )
-        ipc.assert_called_once()
+        app_server.assert_not_called()
+        ipc.assert_called_once_with(
+            "thread_1",
+            "New work",
+            client_message_id="message_1",
+            on_started=None,
+            stop_event=None,
+        )
 
     def test_maps_the_queued_client_message_to_its_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
