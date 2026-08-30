@@ -57,6 +57,7 @@ export async function POST() {
   const state = await getState();
   const bridge = getCodexBridge();
   bridge.track((state.agents || []).map((agent) => agent.session_id));
+  bridge.reconcileRolloutRuntime(codexState.results || []);
   return Response.json({
     agents: attachAgentHealth(state.agents || [], codexState.results || []),
     sessions: codexState.sessions || [],

@@ -20,6 +20,7 @@ const copy = {
     lastUpdated: "更新时间",
     logConnecting: "正在连接日志...",
     logs: "实时日志",
+    keeperRefresh: "待刷新",
     noAgents: "当前 Workflow 尚未注册 Agent。",
     noLogs: "暂无日志输出。",
     offline: "未运行",
@@ -55,6 +56,7 @@ const copy = {
     lastUpdated: "Updated",
     logConnecting: "Connecting to logs...",
     logs: "Live log",
+    keeperRefresh: "Refresh needed",
     noAgents: "No agents are registered for this workflow.",
     noLogs: "No log output yet.",
     offline: "Offline",
@@ -161,9 +163,13 @@ export default function OperationsPanel({ agents, lang, runtimeBySession, worksp
 
   const daemonState = describeDaemon(status, statusError, t);
   const connectedApps = status?.apps?.filter((app) => app.connected).length || 0;
+  const hasWorkspaceKeeper = Boolean(status?.session_keeper?.by_workspace);
   const projectKeeper = status?.session_keeper?.by_workspace?.[workspaceRoot];
   const registeredSessions = projectKeeper?.registered ?? agents.filter((agent) => agent.session_id).length;
-  const followingSessions = projectKeeper?.following;
+  const legacyKeeperComplete = !hasWorkspaceKeeper
+    && status?.session_keeper?.following === status?.session_keeper?.desired
+    && status?.session_keeper?.desired === status?.session_keeper?.registered_sessions;
+  const followingSessions = projectKeeper?.following ?? (legacyKeeperComplete ? registeredSessions : undefined);
   const activeSessions = agents.filter((agent) => agentRuntimeStatus(agent, runtimeBySession) === "active").length;
   const projectLabel = workspaceName || workspaceRoot?.split(/[\\/]/).filter(Boolean).at(-1) || t.currentProject;
 
@@ -204,7 +210,7 @@ export default function OperationsPanel({ agents, lang, runtimeBySession, worksp
           <Metric
             label={t.following}
             title={t.followingHint}
-            value={status ? `${followingSessions ?? "-"} / ${registeredSessions}` : "-"}
+            value={status ? (followingSessions === undefined ? t.keeperRefresh : `${followingSessions} / ${registeredSessions}`) : "-"}
           />
           <Metric label={t.activeSessions} value={status ? activeSessions : "-"} />
           <Metric label={t.registeredAgents} value={agents.length} />

@@ -94,7 +94,36 @@ code {
   white-space: nowrap;
 }
 
-.globalTop > .langButton {
+.topMeta {
+  display: flex;
+  align-items: center;
+  justify-self: end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.topWorkspace {
+  display: grid;
+  min-width: 0;
+  max-width: min(28vw, 280px);
+  text-align: right;
+}
+
+.topWorkspace span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.topWorkspace strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topMeta > .langButton {
   justify-self: end;
 }
 
@@ -154,6 +183,7 @@ code {
 }
 
 .manageRailItem {
+  margin-top: 24px;
   min-height: 40px;
   padding: 10px 12px;
   border: 1px solid var(--line);
@@ -183,21 +213,6 @@ code {
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
-.workspaceBlock {
-  display: grid;
-  gap: 8px;
-  margin: 28px 0 24px;
-  padding-top: 18px;
-  border-top: 1px solid var(--line);
-}
-
-.workspaceBlock span {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 800;
   text-transform: uppercase;
 }
 
@@ -396,6 +411,7 @@ code {
 .rail .setupSteps {
   grid-template-columns: 1fr;
   gap: 4px;
+  margin-top: 24px;
 }
 
 .rail .setupSteps::before {
@@ -2550,17 +2566,41 @@ button.accessCheck.failed:focus-visible {
 
 @media (max-width: 640px) {
   .globalTop {
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "brand meta"
+      "tabs tabs";
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
     padding-inline: 12px;
+  }
+
+  .globalBrand {
+    grid-area: brand;
   }
 
   .globalBrand span {
     display: none;
   }
 
+  .topMeta {
+    grid-area: meta;
+    gap: 6px;
+  }
+
+  .topWorkspace {
+    max-width: 42vw;
+  }
+
+  .topWorkspace span {
+    display: none;
+  }
+
   .modeTabs {
+    grid-area: tabs;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     justify-self: center;
+    width: min(100%, 260px);
   }
 
   .modeTabs button {

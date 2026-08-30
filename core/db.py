@@ -23,6 +23,7 @@ from .codex import (
     list_codex_threads,
     read_codex_thread,
 )
+from .codex_rollout import codex_rollout_runtime
 from .config import ensure_workspace_gitignore, parse_lark_bitable_url, resolve_workspace_paths
 from .workspace_settings import ensure_workspace_settings, read_workspace_settings
 from .migrations import MIGRATIONS
@@ -706,6 +707,7 @@ def verify_agents(workspace: str | None, *, agent_id: str | None = None) -> dict
     archived_by_id = {thread.get("id"): thread for thread in archived_threads}
     results = []
     for agent in agents:
+        rollout_runtime = codex_rollout_runtime(agent["session_id"])
         thread = active_by_id.get(agent["session_id"])
         thread_archived = False
         if thread is None:
@@ -766,6 +768,7 @@ def verify_agents(workspace: str | None, *, agent_id: str | None = None) -> dict
             model=settings.get("model"),
             effort=settings.get("effort"),
             service_tier=settings.get("service_tier"),
+            rollout_runtime=rollout_runtime,
         ))
 
     return {
@@ -884,6 +887,7 @@ def agent_health_result(
     model: str | None = None,
     effort: str | None = None,
     service_tier: str | None = None,
+    rollout_runtime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "ok": status == "healthy",
@@ -898,6 +902,7 @@ def agent_health_result(
         "model": model,
         "effort": effort,
         "service_tier": service_tier,
+        "rollout_runtime": rollout_runtime,
         "checked_at": checked_at,
         "error": error,
     }

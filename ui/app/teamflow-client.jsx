@@ -497,6 +497,9 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   const [activeStep, setActiveStep] = useState(() => initialLarkStep(initialStep, hasIdentity));
   const currentWorkflow = state.current_workflow || state.workflows[0] || {};
   const currentAgents = liveAgents.filter((agent) => agent.workflow_key === currentWorkflow.key);
+  const workspaceLabel = state.workspace?.display_name
+    || state.workspace_root?.split(/[\\/]/).filter(Boolean).at(-1)
+    || t.workspace;
   const appUrl = lang === "zh" ? FEISHU_APP_URL : LARK_APP_URL;
   const createAppUrl = lang === "zh" ? FEISHU_CREATE_APP_URL : LARK_CREATE_APP_URL;
 
@@ -616,9 +619,15 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
           <span>{state.current_workflow?.display_name || "Software Development"}</span>
         </div>
         <ModeNav mode={mode} selectMode={selectMode} t={t} />
-        <button className="langButton" type="button" onClick={() => setLang(lang === "zh" ? "en" : "zh")}>
-          {t.language}
-        </button>
+        <div className="topMeta">
+          <div className="topWorkspace" title={state.workspace_root}>
+            <span>{t.workspace}</span>
+            <strong>{workspaceLabel}</strong>
+          </div>
+          <button className="langButton" type="button" onClick={() => setLang(lang === "zh" ? "en" : "zh")}>
+            {t.language}
+          </button>
+        </div>
       </header>
 
       <div className="appShell">
@@ -626,10 +635,6 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
           <div className="railContext">
             <span>{t.workflow}</span>
             <strong>{state.current_workflow?.display_name || "Software Development"}</strong>
-          </div>
-          <div className="workspaceBlock">
-            <span>{t.workspace}</span>
-            <code>{state.workspace_root}</code>
           </div>
           {mode === "config" ? (
             <SetupStepNav activeStep={activeStep} setActiveStep={setActiveStep} t={t} />

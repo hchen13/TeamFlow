@@ -246,7 +246,8 @@ test("hook runtime accepts only registered workspace sessions owned by a live Co
   assert.deepEqual([...runtime.values()], [{
     threadId: "thread-1",
     status: "active",
-    cwd: "/workspace/project"
+    cwd: "/workspace/project",
+    _observedAt: 5
   }]);
 });
 
@@ -267,6 +268,88 @@ test("official hook lifecycle state overrides a stale private IPC not-loaded rep
   assert.equal(bridge.aggregateRuntime().get("thread-1").status, "idle");
 
   bridge.hookRuntime.set("thread-1", { threadId: "thread-1", status: "active" });
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "active");
+});
+
+test("a later Desktop idle state closes an active hook left behind by an interrupted turn", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = true;
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map([
+    ["desktop", new Map([[
+      "thread-1",
+      { threadId: "thread-1", status: "idle", _observedAt: 20 }
+    ]])]
+  ]);
+  bridge.hookRuntime = new Map([
+    ["thread-1", { threadId: "thread-1", status: "active", _observedAt: 10 }]
+  ]);
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "idle");
+  assert.equal(bridge.aggregateRuntime().get("thread-1")._observedAt, undefined);
+});
+
+test("a newer active hook still overrides an older Desktop idle snapshot", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = true;
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map([
+    ["desktop", new Map([[
+      "thread-1",
+      { threadId: "thread-1", status: "idle", _observedAt: 10 }
+    ]])]
+  ]);
+  bridge.hookRuntime = new Map([
+    ["thread-1", { threadId: "thread-1", status: "active", _observedAt: 20 }]
+  ]);
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "active");
+});
+
+test("a durable interrupted rollout clears a stale active hook after Desktop releases the thread", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = true;
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map([
+    ["desktop", new Map([[
+      "thread-1",
+      { threadId: "thread-1", status: "notLoaded", _observedAt: 30 }
+    ]])]
+  ]);
+  bridge.hookRuntime = new Map([
+    ["thread-1", { threadId: "thread-1", status: "active", _observedAt: 10 }]
+  ]);
+  bridge.rolloutRuntime = new Map([
+    ["thread-1", { status: "idle", _observedAt: 20 }]
+  ]);
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+
+  assert.equal(bridge.aggregateRuntime().get("thread-1").status, "notLoaded");
+});
+
+test("an older terminal rollout cannot close a newer active turn", async () => {
+  const { CodexBridge } = await modulePromise;
+  const bridge = Object.create(CodexBridge.prototype);
+  bridge.connected = true;
+  bridge.knownThreads = new Set(["thread-1"]);
+  bridge.runtimeBySource = new Map();
+  bridge.hookRuntime = new Map([
+    ["thread-1", { threadId: "thread-1", status: "active", _observedAt: 30 }]
+  ]);
+  bridge.rolloutRuntime = new Map([
+    ["thread-1", { status: "idle", _observedAt: 20 }]
+  ]);
+  bridge.pendingThreads = new Set();
+  bridge.unconfirmedThreads = new Set();
+
   assert.equal(bridge.aggregateRuntime().get("thread-1").status, "active");
 });
 

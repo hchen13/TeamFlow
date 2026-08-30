@@ -250,6 +250,50 @@ def codex_turn_started(thread_id: str, turn_id: str) -> bool:
     return _codex_turn_lifecycle_event(thread_id, turn_id) is not None
 
 
+def codex_rollout_runtime(thread_id: str) -> dict[str, Any] | None:
+    """Return the latest durable turn lifecycle without loading the rollout into memory."""
+    rollout_path = _codex_rollout_path(thread_id)
+    if rollout_path is None:
+        return None
+    try:
+        for raw_line in _reverse_lines(rollout_path):
+            if (
+                b'"task_started"' not in raw_line
+                and b'"task_complete"' not in raw_line
+                and b'"turn_aborted"' not in raw_line
+            ):
+                continue
+            try:
+                record = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            payload = record.get("payload")
+            if record.get("type") != "event_msg" or not isinstance(payload, dict):
+                continue
+            event = str(payload.get("type") or "")
+            if event not in {"task_started", "task_complete", "turn_aborted"}:
+                continue
+            timestamp_key = "started_at" if event == "task_started" else "completed_at"
+            observed_at = _epoch_milliseconds(payload.get(timestamp_key), record.get("timestamp"))
+            return {
+                "status": "active" if event == "task_started" else "idle",
+                "event": event,
+                "turn_id": str(payload.get("turn_id") or "") or None,
+                "observed_at_ms": observed_at,
+            }
+    except OSError:
+        return None
+    return None
+
+
+def _epoch_milliseconds(value: Any, timestamp: Any) -> int:
+    try:
+        return int(float(value) * 1000)
+    except (TypeError, ValueError):
+        parsed = _parse_timestamp(timestamp)
+        return int(parsed.timestamp() * 1000) if parsed is not None else 0
+
+
 def codex_turn_unresolved_teamflow_mcp_failures(
     turn: dict[str, Any],
 ) -> list[dict[str, Any]]:

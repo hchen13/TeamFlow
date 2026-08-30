@@ -14,7 +14,7 @@ const RUNTIME_STATUSES = new Set(["active", "idle", "notLoaded", "systemError"])
 const TERMINAL_TURN_STATUSES = new Set(["completed", "success", "failed", "interrupted", "cancelled", "canceled"]);
 const LOCAL_HOST_ID = "local";
 const FOLLOW_TIMEOUT_MS = 1000;
-export const BRIDGE_VERSION = 18;
+export const BRIDGE_VERSION = 19;
 const globalKey = Symbol.for("teamflow.codexBridge");
 
 export class CodexBridge extends EventEmitter {
@@ -37,6 +37,7 @@ export class CodexBridge extends EventEmitter {
     this.unconfirmedThreads = new Set();
     this.followTimers = new Map();
     this.hookRuntime = new Map();
+    this.rolloutRuntime = new Map();
     this.hookProcessCache = new Map();
     this.hookRuntimeRoot = codexRuntimeRoot();
     this.watchers = [];
@@ -83,6 +84,18 @@ export class CodexBridge extends EventEmitter {
   subscribe(listener) {
     this.on("event", listener);
     return () => this.off("event", listener);
+  }
+
+  reconcileRolloutRuntime(results) {
+    this.rolloutRuntime = new Map(results.flatMap((result) => {
+      const runtime = result?.rollout_runtime;
+      return result?.session_id && runtime?.status
+        ? [[result.session_id, {
+            status: runtime.status,
+            _observedAt: Number(runtime.observed_at_ms || 0)
+          }]]
+        : [];
+    }));
   }
 
   track(threadIds) {
@@ -313,6 +326,9 @@ export class CodexBridge extends EventEmitter {
     if (metadata.status && metadata.status !== "systemError") {
       delete next.error;
     }
+    if (metadata.status) {
+      next._observedAt = Date.now();
+    }
     next.cwd = cwd;
     next.title = metadata.title || existing?.title;
     sourceRuntime.set(metadata.threadId, next);
@@ -460,7 +476,7 @@ export class CodexBridge extends EventEmitter {
         const current = byThread.get(threadId) || {};
         const merged = { ...current };
         for (const [key, value] of Object.entries(metadata)) {
-          if (value !== undefined && key !== "status") {
+          if (value !== undefined && key !== "status" && key !== "_observedAt") {
             merged[key] = value;
           }
         }
@@ -468,6 +484,43 @@ export class CodexBridge extends EventEmitter {
           merged.status = metadata.status;
         }
         byThread.set(threadId, merged);
+      }
+    }
+    for (const [threadId, hook] of this.hookRuntime || new Map()) {
+      const current = byThread.get(threadId);
+      if (!current || !["active", "idle"].includes(hook.status)) {
+        continue;
+      }
+      const ipc = [...this.runtimeBySource.values()]
+        .map((sessions) => sessions.get(threadId))
+        .filter(Boolean);
+      const latestIpcActive = latestObservedAt(ipc, "active");
+      const latestIpcIdle = latestObservedAt(ipc, "idle");
+      const hookObservedAt = Number(hook._observedAt || 0);
+      if (hook.status === "active" && latestIpcActive < 0 && latestIpcIdle >= hookObservedAt) {
+        current.status = "idle";
+      } else if (hook.status === "idle" && latestIpcActive >= 0 && hookObservedAt > latestIpcActive) {
+        current.status = "idle";
+      }
+    }
+    for (const [threadId, rollout] of this.rolloutRuntime || new Map()) {
+      if (rollout.status !== "idle") {
+        continue;
+      }
+      const current = byThread.get(threadId);
+      if (!current) {
+        continue;
+      }
+      const ipc = [...this.runtimeBySource.values()]
+        .map((sessions) => sessions.get(threadId))
+        .filter(Boolean);
+      const hook = this.hookRuntime?.get(threadId);
+      const latestActive = Math.max(
+        latestObservedAt(ipc, "active"),
+        hook?.status === "active" ? Number(hook._observedAt || 0) : -1
+      );
+      if (Number(rollout._observedAt || 0) >= latestActive) {
+        current.status = nonActiveRuntimeStatus(ipc);
       }
     }
     for (const threadId of this.pendingThreads) {
@@ -591,6 +644,23 @@ export class CodexBridge extends EventEmitter {
     this.catalogTimer = setTimeout(() => this.publish({ type: "catalog" }), 300);
     this.catalogTimer.unref?.();
   }
+}
+
+function latestObservedAt(runtimes, status) {
+  const matches = runtimes.filter((runtime) => runtime.status === status);
+  if (matches.length === 0) {
+    return -1;
+  }
+  return Math.max(...matches.map((runtime) => Number(runtime._observedAt ?? Number.MAX_SAFE_INTEGER)));
+}
+
+function nonActiveRuntimeStatus(runtimes) {
+  for (const status of ["systemError", "idle", "notLoaded"]) {
+    if (runtimes.some((runtime) => runtime.status === status)) {
+      return status;
+    }
+  }
+  return "idle";
 }
 
 function openSocket(socketPath) {

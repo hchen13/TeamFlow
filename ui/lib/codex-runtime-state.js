@@ -86,7 +86,7 @@ export function aggregateCodexHookRuntime(records, {
   }
   for (const [threadId, runtime] of result) {
     const { updatedAt, ...publicRuntime } = runtime;
-    result.set(threadId, publicRuntime);
+    result.set(threadId, { ...publicRuntime, _observedAt: updatedAt });
   }
   return result;
 }

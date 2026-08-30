@@ -18,7 +18,7 @@ from core.codex_ipc import (
     CodexIpcOwnerUnconfirmed,
     CodexTurnAcceptanceUnknown,
 )
-from core.codex_rollout import codex_turn_completed, codex_turn_started
+from core.codex_rollout import codex_rollout_runtime, codex_turn_completed, codex_turn_started
 from core.config import resolve_workspace_paths
 from core.db import (
     configure_lark_board,
@@ -2189,6 +2189,35 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
 
 
 class CodexRolloutCompletionTest(unittest.TestCase):
+    def test_latest_rollout_lifecycle_distinguishes_running_and_interrupted_turns(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rollout-runtime-", dir=ROOT / "tmp") as temp:
+            path = Path(temp) / "rollout.jsonl"
+            path.write_text(
+                "\n".join((
+                    json.dumps({
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "turn_id": "turn-a", "started_at": 10},
+                    }),
+                    json.dumps({
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "turn_aborted",
+                            "turn_id": "turn-a",
+                            "completed_at": 20,
+                            "reason": "interrupted",
+                        },
+                    }),
+                )),
+                encoding="utf-8",
+            )
+            with patch("core.codex_rollout._codex_rollout_path", return_value=path):
+                self.assertEqual(codex_rollout_runtime("session-a"), {
+                    "status": "idle",
+                    "event": "turn_aborted",
+                    "turn_id": "turn-a",
+                    "observed_at_ms": 20000,
+                })
+
     def test_completion_is_read_from_the_exact_rollout_turn(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rollout-completion-", dir=ROOT / "tmp") as temp:
             path = Path(temp) / "rollout.jsonl"
