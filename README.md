@@ -142,17 +142,16 @@ PROJECT_ROOT=/absolute/path/to/project
 http://127.0.0.1:13145/
 ```
 
-在 UI 中依次完成：
+配置页按四个步骤完成：
 
-1. 选择 `software-development` 或 `general-task` 协作模式。
-2. 连接飞书用户身份，或填写应用 ID 和应用密钥保存 Bot 身份。
-3. 使用 Bot 身份时，由配置 Agent 运行 `required-lark-bot-permissions`，打开返回的完整权限链接，开通全部 scope 并发布应用版本。
-4. 粘贴已有多维表格链接，或用已保存身份创建新表。
-5. 验证各身份的看板访问权限，并选择拥有者/管理员作为主身份。
-6. 配置开放平台事件后，验证看板监听。
-7. 在 Agent 页面选择项目的 Codex Session，并绑定角色。
+1. **协作模式**：选择 `software-development` 或 `general-task`，并决定是否启用版本控制。
+2. **身份**：连接飞书用户身份，或填写应用 ID 和应用密钥保存 Bot 身份。使用 Bot 身份时，由配置 Agent 运行 `required-lark-bot-permissions`，打开返回的完整权限链接，开通全部 scope 并发布应用版本。
+3. **多维表格**：粘贴已有多维表格链接，或用已保存身份创建新表；验证各身份的看板访问权限、选择主身份，并在配置开放平台事件后验证看板监听。
+4. **Agent**：选择项目的 Codex Session，并将其绑定到协作模式中的职责。
 
-UI 负责工作流、飞书身份、看板访问、事件监听和 Agent Session 的集中配置。
+顶部的“配置 / 管理”入口用于切换配置流程和运行管理。管理页展示全局 daemon 健康状态、当前工作区的 Session Keeper 与 Agent 状态，以及实时 daemon 日志；也可以重启全局 daemon。
+
+daemon 是跨工作区共享的，因此重启操作会影响所有已启用项目。Session Keeper 和 Agent 指标只统计当前工作区；日志保留全局运行信息，并只附加当前工作区的项目日志。
 
 ## 初始化任务看板
 
@@ -321,6 +320,8 @@ Agent runtime 使用 `codex` harness。TeamFlow 会恢复指定 Session、启动
 
 daemon 是全局单进程：同一 `brand + app_id` 只启动一个飞书 WebSocket worker，不同工作区按 `file_token + table_id` 路由事件。`listen-lark-events` 通过 NDJSON 输出指定工作区的实时事件流。
 
+也可以在 UI 的管理页查看 daemon 状态与实时日志，或执行一次真实的全局 daemon 重启。存在正在执行的 Agent turn 时，应等待其结束后再重启。
+
 身份或看板配置变化后，执行 `daemon sync` 即可刷新工作区路由；`verify-lark-listener` 和 `listen-lark-events` 也会自动完成同步。退出 UI 或事件流不会停止全局 daemon。
 
 不再需要监听时可显式停止：
@@ -389,7 +390,7 @@ teamflow                  基于 uv 的仓库入口
 workflows/*/workflow.json 各协作模式的机器定义
 skills/                   插件暴露的 Codex Skill：teamflow-setup 与 teamflow-agent
 docs/workflows/           工作流产品规则与架构边界
-ui/                       Next.js 本地配置 UI
+ui/                       Next.js 本地配置与运行管理 UI
 tests/                    Python 单元测试
 tests/acceptance/         真实 Codex、飞书与 UI 手工验收
 ```
