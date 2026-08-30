@@ -1195,7 +1195,9 @@ def list_lark_tasks(workspace: str | None, *, limit: int = 100, offset: int = 0)
         raise ValueError("offset must be zero or greater")
     paths, board, identity, client, fields, _, option_aliases = _task_context(workspace)
     try:
-        data = client.list_records(board["table_id"], view_id=board.get("view_id"), limit=limit, offset=offset)
+        # The configured view is presentation state. It may filter rows or omit hidden fields,
+        # while TeamFlow reads require the complete canonical task record.
+        data = client.list_records(board["table_id"], limit=limit, offset=offset)
         _save_board_success(paths, board["id"], table_id=board["table_id"], view_id=board.get("view_id"))
         return {
             "ok": True,

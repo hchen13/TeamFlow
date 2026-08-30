@@ -147,6 +147,7 @@ class FakeBoardClient:
         self.active_writes = 0
         self.max_active_writes = 0
         self.write_counter_lock = threading.Lock()
+        self.view_hidden_fields = set()
 
     def authenticate(self):
         return None
@@ -233,8 +234,14 @@ class FakeBoardClient:
         self.grouped_views += 1
 
     def list_records(self, table_id, *, view_id=None, limit=100, offset=0):
-        records = list(self.records.values())[offset:offset + limit]
-        return {"records": [dict(record) for record in records], "has_more": False}
+        records = []
+        for source in list(self.records.values())[offset:offset + limit]:
+            record = {**source, "fields": dict(source.get("fields") or {})}
+            if view_id:
+                for field_name in self.view_hidden_fields:
+                    record["fields"].pop(field_name, None)
+            records.append(record)
+        return {"records": records, "has_more": False}
 
     def get_record(self, table_id, record_id):
         if self.record_not_found_attempts:
@@ -382,6 +389,35 @@ class LarkBoardTest(unittest.TestCase):
         sleep.assert_called_once_with(0.5)
         self.assertIn("看板视图尚未就绪，正在重试...", progress)
         self.assertEqual(progress[-1], "多维表格初始化完成")
+
+    def test_task_list_ignores_view_projection_that_omits_owner_fields(self):
+        verify_lark_board(self.workspace)
+        initialize_lark_board(self.workspace, task_prefix="TF")
+        created = upsert_lark_task(
+            self.workspace,
+            task={
+                "title": "Owned task",
+                "status": "in_progress",
+                "type": "development",
+                "role": "tl",
+                "agent": "TL1",
+                "agent_id": "agent_tl1",
+            },
+        )["task"]
+        specs = task_field_specs(load_workflow_definition("software-development"), "zh-CN")
+        self.client.view_hidden_fields = {
+            specs["agent"]["name"],
+            specs["agent_id"]["name"],
+        }
+
+        task = next(
+            item
+            for item in list_lark_tasks(self.workspace)["tasks"]
+            if item["record_id"] == created["record_id"]
+        )
+
+        self.assertEqual(task["agent"], "TL1")
+        self.assertEqual(task["agent_id"], "agent_tl1")
 
     def test_workflow_projection_is_loaded_on_startup(self):
         state = inspect_workspace(self.workspace)
