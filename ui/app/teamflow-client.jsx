@@ -5,6 +5,7 @@ import { useFormStatus } from "react-dom";
 import { useRouter } from "next/navigation";
 import { acceptRuntimeSequence, createRuntimeSequence, runtimeStatusAllowsMutation } from "../lib/agent-runtime-rules";
 import { initialLarkStep } from "../lib/setup-steps";
+import OperationsPanel from "./operations-panel";
 
 const FEISHU_APP_URL = "https://open.feishu.cn/app";
 const FEISHU_CREATE_APP_URL = "https://open.feishu.cn/page/launcher?from=backend_oneclick";
@@ -19,6 +20,12 @@ const text = {
   zh: {
     brand: "TeamFlow 同舟",
     language: "EN",
+    configTab: "配置",
+    manageTab: "管理",
+    configTitle: "项目配置",
+    configSubtitle: "配置协作模式、飞书身份、协作看板和 Agent。",
+    manageTitle: "运行管理",
+    manageSubtitle: "查看守护进程、Agent 和任务投递的实时运行信息。",
     larkTab: "飞书",
     agentTab: "Agent",
     workspace: "Workspace",
@@ -241,6 +248,12 @@ const text = {
   en: {
     brand: "TeamFlow",
     language: "中文",
+    configTab: "Configure",
+    manageTab: "Manage",
+    configTitle: "Project configuration",
+    configSubtitle: "Configure the workflow, Lark identity, collaboration board, and agents.",
+    manageTitle: "Operations",
+    manageSubtitle: "Inspect the daemon, agents, and live task-delivery activity.",
     larkTab: "Lark",
     agentTab: "Agent",
     workspace: "Workspace",
@@ -462,8 +475,9 @@ const text = {
   }
 };
 
-export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrlDraft, codexSessionError, codexSessions, currentRoles, error, initialAuthMode, initialLang, initialStep, message, state }) {
+export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrlDraft, codexSessionError, codexSessions, currentRoles, error, initialAuthMode, initialLang, initialMode, initialStep, message, state }) {
   const [lang, setLang] = useState(initialLang === "en" ? "en" : "zh");
+  const [mode, setMode] = useState(initialMode === "manage" ? "manage" : "config");
   const [authMode, setAuthMode] = useState(initialAuthMode === "user" || authUrl ? "user" : state.lark_identities?.[0]?.auth_mode || "bot");
   const [agentFormOpen, setAgentFormOpen] = useState(false);
   const [noticeVisible, setNoticeVisible] = useState(Boolean(message));
@@ -533,7 +547,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   }, [liveAgents]);
 
   useEffect(() => {
-    if (activeStep !== "agent") {
+    if (mode !== "manage" && activeStep !== "agent") {
       return undefined;
     }
     refreshCodexState();
@@ -575,7 +589,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
       }
     };
     return () => source.close();
-  }, [activeStep, applyRuntime, refreshCodexState]);
+  }, [activeStep, applyRuntime, mode, refreshCodexState]);
 
   useEffect(() => {
     setNoticeVisible(Boolean(message));
@@ -586,88 +600,117 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
     return () => clearTimeout(timer);
   }, [message]);
 
+  const selectMode = (nextMode) => {
+    setMode(nextMode);
+    const params = new URLSearchParams(window.location.search);
+    params.set("mode", nextMode);
+    params.set("lang", lang);
+    window.history.replaceState(null, "", `/?${params.toString()}`);
+  };
+
   return (
-    <main className="appShell">
-      <aside className="rail">
-        <div className="railBrand">
-          <h1>{t.brand}</h1>
+    <main className="appFrame">
+      <header className="globalTop">
+        <div className="globalBrand">
+          <strong>{t.brand}</strong>
           <span>{state.current_workflow?.display_name || "Software Development"}</span>
         </div>
-        <div className="workspaceBlock">
-          <span>{t.workspace}</span>
-          <code>{state.workspace_root}</code>
-        </div>
-        <SetupStepNav activeStep={activeStep} setActiveStep={setActiveStep} t={t} />
-      </aside>
+        <ModeNav mode={mode} selectMode={selectMode} t={t} />
+        <button className="langButton" type="button" onClick={() => setLang(lang === "zh" ? "en" : "zh")}>
+          {t.language}
+        </button>
+      </header>
 
-      <section className="workbench">
-        <header className="mobileTop">
-          <h1>{t.brand}</h1>
-          <button className="langButton" type="button" onClick={() => setLang(lang === "zh" ? "en" : "zh")}>
-            {t.language}
-          </button>
-        </header>
-        <nav className="mobileSetupSteps">
-          <SetupStepNav activeStep={activeStep} setActiveStep={setActiveStep} t={t} />
-        </nav>
-
-        <header className="pageHeader">
-          <div>
-            <span className="eyebrow">TeamFlow</span>
-            <h2>{activeStep === "agent" ? t.agentTitle : t.larkTitle}</h2>
-            <p>{activeStep === "agent" ? t.agentSubtitle : t.larkSubtitle}</p>
+      <div className="appShell">
+        <aside className="rail">
+          <div className="railContext">
+            <span>{t.workflow}</span>
+            <strong>{state.current_workflow?.display_name || "Software Development"}</strong>
           </div>
-          <button className="langButton desktopLang" type="button" onClick={() => setLang(lang === "zh" ? "en" : "zh")}>
-            {t.language}
-          </button>
-        </header>
+          <div className="workspaceBlock">
+            <span>{t.workspace}</span>
+            <code>{state.workspace_root}</code>
+          </div>
+          {mode === "config" ? (
+            <SetupStepNav activeStep={activeStep} setActiveStep={setActiveStep} t={t} />
+          ) : (
+            <div className="manageRailItem">{t.manageTitle}</div>
+          )}
+        </aside>
 
-        {noticeVisible && message ? <p className={error ? "banner error" : "banner"}>{message}</p> : null}
+        <section className="workbench">
+          {mode === "config" ? (
+            <nav className="mobileSetupSteps">
+              <SetupStepNav activeStep={activeStep} setActiveStep={setActiveStep} t={t} />
+            </nav>
+          ) : null}
 
-        {activeStep !== "agent" ? (
-          <ConfigurationPanel
-            actions={actions}
-            appUrl={appUrl}
-            createAppUrl={createAppUrl}
-            authExpires={authExpires}
-            authMode={authMode}
-            authUrl={authUrl}
-            board={board}
-            boardAccess={state.lark_board_access || []}
-            boardUrlDraft={boardUrlDraft}
-            botIdentities={botIdentities}
-            userIdentities={userIdentities}
-            activeStep={activeStep}
-            currentWorkflow={currentWorkflow}
-            lang={lang}
-            setAuthMode={setAuthMode}
-            setActiveStep={setActiveStep}
-            state={state}
-            t={t}
-          />
-        ) : (
-          <div className="agentStep">
-            <AgentPanel
+          <header className="pageHeader">
+            <div>
+              <span className="eyebrow">TeamFlow</span>
+              <h2>{mode === "config" ? t.configTitle : t.manageTitle}</h2>
+              <p>{mode === "config" ? t.configSubtitle : t.manageSubtitle}</p>
+            </div>
+          </header>
+
+          {noticeVisible && message ? <p className={error ? "banner error" : "banner"}>{message}</p> : null}
+
+          {mode === "manage" ? (
+            <OperationsPanel agents={currentAgents} lang={lang} runtimeBySession={runtimeBySession} />
+          ) : activeStep !== "agent" ? (
+            <ConfigurationPanel
               actions={actions}
-              agentFormOpen={agentFormOpen}
-              agents={currentAgents}
-              codexMcpAuthorization={state.codex_mcp_authorization || {}}
-              codexSessionError={liveCodexSessionError}
-              codexSessions={liveCodexSessions}
-              currentRoles={currentRoles}
+              activeStep={activeStep}
+              appUrl={appUrl}
+              authExpires={authExpires}
+              authMode={authMode}
+              authUrl={authUrl}
+              board={board}
+              boardAccess={state.lark_board_access || []}
+              boardUrlDraft={boardUrlDraft}
+              botIdentities={botIdentities}
+              createAppUrl={createAppUrl}
               currentWorkflow={currentWorkflow}
-              lifecycleBySession={lifecycleBySession}
               lang={lang}
-              refreshCodexState={refreshCodexState}
-              runtimeBySession={runtimeBySession}
-              setAgentFormOpen={setAgentFormOpen}
+              setActiveStep={setActiveStep}
+              setAuthMode={setAuthMode}
+              state={state}
               t={t}
+              userIdentities={userIdentities}
             />
-            <StepFooter activeStep={activeStep} setActiveStep={setActiveStep} t={t} />
-          </div>
-        )}
-      </section>
+          ) : (
+            <div className="agentStep">
+              <AgentPanel
+                actions={actions}
+                agentFormOpen={agentFormOpen}
+                agents={currentAgents}
+                codexMcpAuthorization={state.codex_mcp_authorization || {}}
+                codexSessionError={liveCodexSessionError}
+                codexSessions={liveCodexSessions}
+                currentRoles={currentRoles}
+                currentWorkflow={currentWorkflow}
+                lifecycleBySession={lifecycleBySession}
+                lang={lang}
+                refreshCodexState={refreshCodexState}
+                runtimeBySession={runtimeBySession}
+                setAgentFormOpen={setAgentFormOpen}
+                t={t}
+              />
+              <StepFooter activeStep={activeStep} setActiveStep={setActiveStep} t={t} />
+            </div>
+          )}
+        </section>
+      </div>
     </main>
+  );
+}
+
+function ModeNav({ mode, selectMode, t }) {
+  return (
+    <nav className="modeTabs" aria-label="TeamFlow">
+      <button className={mode === "config" ? "active" : ""} type="button" onClick={() => selectMode("config")}>{t.configTab}</button>
+      <button className={mode === "manage" ? "active" : ""} type="button" onClick={() => selectMode("manage")}>{t.manageTab}</button>
+    </nav>
   );
 }
 

@@ -1,0 +1,286 @@
+.operations {
+  display: grid;
+  gap: 16px;
+  width: min(1120px, 100%);
+}
+
+.statusPanel,
+.agentPanel,
+.logPanel {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.sectionHeader,
+.compactHeader,
+.logHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.sectionHeader {
+  padding: 17px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.sectionHeader > div {
+  display: grid;
+  gap: 5px;
+}
+
+.kicker {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.daemonState {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+}
+
+.daemonState::before,
+.connectionDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8a948e;
+  content: "";
+}
+
+.daemonState[data-tone="healthy"]::before,
+.connectionDot[data-connected="true"] {
+  background: var(--accent);
+}
+
+.daemonState[data-tone="warning"]::before {
+  background: #b68123;
+}
+
+.daemonState[data-tone="error"]::before {
+  background: var(--danger);
+}
+
+.restartButton,
+.logButton {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.restartButton:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.metric {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 16px 18px;
+  border-right: 1px solid var(--line);
+}
+
+.metric:last-child {
+  border-right: 0;
+}
+
+.metric span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.metric strong {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.metric[data-tone="warning"] strong {
+  color: var(--danger);
+}
+
+.statusMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.errorText {
+  color: var(--danger);
+}
+
+.compactHeader,
+.logHeader {
+  min-height: 48px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.compactHeader h3,
+.logHeader h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.compactHeader > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.agentList {
+  display: grid;
+}
+
+.agentRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.agentRow:last-child {
+  border-bottom: 0;
+}
+
+.agentRow > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.agentRow strong {
+  font-size: 13px;
+}
+
+.agentRow span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.runtime[data-status="active"] {
+  color: var(--blue);
+}
+
+.runtime[data-status="idle"] {
+  color: var(--accent-dark);
+}
+
+.runtime[data-status="systemError"] {
+  color: var(--danger);
+}
+
+.empty {
+  margin: 0;
+  padding: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.logHeader {
+  background: #1d2421;
+  color: #f2f5f3;
+}
+
+.logHeader > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logButton {
+  border-color: #53605a;
+  background: transparent;
+  color: #f2f5f3;
+}
+
+.logViewport {
+  height: clamp(300px, 46vh, 540px);
+  overflow: auto;
+  padding: 14px 16px;
+  background: #111714;
+  color: #dce6e1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.logEmpty {
+  color: #87948e;
+}
+
+@media (max-width: 800px) {
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .metric {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .metric:nth-child(odd) {
+    border-right: 1px solid var(--line);
+  }
+
+  .metric:last-child {
+    border-bottom: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .sectionHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .metric,
+  .metric:nth-child(odd) {
+    border-right: 0;
+  }
+
+  .agentRow {
+    align-items: start;
+    flex-direction: column;
+    gap: 7px;
+  }
+}

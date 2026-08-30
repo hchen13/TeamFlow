@@ -27,7 +27,7 @@ export default async function Page({ searchParams }) {
   let codexSessions = [];
   let codexSessionError = false;
   let agentHealth = [];
-  if (initialMode === "manage" || initialStep === "agent") {
+  if (initialStep === "agent") {
     try {
       const codexState = await getCodexState();
       codexSessions = codexState.sessions || [];
