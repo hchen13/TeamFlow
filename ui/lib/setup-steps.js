@@ -2,11 +2,8 @@
 // server action so both can be exercised without a React renderer or a Next request.
 
 export function initialLarkStep(step, hasIdentity) {
-  if (step === "workflow" || step === "identity") {
+  if (["workflow", "identity", "board", "agent"].includes(step)) {
     return step;
-  }
-  if (step === "board" && hasIdentity) {
-    return "board";
   }
   // A workspace with no identity has never been set up, and the workflow step is where
   // it chooses its workflow and whether tasks are delivered through git. Landing on the

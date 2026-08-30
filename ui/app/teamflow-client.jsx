@@ -462,9 +462,8 @@ const text = {
   }
 };
 
-export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrlDraft, codexSessionError, codexSessions, currentRoles, error, initialAuthMode, initialLang, initialStep, initialTab, message, state }) {
+export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrlDraft, codexSessionError, codexSessions, currentRoles, error, initialAuthMode, initialLang, initialStep, message, state }) {
   const [lang, setLang] = useState(initialLang === "en" ? "en" : "zh");
-  const [tab, setTab] = useState(initialTab === "agent" ? "agent" : "lark");
   const [authMode, setAuthMode] = useState(initialAuthMode === "user" || authUrl ? "user" : state.lark_identities?.[0]?.auth_mode || "bot");
   const [agentFormOpen, setAgentFormOpen] = useState(false);
   const [noticeVisible, setNoticeVisible] = useState(Boolean(message));
@@ -480,9 +479,10 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   const board = state.lark_board || {};
   const botIdentities = state.lark_identities?.filter((identity) => identity.auth_mode === "bot" && identity.app_id) || [];
   const userIdentities = state.lark_identities?.filter((identity) => identity.auth_mode === "user") || [];
+  const hasIdentity = botIdentities.length > 0 || userIdentities.some((identity) => identity.access_status === "verified");
+  const [activeStep, setActiveStep] = useState(() => initialLarkStep(initialStep, hasIdentity));
   const currentWorkflow = state.current_workflow || state.workflows[0] || {};
   const currentAgents = liveAgents.filter((agent) => agent.workflow_key === currentWorkflow.key);
-  const tabMessage = message && ((tab === "agent") === (initialTab === "agent"));
   const appUrl = lang === "zh" ? FEISHU_APP_URL : LARK_APP_URL;
   const createAppUrl = lang === "zh" ? FEISHU_CREATE_APP_URL : LARK_CREATE_APP_URL;
 
@@ -533,7 +533,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
   }, [liveAgents]);
 
   useEffect(() => {
-    if (tab !== "agent") {
+    if (activeStep !== "agent") {
       return undefined;
     }
     refreshCodexState();
@@ -575,7 +575,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
       }
     };
     return () => source.close();
-  }, [applyRuntime, refreshCodexState, tab]);
+  }, [activeStep, applyRuntime, refreshCodexState]);
 
   useEffect(() => {
     setNoticeVisible(Boolean(message));
@@ -597,7 +597,7 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
           <span>{t.workspace}</span>
           <code>{state.workspace_root}</code>
         </div>
-        <TabNav tab={tab} setTab={setTab} t={t} />
+        <SetupStepNav activeStep={activeStep} setActiveStep={setActiveStep} t={t} />
       </aside>
 
       <section className="workbench">
@@ -607,25 +607,25 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
             {t.language}
           </button>
         </header>
-        <nav className="mobileTabs">
-          <TabNav tab={tab} setTab={setTab} t={t} />
+        <nav className="mobileSetupSteps">
+          <SetupStepNav activeStep={activeStep} setActiveStep={setActiveStep} t={t} />
         </nav>
 
         <header className="pageHeader">
           <div>
             <span className="eyebrow">TeamFlow</span>
-            <h2>{tab === "lark" ? t.larkTitle : t.agentTitle}</h2>
-            <p>{tab === "lark" ? t.larkSubtitle : t.agentSubtitle}</p>
+            <h2>{activeStep === "agent" ? t.agentTitle : t.larkTitle}</h2>
+            <p>{activeStep === "agent" ? t.agentSubtitle : t.larkSubtitle}</p>
           </div>
           <button className="langButton desktopLang" type="button" onClick={() => setLang(lang === "zh" ? "en" : "zh")}>
             {t.language}
           </button>
         </header>
 
-        {noticeVisible && tabMessage ? <p className={error ? "banner error" : "banner"}>{message}</p> : null}
+        {noticeVisible && message ? <p className={error ? "banner error" : "banner"}>{message}</p> : null}
 
-        {tab === "lark" ? (
-          <LarkPanel
+        {activeStep !== "agent" ? (
+          <ConfigurationPanel
             actions={actions}
             appUrl={appUrl}
             createAppUrl={createAppUrl}
@@ -637,78 +637,66 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
             boardUrlDraft={boardUrlDraft}
             botIdentities={botIdentities}
             userIdentities={userIdentities}
+            activeStep={activeStep}
             currentWorkflow={currentWorkflow}
-            initialStep={initialStep}
             lang={lang}
             setAuthMode={setAuthMode}
+            setActiveStep={setActiveStep}
             state={state}
             t={t}
           />
         ) : (
-          <AgentPanel
-            actions={actions}
-            agentFormOpen={agentFormOpen}
-            agents={currentAgents}
-            codexMcpAuthorization={state.codex_mcp_authorization || {}}
-            codexSessionError={liveCodexSessionError}
-            codexSessions={liveCodexSessions}
-            currentRoles={currentRoles}
-            currentWorkflow={currentWorkflow}
-            lifecycleBySession={lifecycleBySession}
-            lang={lang}
-            refreshCodexState={refreshCodexState}
-            runtimeBySession={runtimeBySession}
-            setAgentFormOpen={setAgentFormOpen}
-            t={t}
-          />
+          <div className="agentStep">
+            <AgentPanel
+              actions={actions}
+              agentFormOpen={agentFormOpen}
+              agents={currentAgents}
+              codexMcpAuthorization={state.codex_mcp_authorization || {}}
+              codexSessionError={liveCodexSessionError}
+              codexSessions={liveCodexSessions}
+              currentRoles={currentRoles}
+              currentWorkflow={currentWorkflow}
+              lifecycleBySession={lifecycleBySession}
+              lang={lang}
+              refreshCodexState={refreshCodexState}
+              runtimeBySession={runtimeBySession}
+              setAgentFormOpen={setAgentFormOpen}
+              t={t}
+            />
+            <StepFooter activeStep={activeStep} setActiveStep={setActiveStep} t={t} />
+          </div>
         )}
       </section>
     </main>
   );
 }
 
-function TabNav({ tab, setTab, t }) {
+function SetupStepNav({ activeStep, setActiveStep, t }) {
+  const steps = [
+    ["workflow", t.workflowTitle],
+    ["identity", t.identityTitle],
+    ["board", t.larkBoard],
+    ["agent", t.agentTitle]
+  ];
   return (
-    <div className="navStack">
-      <button className={tab === "lark" ? "active" : ""} type="button" onClick={() => setTab("lark")}>
-        {t.larkTab}
-      </button>
-      <button className={tab === "agent" ? "active" : ""} type="button" onClick={() => setTab("agent")}>
-        {t.agentTab}
-      </button>
+    <div className="setupSteps">
+      {steps.map(([key, label], index) => (
+        <button className={activeStep === key ? "active" : ""} key={key} type="button" onClick={() => setActiveStep(key)}>
+          <span>{index + 1}</span>
+          <strong>{label}</strong>
+        </button>
+      ))}
     </div>
   );
 }
 
-function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, boardAccess, boardUrlDraft, botIdentities, currentWorkflow, createAppUrl, initialStep, lang, setAuthMode, state, t, userIdentities }) {
+function ConfigurationPanel({ actions, activeStep, appUrl, authExpires, authMode, authUrl, board, boardAccess, boardUrlDraft, botIdentities, currentWorkflow, createAppUrl, lang, setActiveStep, setAuthMode, state, t, userIdentities }) {
   const larkDomain = lang === "en" ? "larksuite" : "feishu";
   const hasIdentity = botIdentities.length > 0 || userIdentities.some((identity) => identity.access_status === "verified");
-  const [activeStep, setActiveStep] = useState(() => initialLarkStep(initialStep, hasIdentity));
   const boardName = defaultBoardName(state, lang);
-
-  useEffect(() => {
-    if (!hasIdentity && activeStep === "board") {
-      setActiveStep("identity");
-    }
-  }, [activeStep, hasIdentity]);
 
   return (
     <div className="setupFlow">
-      <nav className="setupSteps" aria-label={t.larkTitle}>
-        <button className={activeStep === "workflow" ? "active" : ""} type="button" onClick={() => setActiveStep("workflow")}>
-          <span>1</span>
-          <strong>{t.workflowTitle}</strong>
-        </button>
-        <button className={activeStep === "identity" ? "active" : ""} type="button" onClick={() => setActiveStep("identity")}>
-          <span>2</span>
-          <strong>{t.identityTitle}</strong>
-        </button>
-        <button className={activeStep === "board" ? "active" : ""} disabled={!hasIdentity} type="button" onClick={() => setActiveStep("board")}>
-          <span>3</span>
-          <strong>{t.larkBoard}</strong>
-        </button>
-      </nav>
-
       <section className="panel mainPanel">
         {activeStep === "workflow" ? (
           <WorkflowStep actions={actions} currentWorkflow={currentWorkflow} lang={lang} state={state} t={t} />
@@ -741,16 +729,17 @@ function LarkPanel({ actions, appUrl, authExpires, authMode, authUrl, board, boa
             t={t}
           />
         )}
-        <StepFooter activeStep={activeStep} hasIdentity={hasIdentity} setActiveStep={setActiveStep} t={t} />
+        <StepFooter activeStep={activeStep} setActiveStep={setActiveStep} t={t} />
       </section>
     </div>
   );
 }
 
-function StepFooter({ activeStep, hasIdentity, setActiveStep, t }) {
-  const previousStep = activeStep === "board" ? "identity" : activeStep === "identity" ? "workflow" : "";
-  const nextStep = activeStep === "workflow" ? "identity" : activeStep === "identity" ? "board" : "";
-  const canGoNext = activeStep === "workflow" || (activeStep === "identity" && hasIdentity);
+function StepFooter({ activeStep, setActiveStep, t }) {
+  const steps = ["workflow", "identity", "board", "agent"];
+  const currentIndex = steps.indexOf(activeStep);
+  const previousStep = steps[currentIndex - 1] || "";
+  const nextStep = steps[currentIndex + 1] || "";
   const className = previousStep && nextStep ? "stepFooter" : previousStep ? "stepFooter startOnly" : "stepFooter endOnly";
   return (
     <div className={className}>
@@ -760,7 +749,7 @@ function StepFooter({ activeStep, hasIdentity, setActiveStep, t }) {
         </button>
       ) : null}
       {nextStep ? (
-        <button className="primary" disabled={!canGoNext} type="button" onClick={() => setActiveStep(nextStep)}>
+        <button className="primary" type="button" onClick={() => setActiveStep(nextStep)}>
           {t.nextStep} →
         </button>
       ) : null}

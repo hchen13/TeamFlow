@@ -21,11 +21,13 @@ export const dynamic = "force-dynamic";
 
 export default async function Page({ searchParams }) {
   const params = await searchParams;
-  const initialTab = textParam(params?.tab) || "lark";
+  const legacyTab = textParam(params?.tab);
+  const initialMode = textParam(params?.mode) === "manage" ? "manage" : "config";
+  const initialStep = textParam(params?.step) || (legacyTab === "agent" ? "agent" : "");
   let codexSessions = [];
   let codexSessionError = false;
   let agentHealth = [];
-  if (initialTab === "agent") {
+  if (initialMode === "manage" || initialStep === "agent") {
     try {
       const codexState = await getCodexState();
       codexSessions = codexState.sessions || [];
@@ -66,8 +68,8 @@ export default async function Page({ searchParams }) {
       authUrl={textParam(params?.auth_url)}
       currentRoles={currentRoles}
       initialLang={textParam(params?.lang)}
-      initialStep={textParam(params?.step)}
-      initialTab={initialTab}
+      initialMode={initialMode}
+      initialStep={initialStep}
       message={textParam(params?.message)}
       error={textParam(params?.error)}
       state={state}

@@ -20,13 +20,15 @@ test("a configured workspace still starts on the board step", async () => {
   assert.equal(initialLarkStep("", true), "board");
 });
 
-test("an explicit step wins except when the board has no identity to use", async () => {
+test("every explicit setup step remains directly navigable", async () => {
   const { initialLarkStep } = await modulePromise;
 
   assert.equal(initialLarkStep("identity", false), "identity");
   assert.equal(initialLarkStep("workflow", true), "workflow");
   assert.equal(initialLarkStep("board", true), "board");
-  assert.equal(initialLarkStep("board", false), "workflow");
+  assert.equal(initialLarkStep("board", false), "board");
+  assert.equal(initialLarkStep("agent", false), "agent");
+  assert.equal(initialLarkStep("agent", true), "agent");
 });
 
 test("the checkbox submits enabled only when it is checked", async () => {

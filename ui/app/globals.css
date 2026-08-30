@@ -135,7 +135,7 @@ code {
 }
 
 .mobileTop,
-.mobileTabs {
+.mobileSetupSteps {
   display: none;
 }
 
@@ -297,6 +297,32 @@ code {
   border-color: var(--accent);
   background: var(--accent);
   color: white;
+}
+
+.rail .setupSteps {
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+
+.rail .setupSteps::before {
+  inset: 14px auto 14px 19px;
+  border-top: 0;
+  border-left: 1px solid var(--line-strong);
+}
+
+.rail .setupSteps button {
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  justify-items: start;
+  align-items: center;
+  min-height: 44px;
+  padding: 6px;
+  border-radius: 7px;
+  text-align: left;
+}
+
+.rail .setupSteps button.active {
+  background: var(--surface);
 }
 
 .panel {
@@ -1892,6 +1918,7 @@ button.accessCheck.failed:focus-visible {
 }
 
 .stepFooter {
+  width: min(980px, 100%);
   display: flex;
   justify-content: space-between;
   gap: 10px;
@@ -1909,6 +1936,12 @@ button.accessCheck.failed:focus-visible {
 .agentPage {
   display: grid;
   gap: 22px;
+  width: min(980px, 100%);
+}
+
+.agentStep {
+  display: grid;
+  gap: 14px;
   width: min(980px, 100%);
 }
 
@@ -2410,21 +2443,13 @@ button.accessCheck.failed:focus-visible {
     display: none;
   }
 
-  .mobileTabs {
+  .mobileSetupSteps {
     display: block;
     margin-bottom: 16px;
   }
 
-  .mobileTabs .navStack {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    padding: 3px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--rail);
-  }
-
-  .mobileTabs .navStack button {
-    text-align: center;
+  .mobileSetupSteps .setupSteps {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .pageHeader {
@@ -2437,10 +2462,6 @@ button.accessCheck.failed:focus-visible {
 
   .setupFlow {
     grid-template-columns: 1fr;
-  }
-
-  .setupSteps {
-    grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
   }
 
 }
