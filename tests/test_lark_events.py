@@ -3179,10 +3179,10 @@ class LarkEventsTest(unittest.TestCase):
             ).fetchone()
 
         self.assertEqual((saved["status"], saved["turn_id"], saved["turn_status"]), (
-            "retry", "turn_persisted", "completed"
+            "completed", "turn_persisted", "completed"
         ))
         self.assertIsNotNone(saved["started_at"])
-        self.assertIsNone(saved["completed_at"])
+        self.assertIsNotNone(saved["completed_at"])
         self.assertIn("transport=codex-ipc", output.getvalue())
 
     def test_daemon_cancels_delivery_when_live_task_no_longer_targets_the_agent(self):

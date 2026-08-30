@@ -706,7 +706,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             1,
         )
 
-    def test_direct_completed_turn_without_handling_retries_like_queued_turn(self) -> None:
+    def test_direct_completed_unclaimed_turn_consumes_delivery_once(self) -> None:
         context = self.context()
         save_task_snapshot(
             context,
@@ -741,8 +741,14 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             saved = conn.execute(
                 "SELECT status, turn_status, delivered_at FROM task_event_deliveries"
             ).fetchone()
-        self.assertEqual((saved["status"], saved["turn_status"]), ("retry", "completed"))
-        self.assertIsNone(saved["delivered_at"])
+        self.assertEqual((saved["status"], saved["turn_status"]), ("completed", "completed"))
+        self.assertIsNotNone(saved["delivered_at"])
+        self.runtime(
+            read_thread=lambda *_args, **_kwargs: self.fail(
+                "a normally completed notification must not be replayed after restart"
+            ),
+        ).reconcile(context)
+        self.assertEqual(claim_task_deliveries(context), [])
 
     def test_queueing_state_recovers_after_daemon_restart(self) -> None:
         context = self.context()
@@ -1481,7 +1487,7 @@ class ClaimedExecutionRecoveryTest(unittest.TestCase):
             ).fetchone()
         self.assertEqual(
             (completed["status"], completed["turn_id"], completed["turn_status"]),
-            ("retry", "turn_visible", "completed"),
+            ("completed", "turn_visible", "completed"),
         )
         self.assertFalse(task_delivery_turn_is_current(
             context,

@@ -313,7 +313,6 @@ class DeliveryRuntime:
         waiting_permission = False
         waiting_session = False
         claimed_turn_ended = False
-        completed_without_handling = False
         turn_reconciling = False
         try:
             self.log_dispatch(
@@ -466,29 +465,8 @@ class DeliveryRuntime:
                 )
             elif turn_reconciling:
                 error = ValueError(str(result.get("error") or status))
-            elif (
-                result.get("ok")
-                and status in {"completed", "success"}
-                and not active_execution
-                and task_delivery_is_current(
-                    context,
-                    delivery_id=int(delivery["id"]),
-                )
-                and not (
-                    started_turn_id
-                    and task_delivery_turn_acknowledged(
-                        context,
-                        delivery_id=int(delivery["id"]),
-                        turn_id=started_turn_id,
-                    )
-                )
-            ):
-                error = ValueError(
-                    "Codex turn ended without accepting or advancing "
-                    "the TeamFlow task"
-                )
-                completed_without_handling = True
-                retry = self._accepted_turn_retry_available(context, delivery)
+            # A normally completed notification is consumed even when the Agent
+            # intentionally leaves the card unchanged. Claimed work is handled above.
             elif not result.get("ok"):
                 retry = (
                     status in {"cancelled", "canceled", "interrupted"}
@@ -534,7 +512,6 @@ class DeliveryRuntime:
                 or error
                 and (turn_started or acceptance_unknown)
                 and not claimed_turn_ended
-                and not completed_without_handling
             )
             if canceled:
                 pass
@@ -1125,36 +1102,8 @@ class DeliveryRuntime:
                         attempt=int(delivery["attempts"]),
                     )
                     continue
-                if task_delivery_is_current(
-                    context,
-                    delivery_id=int(delivery["id"]),
-                ):
-                    error = ValueError(
-                        "Codex turn ended without accepting or advancing "
-                        "the TeamFlow task"
-                    )
-                    retry = self._accepted_turn_retry_available(context, delivery)
-                    finish_task_delivery(
-                        context,
-                        delivery_id=int(delivery["id"]),
-                        result={"ok": False, "status": status},
-                        error=error,
-                        retry=retry,
-                    )
-                    self.log_dispatch(
-                        context,
-                        "retry" if retry else "failed",
-                        event_id=delivery["source_event_id"],
-                        task=task,
-                        record_id=delivery["record_id"],
-                        target=target,
-                        agent=agent,
-                        session=session_id,
-                        turn=str(delivery["turn_id"]),
-                        reason=str(error),
-                        attempt=int(delivery["attempts"]) if retry else None,
-                    )
-                    continue
+                # A materialized turn that completed normally consumed the event;
+                # card state changes are not required acknowledgments.
                 finish_task_delivery(
                     context,
                     delivery_id=int(delivery["id"]),
