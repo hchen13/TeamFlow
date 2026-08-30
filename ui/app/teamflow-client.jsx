@@ -656,7 +656,13 @@ export default function TeamFlowClient({ actions, authExpires, authUrl, boardUrl
           {noticeVisible && message ? <p className={error ? "banner error" : "banner"}>{message}</p> : null}
 
           {mode === "manage" ? (
-            <OperationsPanel agents={currentAgents} lang={lang} runtimeBySession={runtimeBySession} />
+            <OperationsPanel
+              agents={currentAgents}
+              lang={lang}
+              runtimeBySession={runtimeBySession}
+              workspaceName={state.workspace?.display_name}
+              workspaceRoot={state.workspace_root}
+            />
           ) : activeStep !== "agent" ? (
             <ConfigurationPanel
               actions={actions}

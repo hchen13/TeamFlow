@@ -82,6 +82,29 @@ class SessionKeeperTest(unittest.TestCase):
         self.assertEqual(snapshot["registered_sessions"], 2)
         self.assertNotIn("loaded_sessions", snapshot)
 
+    def test_snapshot_groups_follow_declarations_by_workspace_without_exposing_ids(self):
+        keep = SessionKeeper(
+            desired_sessions=lambda: {
+                "/workspace/a": {"session_a", "session_b"},
+                "/workspace/b": {"session_c"},
+            },
+            connect=lambda: FakeConnection(),
+            stopping=threading.Event(),
+        )
+
+        keep._tick()
+        snapshot = keep.snapshot()
+
+        self.assertEqual(snapshot["following"], 3)
+        self.assertEqual(
+            snapshot["by_workspace"],
+            {
+                "/workspace/a": {"registered": 2, "following": 2},
+                "/workspace/b": {"registered": 1, "following": 1},
+            },
+        )
+        self.assertNotIn("session_a", json.dumps(snapshot))
+
     def test_the_first_connection_follows_only_the_registered_sessions(self):
         keep, _, connection = keeper({"session_a", "session_b"})
 

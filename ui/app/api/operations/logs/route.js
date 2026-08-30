@@ -1,6 +1,8 @@
 import { open, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
+
+import logScope from "../../../../lib/operations-log.cjs";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -12,6 +14,9 @@ const INITIAL_LINES = 200;
 export async function GET(request) {
   const encoder = new TextEncoder();
   const logPath = join(process.env.TEAMFLOW_HOME || join(homedir(), ".teamflow"), "daemon.log");
+  const url = new URL(request.url);
+  const scope = url.searchParams.get("scope") === "global" ? "global" : "workspace";
+  const workspaceAliases = scope === "workspace" ? currentWorkspaceAliases(url) : [];
   let cleanup;
 
   const stream = new ReadableStream({
@@ -21,9 +26,13 @@ export async function GET(request) {
       let carry = "";
       let reading = false;
 
-      const send = (lines) => {
-        if (!closed && lines.length) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ lines })}\n\n`));
+      const send = (lines, limit) => {
+        let visible = scope === "global"
+          ? lines
+          : lines.filter((line) => logScope.visibleForWorkspace(line, workspaceAliases));
+        if (limit) visible = visible.slice(-limit);
+        if (!closed && visible.length) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ lines: visible })}\n\n`));
         }
       };
 
@@ -36,7 +45,7 @@ export async function GET(request) {
           if (start > 0) lines.shift();
           if (lines.at(-1) === "") lines.pop();
           offset = snapshot.size;
-          send(lines.slice(-INITIAL_LINES));
+          send(lines, INITIAL_LINES);
         } catch (error) {
           if (error.code !== "ENOENT") send([`TeamFlow log unavailable: ${error.message}`]);
         }
@@ -92,6 +101,11 @@ export async function GET(request) {
       "Content-Type": "text/event-stream"
     }
   });
+}
+
+function currentWorkspaceAliases(url) {
+  const root = resolve(process.env.TEAMFLOW_WORKSPACE || "..");
+  return [...new Set([url.searchParams.get("workspace"), root, basename(root)].filter(Boolean))];
 }
 
 async function readRange(path, start, length) {

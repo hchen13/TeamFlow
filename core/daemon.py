@@ -272,7 +272,7 @@ class TeamFlowDaemon:
             acknowledge_delivery=acknowledge_task_delivery_turn,
         )
         self.session_keeper = SessionKeeper(
-            desired_sessions=self._keeper_sessions,
+            desired_sessions=self._keeper_session_groups,
             connect=lambda: CodexIpcConnection.connect(lightweight=True),
             stopping=self.stopping,
             emit_log=lambda message, fields: _emit_log(message, fields=fields),
@@ -387,13 +387,10 @@ class TeamFlowDaemon:
                 if workspace_enabled(root)
             ]
 
-    def _keeper_sessions(self) -> set[str]:
+    def _keeper_session_groups(self) -> dict[str, set[str]]:
         with self.sync_lock:
             roots = [root for root in self.routes if workspace_enabled(root)]
-        sessions: set[str] = set()
-        for root in roots:
-            sessions.update(registered_codex_sessions(root))
-        return sessions
+        return {root: registered_codex_sessions(root) for root in roots}
 
     def _reserved_delivery_sessions(self) -> set[str]:
         reserved: set[str] = set()

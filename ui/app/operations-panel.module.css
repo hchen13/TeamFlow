@@ -5,7 +5,7 @@
 }
 
 .statusPanel,
-.agentPanel,
+.projectPanel,
 .logPanel {
   overflow: hidden;
   border: 1px solid var(--line);
@@ -14,7 +14,8 @@
 }
 
 .sectionHeader,
-.compactHeader,
+.projectHeader,
+.agentHeader,
 .logHeader {
   display: flex;
   align-items: center;
@@ -84,9 +85,10 @@
   opacity: 0.6;
 }
 
-.metrics {
+.globalMetrics,
+.projectMetrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .metric {
@@ -131,22 +133,33 @@
   color: var(--danger);
 }
 
-.compactHeader,
+.projectHeader,
+.agentHeader,
 .logHeader {
   min-height: 48px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--line);
 }
 
-.compactHeader h3,
+.projectHeader h3,
+.agentHeader h3,
 .logHeader h3 {
   margin: 0;
   font-size: 14px;
 }
 
-.compactHeader > span {
+.projectHeader > div {
+  display: grid;
+  gap: 4px;
+}
+
+.agentHeader > span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.projectMetrics {
+  border-bottom: 1px solid var(--line);
 }
 
 .agentList {
@@ -221,6 +234,39 @@
   gap: 8px;
 }
 
+.logControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scopeSwitch {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid #53605a;
+  border-radius: 7px;
+}
+
+.scopeSwitch button {
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 0;
+  border-right: 1px solid #53605a;
+  background: transparent;
+  color: #b8c3bd;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.scopeSwitch button:last-child {
+  border-right: 0;
+}
+
+.scopeSwitch button[aria-pressed="true"] {
+  background: #e7f2ec;
+  color: #173d30;
+}
+
 .logButton {
   border-color: #53605a;
   background: transparent;
@@ -245,7 +291,8 @@
 }
 
 @media (max-width: 800px) {
-  .metrics {
+  .globalMetrics,
+  .projectMetrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -269,7 +316,8 @@
     flex-direction: column;
   }
 
-  .metrics {
+  .globalMetrics,
+  .projectMetrics {
     grid-template-columns: 1fr;
   }
 
@@ -282,5 +330,14 @@
     align-items: start;
     flex-direction: column;
     gap: 7px;
+  }
+
+  .logHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .logControls {
+    justify-content: space-between;
   }
 }

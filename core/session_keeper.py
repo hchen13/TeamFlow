@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Mapping
 from typing import Any, Callable
 
 
@@ -25,7 +26,7 @@ class SessionKeeper:
     def __init__(
         self,
         *,
-        desired_sessions: Callable[[], set[str]],
+        desired_sessions: Callable[[], set[str] | Mapping[str, set[str]]],
         connect: Callable[[], Any],
         stopping: threading.Event,
         emit_log: Callable[[str, dict[str, Any]], None] | None = None,
@@ -40,6 +41,7 @@ class SessionKeeper:
         self.connection: Any | None = None
         self.following: set[str] = set()
         self.desired: set[str] = set()
+        self.desired_by_workspace: dict[str, set[str]] = {}
         self.connects = 0
         self.last_error: str | None = None
         self.closed = False
@@ -73,6 +75,11 @@ class SessionKeeper:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            following = set(self.following)
+            desired_by_workspace = {
+                root: set(sessions)
+                for root, sessions in self.desired_by_workspace.items()
+            }
             return {
                 "connected": self.connection is not None,
                 # These are follow declarations, not proof that Desktop currently has the
@@ -83,6 +90,13 @@ class SessionKeeper:
                 "desired": len(self.desired),
                 "connects": self.connects,
                 "last_error": self.last_error,
+                "by_workspace": {
+                    root: {
+                        "registered": len(sessions),
+                        "following": len(sessions & following),
+                    }
+                    for root, sessions in sorted(desired_by_workspace.items())
+                },
             }
 
     def _run(self) -> None:
@@ -107,9 +121,10 @@ class SessionKeeper:
         if self.dirty or time.monotonic() >= self.refresh_at:
             self.dirty = False
             self.refresh_at = time.monotonic() + _REFRESH_INTERVAL
-            refreshed = self._read_desired()
+            refreshed, by_workspace = self._read_desired()
             with self.lock:
                 self.desired = refreshed
+                self.desired_by_workspace = by_workspace
         with self.lock:
             desired = set(self.desired)
         if self.connection is None and not self._open():
@@ -120,12 +135,31 @@ class SessionKeeper:
         self._drain()
         return 0.0
 
-    def _read_desired(self) -> set[str]:
+    def _read_desired(self) -> tuple[set[str], dict[str, set[str]]]:
         try:
-            return {str(s).strip() for s in self.desired_sessions() if str(s or "").strip()}
+            supplied = self.desired_sessions()
+            if isinstance(supplied, Mapping):
+                groups = {
+                    str(root): {
+                        str(session).strip()
+                        for session in sessions
+                        if str(session or "").strip()
+                    }
+                    for root, sessions in supplied.items()
+                }
+                return set().union(*groups.values()) if groups else set(), groups
+            return {
+                str(session).strip()
+                for session in supplied
+                if str(session or "").strip()
+            }, {}
         except Exception as error:
             self._fail(error)
-            return set(self.desired)
+            with self.lock:
+                return set(self.desired), {
+                    root: set(sessions)
+                    for root, sessions in self.desired_by_workspace.items()
+                }
 
     def _open(self) -> bool:
         try:

@@ -8,7 +8,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --test lib/codex-ipc.test.cjs lib/setup-steps.test.cjs"
+    "test": "node --test lib/codex-ipc.test.cjs lib/operations-log.test.cjs lib/setup-steps.test.cjs"
   },
   "dependencies": {
     "@larksuite/cli": "1.0.0",

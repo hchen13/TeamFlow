@@ -129,6 +129,8 @@ class DaemonMonitor:
                 routes = [
                     {
                         "workspace_root": root,
+                        "workspace_name": context.workspace_name or os.path.basename(root),
+                        "workflow_key": context.workflow_key,
                         "app_id": context.app_id,
                         "file_token": context.file_token,
                         "table_id": context.table_id,
